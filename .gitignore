@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Runtime/output artifacts (if copied here later)
+*.log
+*.tmp
+
+# Local export/state directories (server runtime)
+remarkable-exports/
+activity/

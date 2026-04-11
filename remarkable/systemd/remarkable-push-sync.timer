@@ -1,0 +1,11 @@
+[Unit]
+Description=Run reMarkable push sync every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=1min
+Unit=remarkable-push-sync.service
+
+[Install]
+WantedBy=timers.target

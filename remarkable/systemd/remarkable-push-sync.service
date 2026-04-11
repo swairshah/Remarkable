@@ -1,0 +1,11 @@
+[Unit]
+Description=Push reMarkable diffs to remote server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/root/bin/remarkable-push-sync.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
