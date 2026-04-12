@@ -4,9 +4,9 @@
 # Assumes `ssh swair@swair.dev` works (override with SERVER_HOST=...).
 #
 # Files shipped:
-#   server/bin/*.sh, *.py        -> ~/bin/
-#   server/nginx/default.conf    -> ~/notes-server/default.conf
-#   server/web/raw/index.html    -> ~/notes-server/raw/index.html
+#   server/bin/*.sh, *.py, *.js, *.ts -> ~/bin/
+#   server/nginx/default.conf          -> ~/notes-server/default.conf
+#   server/web/raw/index.html          -> ~/notes-server/raw/index.html
 #
 # Flags:
 #   --run   after deploying, trigger a manual post-sync export run
@@ -31,8 +31,11 @@ echo "[deploy-server] target=$HOST"
 ssh "$HOST" 'mkdir -p ~/bin ~/notes-server/raw'
 
 echo "[deploy-server] scp server/bin scripts"
-scp -q "$HERE"/server/bin/*.sh "$HERE"/server/bin/*.py "$HOST:bin/"
-ssh "$HOST" 'chmod +x ~/bin/remarkable-post-sync.sh ~/bin/remarkable-post-sync-by-name.sh ~/bin/remarkable-activity-diff.py 2>/dev/null || true'
+scp -q "$HERE"/server/bin/*.sh "$HERE"/server/bin/*.py "$HERE"/server/bin/*.js "$HERE"/server/bin/*.ts "$HOST:bin/"
+ssh "$HOST" 'chmod +x ~/bin/remarkable-post-sync.sh ~/bin/remarkable-post-sync-by-name.sh ~/bin/remarkable-activity-diff.py ~/bin/remarkable-activity-agent-hook.sh 2>/dev/null || true'
+
+echo "[deploy-server] ensure node runtime present"
+ssh "$HOST" 'command -v node >/dev/null 2>&1 || (sudo apt-get update -y >/dev/null && sudo apt-get install -y nodejs >/dev/null)'
 
 echo "[deploy-server] scp nginx config"
 scp -q "$HERE"/server/nginx/default.conf "$HOST:notes-server/default.conf"

@@ -51,6 +51,7 @@ echo "[$(date -Is)] export start uuid_arg=$UUID_ARG resolved_uuid=${UUID:-none} 
 
 if [[ -z "${UUID:-}" ]]; then
   echo "[$(date -Is)] no matching document found for visibleName='$NAME'" >> "$LOG"
+  /home/swair/bin/remarkable-activity-agent-hook.sh "Summarize reMarkable activity changes since last sync." >> /home/swair/remarkable-exports/activity-agent/run.log 2>&1 || true
   /home/swair/bin/remarkable-activity-diff.py >> /home/swair/remarkable-exports/activity/run.log 2>&1 || true
   exit 0
 fi
@@ -61,6 +62,7 @@ SRC_META="$BASE/$UUID.metadata"
 
 if [[ ! -f "$SRC_CONTENT" || ! -d "$SRC_THUMBS" ]]; then
   echo "[$(date -Is)] missing content or thumbnails for $UUID" >> "$LOG"
+  /home/swair/bin/remarkable-activity-agent-hook.sh "Summarize reMarkable activity changes since last sync." >> /home/swair/remarkable-exports/activity-agent/run.log 2>&1 || true
   /home/swair/bin/remarkable-activity-diff.py >> /home/swair/remarkable-exports/activity/run.log 2>&1 || true
   exit 0
 fi
@@ -117,7 +119,10 @@ else
   echo "[$(date -Is)] skipped pdf (no img2pdf)" >> "$LOG"
 fi
 
-# Activity diff report (since previous sync)
+# TS activity agent (preferred)
+/home/swair/bin/remarkable-activity-agent-hook.sh "Summarize reMarkable activity changes since last sync." >> /home/swair/remarkable-exports/activity-agent/run.log 2>&1 || true
+
+# Legacy python activity diff (fallback / audit)
 /home/swair/bin/remarkable-activity-diff.py >> /home/swair/remarkable-exports/activity/run.log 2>&1 || true
 
 echo "[$(date -Is)] export done" >> "$LOG"

@@ -90,9 +90,12 @@ devices/remarkable/
 │       └── remarkable-push-sync.timer       cadence (OnUnitActiveSec=)
 └── server/                                  ── runs on swair.dev ──
     ├── bin/
-    │   ├── remarkable-post-sync-by-name.sh  pick latest doc by visibleName, export
-    │   ├── remarkable-post-sync.sh          (older by-UUID variant)
-    │   └── remarkable-activity-diff.py      activity analysis helper
+    │   ├── remarkable-post-sync-by-name.sh    pick latest doc by visibleName, export
+    │   ├── remarkable-post-sync.sh            export + activity hooks (active)
+    │   ├── remarkable-activity-agent.ts       TS source (LLM summary + page publish)
+    │   ├── remarkable-activity-agent.js       runtime JS deployed to server
+    │   ├── remarkable-activity-agent-hook.sh  hook entrypoint (supports -p prompt)
+    │   └── remarkable-activity-diff.py        legacy python diff helper
     ├── nginx/
     │   └── default.conf                     notes_app nginx config
     └── web/
@@ -111,6 +114,7 @@ devices/remarkable/
 | URL routing under `blog.swair.dev` | `server/nginx/default.conf` | `scripts/deploy-server.sh` (auto-reloads nginx) |
 | Viewer look/feel, shortcuts, sidebar | `server/web/raw/index.html` | `scripts/deploy-server.sh` |
 | Add a new content path (e.g. `/photos/`) | new `location` in `default.conf` **and** add a `-v` mount to the `docker run` in this README | redeploy + recreate `notes_app` |
+| Activity summary page prompt/model/output | `server/bin/remarkable-activity-agent-hook.sh` (`-p`, `MODEL`, `OUTPUT_HTML`) | `scripts/deploy-server.sh` |
 
 ## Deploy
 
@@ -188,6 +192,8 @@ makes `notes_app` answer to that name on the `website_network` docker network.
 - Source on reMarkable: `/home/root/.local/share/remarkable/xochitl/`
 - Destination on server: `/home/swair/remarkable-backup/xochitl/`
 - Export output on server: `/home/swair/remarkable-exports/`
+- Activity page output (default): `/home/swair/notes/index.html`
+- Activity state dir: `/home/swair/remarkable-exports/activity-agent/`
 - Viewer URL: `https://blog.swair.dev/raw/`
 
 ## Test manually
@@ -207,4 +213,5 @@ curl -sI https://blog.swair.dev/raw/
 
 - reMarkable sync log: `/home/root/.local/state/remarkable-sync/push.log`
 - Server export log: `/home/swair/remarkable-exports/<DocName>/export.log`
+- TS activity hook log: `/home/swair/remarkable-exports/activity-agent/run.log`
 - notes_app nginx log: `docker logs notes_app`
