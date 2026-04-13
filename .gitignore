@@ -8,3 +8,6 @@
 # Local export/state directories (server runtime)
 remarkable-exports/
 activity/
+
+# Environment files
+.env
