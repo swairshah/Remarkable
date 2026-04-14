@@ -312,14 +312,20 @@ nav{padding:20px 24px;display:flex;justify-content:space-between;align-items:cen
 #sidebar.collapsed{width:0;padding:0;border-right:none;overflow:hidden}
 .side-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .side-title{color:var(--bright);font-size:14px}
-.toggle{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:3px 8px;cursor:pointer}
+.toggle{background:var(--bg2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px 10px;cursor:pointer;font-family:inherit;font-size:13px;line-height:1}
+main .toggle{display:inline-flex;align-items:center;margin-bottom:16px}
 .hist-list{list-style:none}.hist-item{padding:10px 2px;border-bottom:1px solid var(--border)}.hist-time{color:var(--bright);font-size:12px}.hist-meta{color:var(--muted);font-size:11px}.hist-text{color:var(--text);font-size:12px;margin-top:4px}
-main{flex:1;max-width:860px;padding:24px 32px 56px}h1{color:var(--bright);font-size:22px;font-weight:500;margin-bottom:8px}.meta{color:var(--muted);font-size:13px;margin-bottom:24px}
+main{flex:1;max-width:860px;padding:24px 32px 56px}h1{color:var(--bright);font-size:22px;font-weight:500;margin-bottom:8px;clear:both}.meta{color:var(--muted);font-size:13px;margin-bottom:24px}
 h2{color:var(--bright);font-size:18px;font-weight:500;margin:24px 0 12px}pre{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px;white-space:pre-wrap;overflow:auto}
 ul{list-style:none}
 .item{padding:14px 0;border-bottom:1px solid var(--border)}.item:last-child{border-bottom:none}.title{color:var(--bright)}
 code{background:var(--bg2);border:1px solid var(--border);padding:2px 6px;border-radius:4px;color:var(--muted);font-size:12px}.bits{margin-top:8px;padding-left:16px}.bits li{list-style:disc;color:var(--muted)}
-@media (max-width: 900px){#sidebar{position:fixed;top:70px;left:0;bottom:0;background:var(--bg);z-index:10}main{padding:20px 18px 40px}}
+@media (max-width: 900px){
+  nav{padding:14px 18px}
+  #sidebar{position:fixed;top:64px;left:0;bottom:0;background:var(--bg);z-index:10}
+  main{padding:16px 18px 40px}
+  main .toggle{display:block;width:auto;margin:0 0 20px;padding:8px 12px}
+}
 </style>
 </head><body>
 <nav><a class="brand" href="/">swair.dev</a></nav>
