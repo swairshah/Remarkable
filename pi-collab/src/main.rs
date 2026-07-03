@@ -576,7 +576,12 @@ fn main() -> std::process::ExitCode {
         }
     };
     let mut pen = Pen::open();
-    let mut direct_pen = pen.is_some();
+    /* the digitizer is authoritative whenever it's present: it carries
+     * pressure and the eraser, which AppLoad's pen events don't. We only
+     * ink via AppLoad when there's no digitizer at all (e.g. the preview
+     * harness). pi-collab is meant to run fullscreen — see the note below on
+     * why we don't try to auto-detect windowed mode. */
+    let direct_pen = pen.is_some();
 
     let now = Instant::now();
     let mut app = App {
@@ -668,20 +673,15 @@ fn main() -> std::process::ExitCode {
                     Event::Touch { phase, x, y, .. } => app.touch(phase, x, y),
                     Event::Pen { phase, x, y, .. } => {
                         app.last_pen = Some(Instant::now());
-                        if direct_pen {
-                            /* digitizer is authoritative; use AppLoad's pen
-                             * only to detect windowed mode (coords mismatch) */
-                            if phase == Phase::Press {
-                                let mism = pen.as_ref().is_some_and(|p| {
-                                    (p.sx != 0 || p.sy != 0)
-                                        && (x - p.sx).abs() + (y - p.sy).abs() > 150
-                                });
-                                if mism {
-                                    println!("pi-collab: windowed? using AppLoad pen");
-                                    direct_pen = false;
-                                }
-                            }
-                        }
+                        /* With a digitizer present, AppLoad's pen events are a
+                         * lower-fidelity mirror of what we already read from
+                         * the hardware (no pressure, no eraser) — ignore them.
+                         * We deliberately do NOT auto-switch to them for
+                         * "windowed mode": the old coordinate-mismatch test
+                         * false-fired on a stale digitizer sample during a
+                         * fast pen-down and permanently dropped pressure + the
+                         * eraser. pi-collab is fullscreen; only when there's no
+                         * digitizer at all do we ink from AppLoad. */
                         if !direct_pen {
                             let ph = match phase {
                                 Phase::Press => PenPhase::Press,
