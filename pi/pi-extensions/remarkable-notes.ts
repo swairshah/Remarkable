@@ -106,15 +106,31 @@ function fmtDate(ms?: string): string {
   return Number.isNaN(d.getTime()) ? "?" : d.toISOString().slice(0, 16).replace("T", " ");
 }
 
+interface DocMetaFull extends DocMeta {
+  lastOpened?: string;
+}
+
+function loadAllWithOpened(): Map<string, DocMetaFull> {
+  const docs = loadAll() as Map<string, DocMetaFull>;
+  for (const [id, doc] of docs) {
+    const md = readJson(path.join(XOCHITL, `${id}.metadata`));
+    if (md?.lastOpened) doc.lastOpened = md.lastOpened;
+  }
+  return docs;
+}
+
 function resolveDoc(
   docs: Map<string, DocMeta>,
   idOrName: string,
 ): { doc?: DocMeta; candidates?: DocMeta[] } {
-  if (docs.has(idOrName)) return { doc: docs.get(idOrName) };
+  if (docs.has(idOrName)) return { doc: docs.get(idOrName) }; // exact uuid: trash allowed
   const q = idOrName.toLowerCase();
-  const hits = [...docs.values()].filter(
+  let hits = [...docs.values()].filter(
     (d) => d.type === "DocumentType" && d.visibleName.toLowerCase().includes(q),
   );
+  // prefer live documents; only fall back to trash when nothing else matches
+  const live = hits.filter((d) => d.parent !== "trash");
+  if (live.length > 0) hits = live;
   if (hits.length === 1) return { doc: hits[0] };
   const exact = hits.filter((d) => d.visibleName.toLowerCase() === q);
   if (exact.length === 1) return { doc: exact[0] };
@@ -854,6 +870,14 @@ e-ink display). Adjust accordingly:
 - remarkable_read returns handwritten pages as rendered PNG images in the
   tool result - you can SEE and read the handwriting directly. Use it when
   the user asks about anything they wrote by hand.
+- When the user says "this notebook", "the open notebook", or refers to what
+  they are looking at, call remarkable_active first: it returns the document
+  they most recently opened. Do not guess and do not create a new document
+  when the user means an existing one.
+- remarkable_append adds a typed-text page to an EXISTING notebook. The
+  notebook must be CLOSED on the tablet (user on the Files screen): xochitl
+  overwrites on-disk changes to open documents when it saves. Ask the user
+  to close it first, then call with confirmClosed=true.
 - remarkable_write creates notes/documents. When the user asks you to "add
   a note" or save text for them, use the default 'text-notebook' format: it
   produces a real notebook page of EDITABLE TYPED TEXT (like they typed it
@@ -914,6 +938,167 @@ export default function (pi: ExtensionAPI) {
       const more = rows.length > shown.length ? `\n... and ${rows.length - shown.length} more (raise limit or refine query)` : "";
       return {
         content: [{ type: "text", text: lines.join("\n") + more || "no matches" }],
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "remarkable_active",
+    label: "reMarkable: active document",
+    description:
+      "Returns the document the user most recently opened on the tablet - use this " +
+      "when the user says 'this notebook' / 'the open notebook' or refers to what " +
+      "they are (or were just) looking at.",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      const docs = loadAllWithOpened();
+      const sorted = [...docs.values()]
+        .filter(
+          (d) =>
+            d.type === "DocumentType" &&
+            d.parent !== "trash" &&
+            d.lastOpened &&
+            Number(d.lastOpened) > 0,
+        )
+        .sort((a, b) => Number(b.lastOpened) - Number(a.lastOpened));
+      if (!sorted.length) {
+        return { content: [{ type: "text", text: "No document has been opened yet." }] };
+      }
+      const top = sorted[0];
+      const ageMin = Math.round((Date.now() - Number(top.lastOpened)) / 60000);
+      return {
+        content: [{
+          type: "text",
+          text:
+            `Most recently opened: "${top.visibleName}" (${fullPath(top, docs)}, id=${top.id}, ` +
+            `${top.fileType ?? "notebook"}, ${top.pageCount ?? "?"} pages) - opened ~${ageMin} min ago. ` +
+            `It may still be on screen; if you plan to modify it, ask the user to close it first.`,
+        }],
+        details: { id: top.id, name: top.visibleName, lastOpened: top.lastOpened },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "remarkable_append",
+    label: "reMarkable: append page",
+    description:
+      "Append a new page of EDITABLE TYPED TEXT to an EXISTING notebook. The notebook " +
+      "must be CLOSED on the tablet (user on the Files screen) - xochitl overwrites " +
+      "on-disk changes to open documents. Ask the user to close it, then pass " +
+      "confirmClosed=true. The page appears after the pi terminal is closed.",
+    parameters: {
+      type: "object",
+      properties: {
+        document: { type: "string", description: "Target notebook uuid or (partial) name" },
+        text: { type: "string", description: "Plain text for the new page (line breaks preserved)" },
+        confirmClosed: {
+          type: "boolean",
+          description: "Set true only after the user confirmed the notebook is closed",
+        },
+      },
+      required: ["document", "text"],
+    },
+    async execute(_id: string, params: any) {
+      const docs = loadAllWithOpened();
+      const { doc, candidates } = resolveDoc(docs, params.document);
+      if (!doc) {
+        const c = (candidates ?? []).map((d) => `${fullPath(d, docs)}  id=${d.id}`).join("\n");
+        return {
+          content: [{ type: "text", text: candidates?.length ? `Ambiguous or not found. Candidates:\n${c}` : "No matching document." }],
+          isError: true,
+        };
+      }
+      if (doc.parent === "trash") {
+        return {
+          content: [{
+            type: "text",
+            text: `"${doc.visibleName}" is in the TRASH. Not modifying it - ask the user whether to restore it on the tablet first or create a new notebook instead.`,
+          }],
+          isError: true,
+        };
+      }
+      if (doc.fileType && doc.fileType !== "notebook") {
+        return {
+          content: [{ type: "text", text: `"${doc.visibleName}" is a ${doc.fileType}; pages can only be appended to notebooks.` }],
+          isError: true,
+        };
+      }
+      if (!params.confirmClosed) {
+        return {
+          content: [{
+            type: "text",
+            text:
+              `SAFETY STOP: appending while "${doc.visibleName}" is open on the tablet can lose the change ` +
+              `(xochitl saves its in-memory copy over the files). Ask the user to close it (back to the Files ` +
+              `screen), then retry with confirmClosed=true.`,
+          }],
+          isError: true,
+        };
+      }
+
+      const contentPath = path.join(XOCHITL, `${doc.id}.content`);
+      const content = readJson(contentPath);
+      if (!content?.cPages?.pages?.length) {
+        return {
+          content: [{ type: "text", text: `"${doc.visibleName}" has an unsupported .content layout (no cPages); not touching it.` }],
+          isError: true,
+        };
+      }
+
+      const pageId = randomUUID();
+      const authorUuid = randomUUID();
+      const rm = makeTextRm(params.text, authorUuid);
+      fs.mkdirSync(path.join(XOCHITL, doc.id), { recursive: true });
+      fs.writeFileSync(path.join(XOCHITL, doc.id, `${pageId}.rm`), rm);
+
+      // next CRDT timestamp counter and ordering key after the last page
+      const pages = content.cPages.pages;
+      let maxCounter = 0;
+      for (const p of pages) {
+        for (const ts of [p.idx?.timestamp, p.template?.timestamp]) {
+          const m = /^(\d+):(\d+)$/.exec(ts ?? "");
+          if (m) maxCounter = Math.max(maxCounter, Number(m[2]));
+        }
+      }
+      const lastIdx: string = pages[pages.length - 1].idx?.value ?? "ba";
+      const nextIdx =
+        lastIdx.charCodeAt(lastIdx.length - 1) < 0x7a
+          ? lastIdx.slice(0, -1) + String.fromCharCode(lastIdx.charCodeAt(lastIdx.length - 1) + 1)
+          : lastIdx + "b";
+      const ts = `1:${maxCounter + 1}`;
+      pages.push({
+        id: pageId,
+        idx: { timestamp: ts, value: nextIdx },
+        template: { timestamp: ts, value: "Blank" },
+      });
+      content.pageCount = (content.pageCount ?? pages.length - 1) + 1;
+      if (Array.isArray(content.cPages.uuids)) {
+        content.cPages.uuids.push({ first: authorUuid, second: 1 });
+      }
+      fs.writeFileSync(contentPath, JSON.stringify(content, null, 2));
+      try {
+        fs.appendFileSync(path.join(XOCHITL, `${doc.id}.pagedata`), "Blank\n");
+      } catch {
+        /* pagedata optional */
+      }
+      const mdPath = path.join(XOCHITL, `${doc.id}.metadata`);
+      const md = readJson(mdPath);
+      if (md) {
+        md.lastModified = String(Date.now());
+        fs.writeFileSync(mdPath, JSON.stringify(md, null, 2));
+      }
+      const ok = armUiRefresh();
+      return {
+        content: [{
+          type: "text",
+          text:
+            `Appended a typed-text page to "${doc.visibleName}" (now ${content.pageCount} pages). ` +
+            (ok
+              ? "It will show up right after the user closes this pi terminal (the UI reloads itself)."
+              : "It appears after the next UI restart."),
+        }],
+        details: { id: doc.id, pageId },
       };
     },
   });
