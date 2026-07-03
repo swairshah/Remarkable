@@ -2,8 +2,8 @@
 set -euo pipefail
 
 DOC_NAME="${1:-Notebook}"
-BASE="/home/swair/remarkable-backup/xochitl"
-OUT_BASE="/home/swair/remarkable-exports"
+BASE="${REMARKABLE_BASE:-$HOME/remarkable-backup/xochitl}"
+OUT_BASE="${REMARKABLE_OUT:-$HOME/remarkable-exports}"
 
 UUID="$(python3 - "$BASE" "$DOC_NAME" <<'PY'
 import json,glob,os,sys

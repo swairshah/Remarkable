@@ -2,9 +2,9 @@
 set -eu
 
 SRC="/home/root/.local/share/remarkable/xochitl/"
-DEST_USER="swair"
-DEST_HOST="swair.dev"
-DEST_DIR="/home/swair/remarkable-backup/xochitl/"
+DEST_USER="exedev"
+DEST_HOST="remarkable.exe.xyz"
+DEST_DIR="/home/exedev/remarkable-backup/xochitl/"
 KEY="/home/root/.ssh/id_sync_dropbear_ed25519"
 SSH_BIN="/usr/bin/ssh"
 RSYNC_BIN="/usr/bin/rsync"
@@ -12,7 +12,7 @@ LOG_DIR="/home/root/.local/state/remarkable-sync"
 LOG_FILE="$LOG_DIR/push.log"
 
 # Post-sync hook on server
-HOOK_CMD="/home/swair/bin/remarkable-post-sync.sh auto Notebook"
+HOOK_CMD="/home/exedev/bin/remarkable-post-sync.sh auto Notebook"
 
 mkdir -p "$LOG_DIR"
 

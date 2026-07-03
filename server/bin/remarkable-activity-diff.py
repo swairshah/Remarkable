@@ -4,8 +4,8 @@ import hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 
-BASE = Path('/home/swair/remarkable-backup/xochitl')
-OUT = Path('/home/swair/remarkable-exports/activity')
+BASE = Path.home() / 'remarkable-backup' / 'xochitl'
+OUT = Path.home() / 'remarkable-exports' / 'activity'
 STATE = OUT / 'last_state.json'
 LATEST = OUT / 'latest.txt'
 

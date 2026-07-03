@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE="/home/swair/remarkable-backup/xochitl"
-OUT_BASE="/home/swair/remarkable-exports"
+BASE="${REMARKABLE_BASE:-$HOME/remarkable-backup/xochitl}"
+OUT_BASE="${REMARKABLE_OUT:-$HOME/remarkable-exports}"
 UUID_ARG="${1:-auto}"
 NAME="${2:-Notebook}"
 
@@ -45,14 +45,14 @@ JPG_DIR="$OUT_DIR/pages_jpg"
 PDF_OUT="$OUT_DIR/${SAFE_NAME}.pdf"
 LOG="$OUT_DIR/export.log"
 
-mkdir -p "$PAGES_DIR" "$JPG_DIR"
+mkdir -p "$PAGES_DIR" "$JPG_DIR" "$OUT_BASE/activity-agent" "$OUT_BASE/activity"
 
 echo "[$(date -Is)] export start uuid_arg=$UUID_ARG resolved_uuid=${UUID:-none} name=$NAME" >> "$LOG"
 
 if [[ -z "${UUID:-}" ]]; then
   echo "[$(date -Is)] no matching document found for visibleName='$NAME'" >> "$LOG"
-  /home/swair/bin/remarkable-activity-agent-hook.sh "Summarize reMarkable activity changes since last sync." >> /home/swair/remarkable-exports/activity-agent/run.log 2>&1 || true
-  /home/swair/bin/remarkable-activity-diff.py >> /home/swair/remarkable-exports/activity/run.log 2>&1 || true
+  "$HOME/bin/remarkable-activity-agent-hook.sh" "Summarize reMarkable activity changes since last sync." >> "$OUT_BASE/activity-agent/run.log" 2>&1 || true
+  "$HOME/bin/remarkable-activity-diff.py" >> "$OUT_BASE/activity/run.log" 2>&1 || true
   exit 0
 fi
 
@@ -62,8 +62,8 @@ SRC_META="$BASE/$UUID.metadata"
 
 if [[ ! -f "$SRC_CONTENT" || ! -d "$SRC_THUMBS" ]]; then
   echo "[$(date -Is)] missing content or thumbnails for $UUID" >> "$LOG"
-  /home/swair/bin/remarkable-activity-agent-hook.sh "Summarize reMarkable activity changes since last sync." >> /home/swair/remarkable-exports/activity-agent/run.log 2>&1 || true
-  /home/swair/bin/remarkable-activity-diff.py >> /home/swair/remarkable-exports/activity/run.log 2>&1 || true
+  "$HOME/bin/remarkable-activity-agent-hook.sh" "Summarize reMarkable activity changes since last sync." >> "$OUT_BASE/activity-agent/run.log" 2>&1 || true
+  "$HOME/bin/remarkable-activity-diff.py" >> "$OUT_BASE/activity/run.log" 2>&1 || true
   exit 0
 fi
 
@@ -120,9 +120,9 @@ else
 fi
 
 # TS activity agent (preferred)
-/home/swair/bin/remarkable-activity-agent-hook.sh "Summarize reMarkable activity changes since last sync." >> /home/swair/remarkable-exports/activity-agent/run.log 2>&1 || true
+"$HOME/bin/remarkable-activity-agent-hook.sh" "Summarize reMarkable activity changes since last sync." >> "$OUT_BASE/activity-agent/run.log" 2>&1 || true
 
 # Legacy python activity diff (fallback / audit)
-/home/swair/bin/remarkable-activity-diff.py >> /home/swair/remarkable-exports/activity/run.log 2>&1 || true
+"$HOME/bin/remarkable-activity-diff.py" >> "$OUT_BASE/activity/run.log" 2>&1 || true
 
 echo "[$(date -Is)] export done" >> "$LOG"

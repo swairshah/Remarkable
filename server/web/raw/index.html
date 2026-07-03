@@ -4,9 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <title>Notebook</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Google+Sans+Code:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  :root { --sidebar-w: 180px; }
-  html,body{margin:0;height:100%;background:#111;color:#eee;font-family:system-ui,sans-serif;overflow:hidden;}
+  :root { --sidebar-w: 180px; --serif:'Iowan Old Style','Palatino Linotype',Palatino,'Book Antiqua',Georgia,serif; --mono:'Google Sans Code',ui-monospace,'SF Mono',Menlo,Consolas,monospace; }
+  html,body{margin:0;height:100%;background:#111;color:#eee;font-family:var(--serif);overflow:hidden;}
   body{touch-action:pan-y;}
 
   #sidebar{
@@ -29,7 +32,7 @@
     width:64px;height:84px;object-fit:cover;
     background:#000;border-radius:3px;flex-shrink:0;
   }
-  #sidebar li .num{font-variant-numeric:tabular-nums;}
+  #sidebar li .num{font-variant-numeric:tabular-nums;font-family:var(--mono);}
 
   #main{
     position:fixed;top:0;right:0;bottom:0;left:var(--sidebar-w);
@@ -44,7 +47,7 @@
   #counter{
     position:absolute;bottom:12px;left:50%;transform:translateX(-50%);
     background:rgba(0,0,0,.55);padding:4px 12px;border-radius:14px;
-    font-size:13px;font-variant-numeric:tabular-nums;
+    font-size:13px;font-variant-numeric:tabular-nums;font-family:var(--mono);
   }
 
   .nav{position:absolute;top:0;bottom:0;width:35%;cursor:pointer;}

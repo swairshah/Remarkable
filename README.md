@@ -1,9 +1,11 @@
 # reMarkable Sync + Export + Viewer
 
-End-to-end pipeline for: reMarkable tablet → server backup → JPG/PDF export → web
-viewer at `https://blog.swair.dev/raw/`.
+End-to-end pipeline for: reMarkable tablet → server backup → JPG/PDF export +
+LLM activity digest → web viewer, all at `https://remarkable.exe.xyz/`
+(digest at `/updates/`, page viewer at `/raw/`).
 
 Everything needed to rebuild this pipeline from scratch lives in this directory.
+For the full architecture walkthrough see [SYNC.md](SYNC.md).
 
 ## System diagram
 
@@ -15,8 +17,8 @@ Everything needed to rebuild this pipeline from scratch lives in this directory.
  │                         │  every 5 min via systemd timer                          │
  │                         ▼                                                         │
  │   remarkable/bin/remarkable-push-sync.sh                                          │
- │     · rsync --delete to server:/home/swair/remarkable-backup/xochitl/             │
- │     · ssh swair@swair.dev ~/bin/remarkable-post-sync-by-name.sh Notebook          │
+ │     · rsync --delete to exedev@remarkable.exe.xyz:~/remarkable-backup/xochitl/    │
+ │     · ssh exedev@remarkable.exe.xyz ~/bin/remarkable-post-sync.sh auto Notebook   │
  │                                                                                   │
  │   Scheduled by:                                                                   │
  │     remarkable/systemd/remarkable-push-sync.timer   (OnUnitActiveSec=5min)        │
@@ -24,61 +26,44 @@ Everything needed to rebuild this pipeline from scratch lives in this directory.
  │                                                                                   │
  └───────────────────────────────────┬───────────────────────────────────────────────┘
                                      │  rsync + ssh trigger
+                                     │  (tablet key registered with exe.dev account)
                                      ▼
- ┌────────────────────────────────── swair.dev ─────────────────────────────────────┐
+ ┌──────────────────────── remarkable.exe.xyz (exe.dev VM) ─────────────────────────┐
  │                                                                                   │
  │   ~/remarkable-backup/xochitl/           (raw sync destination)                   │
  │                 │                                                                 │
  │                 ▼                                                                 │
- │   server/bin/remarkable-post-sync-by-name.sh Notebook                             │
+ │   server/bin/remarkable-post-sync.sh auto Notebook                                │
  │     · scans *.metadata for visibleName == "Notebook"                              │
  │     · picks highest lastModified → UUID                                           │
  │     · copies UUID.thumbnails/*.png → pages_png/NNN-<pid>.png                      │
- │     · magick PNG → JPG at quality 92                                              │
+ │     · convert PNG → JPG at quality 92                                             │
  │     · img2pdf PNG → single PDF                                                    │
+ │     · runs the activity agent (LLM digest) + legacy python differ                 │
  │                 │                                                                 │
  │                 ▼                                                                 │
- │   ~/remarkable-exports/Notebook/                                                  │
- │       ├── pages_png/NNN-<pid>.png                                                 │
- │       ├── pages_jpg/NNN-<pid>.jpg   ◄─── what the web viewer serves               │
- │       ├── Notebook.pdf                                                            │
- │       └── export.log                                                              │
+ │   ~/remarkable-exports/Notebook/         (pages_png/, pages_jpg/, Notebook.pdf)   │
+ │   ~/notes/updates/index.html             (LLM activity digest page)               │
  │                 │                                                                 │
- │                 │   bind-mounted read-only into                                   │
  │                 ▼                                                                 │
- │   ┌──── docker container: notes_app  (nginx:alpine) ──────────────────────┐      │
- │   │                                                                        │      │
- │   │   nginx config (bind-mounted from ~/notes-server/default.conf):        │      │
- │   │     server/nginx/default.conf                                          │      │
- │   │       location /            -> ~/notes  (generic autoindex)            │      │
- │   │       location /raw/        -> viewer html                             │      │
- │   │       location /raw/pages/  -> pages_jpg/  (autoindex_format json)     │      │
- │   │                                                                        │      │
- │   │   viewer (bind-mounted from ~/notes-server/raw/index.html):            │      │
- │   │     server/web/raw/index.html                                          │      │
- │   │       · fetch('pages/') → nginx returns JSON file list                 │      │
- │   │       · vanilla JS: sidebar, swipe, arrow keys, Home/End, ?p=N         │      │
- │   │                                                                        │      │
- │   │   network alias `blog` on docker network `website_network`             │      │
- │   └─────────────────────────────┬──────────────────────────────────────────┘      │
- │                                 │ http://blog:80                                  │
- │                                 ▼                                                 │
- │   ┌──── docker container: nginx_proxy  (the site front door) ────────────┐       │
- │   │   Terminates TLS for blog.swair.dev using Let's Encrypt certs         │       │
- │   │   proxy_pass http://blog:80 (that alias resolves to notes_app)        │       │
- │   └───────────────────────────────────────────────────────────────────────┘       │
+ │   nginx (native, listens on :8000)                                                │
+ │     location = /          -> 302 /updates/                                        │
+ │     location /updates/    -> ~/notes/updates/  (activity digest)                  │
+ │     location /raw/        -> viewer html                                          │
+ │     location /raw/pages/  -> pages_jpg/  (autoindex_format json)                  │
  │                                                                                   │
  └───────────────────────────────────┬───────────────────────────────────────────────┘
-                                     │ HTTPS
+                                     │ exe.dev proxy: TLS termination,
+                                     │ https://remarkable.exe.xyz → VM port 8000
                                      ▼
-                              https://blog.swair.dev/raw/
+                        https://remarkable.exe.xyz/updates/   (public)
 ```
 
 ## Layout
 
 ```
-devices/remarkable/
 ├── README.md                                this file
+├── SYNC.md                                  architecture deep-dive
 ├── scripts/
 │   ├── deploy-remarkable.sh                 push device files + reload timer
 │   └── deploy-server.sh                     push server files + reload nginx
@@ -88,7 +73,7 @@ devices/remarkable/
 │   └── systemd/
 │       ├── remarkable-push-sync.service
 │       └── remarkable-push-sync.timer       cadence (OnUnitActiveSec=)
-└── server/                                  ── runs on swair.dev ──
+└── server/                                  ── runs on remarkable.exe.xyz ──
     ├── bin/
     │   ├── remarkable-post-sync-by-name.sh    pick latest doc by visibleName, export
     │   ├── remarkable-post-sync.sh            export + activity hooks (active)
@@ -97,7 +82,7 @@ devices/remarkable/
     │   ├── remarkable-activity-agent-hook.sh  hook entrypoint (supports -p prompt)
     │   └── remarkable-activity-diff.py        legacy python diff helper
     ├── nginx/
-    │   └── default.conf                     notes_app nginx config
+    │   └── default.conf                     nginx site (installed to sites-available)
     └── web/
         └── raw/
             └── index.html                   swipe/sidebar viewer
@@ -111,29 +96,37 @@ devices/remarkable/
 | What/how the tablet rsyncs | `remarkable/bin/remarkable-push-sync.sh` | `scripts/deploy-remarkable.sh` |
 | Which doc gets exported (default `Notebook`) | `server/bin/remarkable-post-sync-by-name.sh` (`DOC_NAME=...`) | `scripts/deploy-server.sh` |
 | Export format (JPG quality, PDF, etc.) | `server/bin/remarkable-post-sync-by-name.sh` | `scripts/deploy-server.sh` |
-| URL routing under `blog.swair.dev` | `server/nginx/default.conf` | `scripts/deploy-server.sh` (auto-reloads nginx) |
+| URL routing under `remarkable.exe.xyz` | `server/nginx/default.conf` | `scripts/deploy-server.sh` (auto-reloads nginx) |
 | Viewer look/feel, shortcuts, sidebar | `server/web/raw/index.html` | `scripts/deploy-server.sh` |
-| Add a new content path (e.g. `/photos/`) | new `location` in `default.conf` **and** add a `-v` mount to the `docker run` in this README | redeploy + recreate `notes_app` |
+| Digest/viewer fonts (Iowan Old Style + Google Sans Code) | `server/bin/remarkable-activity-agent.ts` (rebuild `.js` with bun), `server/web/raw/index.html` | `scripts/deploy-server.sh` |
 | Activity summary page prompt/model/output | `server/bin/remarkable-activity-agent-hook.sh` (`-p`, `MODEL`, `OUTPUT_HTML`) | `scripts/deploy-server.sh` |
+
+After editing `remarkable-activity-agent.ts`, rebuild the deployed bundle:
+
+```bash
+bun build server/bin/remarkable-activity-agent.ts --target=node --format=cjs \
+  --outfile server/bin/remarkable-activity-agent.js
+```
 
 ## Deploy
 
 Both deploy scripts assume SSH is pre-configured:
-- `ssh remarkable` reaches the tablet (add an alias in `~/.ssh/config` if needed)
-- `ssh swair@swair.dev` reaches the server (override host with `SERVER_HOST=user@host`)
+- `ssh remarkable` reaches the tablet (LAN alias in `~/.ssh/config`; the IP
+  changes occasionally — update `Hostname` there)
+- `ssh exedev@remarkable.exe.xyz` reaches the VM (override with `SERVER_HOST=`)
 
 From the repo root:
 
 ```bash
 # Deploy tablet-side changes (push script, systemd timer/service)
-devices/remarkable/scripts/deploy-remarkable.sh
+scripts/deploy-remarkable.sh
 
 # Deploy server-side changes (post-sync scripts, nginx config, viewer html)
-# → automatically runs `nginx -t` and `nginx -s reload` inside notes_app
-devices/remarkable/scripts/deploy-server.sh
+# → installs missing deps (node, img2pdf, imagemagick), runs nginx -t + reload
+scripts/deploy-server.sh
 
 # Deploy + immediately trigger a manual export run so you can see the result
-devices/remarkable/scripts/deploy-server.sh --run
+scripts/deploy-server.sh --run
 ```
 
 Env overrides: `REMARKABLE_HOST=...`, `SERVER_HOST=user@host`, `DOC_NAME=Foo`.
@@ -145,56 +138,41 @@ Env overrides: `REMARKABLE_HOST=...`, `SERVER_HOST=user@host`, `DOC_NAME=Foo`.
 The deploy script handles `chmod`, `daemon-reload`, and `enable --now` on the
 timer, so `deploy-remarkable.sh` is also the install command.
 
-### Server — export pipeline
+### exe.dev VM
 
-`deploy-server.sh` ships the scripts and makes them executable. The backup
-destination `~/remarkable-backup/xochitl/` just needs to exist; `rsync` creates
-it on first push, but you can pre-create it:
-
-```bash
-ssh swair@swair.dev 'mkdir -p ~/remarkable-backup/xochitl ~/remarkable-exports'
-```
-
-Requires on the server: `python3`, `rsync`, `magick` (ImageMagick), `img2pdf`.
-
-### Server — notes_app container (one-time)
-
-`deploy-server.sh` only pushes files and reloads nginx — it does not create the
-container. Run this once on the server:
+`deploy-server.sh` handles everything reproducible: scripts, deps
+(`nodejs`, `img2pdf`, `imagemagick` via apt), nginx site install + reload.
+The pieces done once by hand:
 
 ```bash
-ssh swair@swair.dev 'mkdir -p ~/notes ~/notes-server/raw && \
-  docker run -d --name notes_app \
-    --network website_network --network-alias blog \
-    --restart unless-stopped \
-    -v /home/swair/notes:/usr/share/nginx/html:ro \
-    -v /home/swair/notes-server/default.conf:/etc/nginx/conf.d/default.conf:ro \
-    -v /home/swair/notes-server/raw:/srv/raw-app:ro \
-    -v /home/swair/remarkable-exports/Notebook/pages_jpg:/srv/raw-pages:ro \
-    nginx:alpine'
+# 1. Register the tablet's sync key with the exe.dev ACCOUNT (not the VM).
+#    SSH to *.exe.xyz goes through exe.dev's front door, which authenticates
+#    against account keys; unregistered keys get a registration banner that
+#    corrupts rsync. Key name in the account: remarkable-tablet-sync
+ssh remarkable 'cat /home/root/.ssh/id_sync_dropbear_ed25519.pub'
+ssh exe.dev ssh-key add "<that public key> remarkable-tablet-sync"
+
+# 2. Point the exe.dev HTTP proxy at nginx and make the site public.
+#    (The proxy only targets ports 3000-9999, hence nginx on 8000.)
+ssh exe.dev share port remarkable 8000
+ssh exe.dev share set-public remarkable
+
+# 3. Secrets for the activity agent
+ssh exedev@remarkable.exe.xyz 'echo "OPENROUTER_API_KEY=..." >> ~/.env && chmod 600 ~/.env'
 ```
-
-Then run `deploy-server.sh` to populate the mounted config/html.
-
-Mount map:
-- `~/notes` → `/` (generic autoindex)
-- `~/notes-server/default.conf` → `/etc/nginx/conf.d/default.conf`
-- `~/notes-server/raw` → `/srv/raw-app` (`/raw/` viewer html)
-- `~/remarkable-exports/Notebook/pages_jpg` → `/srv/raw-pages` (`/raw/pages/` images)
-
-The `--network-alias blog` is critical: the existing `nginx_proxy` container
-has `proxy_pass http://blog:80;` for `blog.swair.dev`, and the alias is what
-makes `notes_app` answer to that name on the `website_network` docker network.
 
 ## Current defaults
 
 - `DOC_NAME=Notebook`
 - Source on reMarkable: `/home/root/.local/share/remarkable/xochitl/`
-- Destination on server: `/home/swair/remarkable-backup/xochitl/`
-- Export output on server: `/home/swair/remarkable-exports/`
-- Activity page output (default): `/home/swair/notes/index.html`
-- Activity state dir: `/home/swair/remarkable-exports/activity-agent/`
-- Viewer URL: `https://blog.swair.dev/raw/`
+- Destination on server: `/home/exedev/remarkable-backup/xochitl/`
+- Export output on server: `/home/exedev/remarkable-exports/`
+- Activity page output: `/home/exedev/notes/updates/index.html`
+- Activity state dir: `/home/exedev/remarkable-exports/activity-agent/`
+- Digest URL: `https://remarkable.exe.xyz/updates/`
+- Viewer URL: `https://remarkable.exe.xyz/raw/`
+- Fonts: body `Iowan Old Style` (Apple system serif w/ Palatino→Georgia fallback),
+  code/mono `Google Sans Code` (Google Fonts)
 
 ## Test manually
 
@@ -203,15 +181,16 @@ makes `notes_app` answer to that name on the `website_network` docker network.
 ssh remarkable /home/root/bin/remarkable-push-sync.sh
 
 # Force an export on the server
-ssh swair@swair.dev '~/bin/remarkable-post-sync-by-name.sh Notebook'
+ssh exedev@remarkable.exe.xyz '~/bin/remarkable-post-sync-by-name.sh Notebook'
 
-# Verify the viewer
-curl -sI https://blog.swair.dev/raw/
+# Verify the digest + viewer
+curl -sI https://remarkable.exe.xyz/updates/
+curl -sI https://remarkable.exe.xyz/raw/
 ```
 
 ## Logs
 
 - reMarkable sync log: `/home/root/.local/state/remarkable-sync/push.log`
-- Server export log: `/home/swair/remarkable-exports/<DocName>/export.log`
-- TS activity hook log: `/home/swair/remarkable-exports/activity-agent/run.log`
-- notes_app nginx log: `docker logs notes_app`
+- Server export log: `~/remarkable-exports/<DocName>/export.log`
+- TS activity hook log: `~/remarkable-exports/activity-agent/run.log`
+- nginx logs: `sudo tail -f /var/log/nginx/access.log` on the VM

@@ -19,6 +19,7 @@ var __toESM = (mod, isNodeMode, target) => {
 // server/bin/remarkable-activity-agent.ts
 var import_node_crypto = require("node:crypto");
 var import_node_fs = require("node:fs");
+var import_node_os = require("node:os");
 var import_node_path = __toESM(require("node:path"));
 var MAX_VISIBLE_CHANGES = 10;
 var MAX_HISTORY_RUNS = 20;
@@ -27,10 +28,11 @@ function parseArgs(argv) {
   const cli = {
     prompt: "Summarize reMarkable activity since last sync. Focus on reading progress, highlights, bookmarks, and notebook writing changes.",
     model: "anthropic/claude-sonnet-4-6",
-    sourceDir: "/home/swair/remarkable-backup/xochitl",
-    stateDir: "/home/swair/remarkable-exports/activity-agent",
-    outputHtml: "/home/swair/remarkable-exports/activity-agent/index.html",
-    envFile: "/home/swair/.env"
+    sourceDir: import_node_path.default.join(import_node_os.homedir(), "remarkable-backup", "xochitl"),
+    stateDir: import_node_path.default.join(import_node_os.homedir(), "remarkable-exports", "activity-agent"),
+    outputHtml: import_node_path.default.join(import_node_os.homedir(), "notes", "updates", "index.html"),
+    envFile: import_node_path.default.join(import_node_os.homedir(), ".env"),
+    rerender: false
   };
   for (let i = 0;i < argv.length; i++) {
     const a = argv[i];
@@ -53,6 +55,8 @@ function parseArgs(argv) {
     } else if (a === "--env-file" && n) {
       cli.envFile = n;
       i++;
+    } else if (a === "--rerender") {
+      cli.rerender = true;
     }
   }
   return cli;
@@ -289,34 +293,36 @@ async function readHistory(historyPath) {
 }
 function renderHtml(summary, changes, history) {
   const nowHuman = humanTime(new Date().toISOString());
-  const historyItems = history.map((h) => {
+  const historyItems = history.map((h, i) => {
     const firstLine = (h.summary || "").split(`
 `).find((x) => x.trim()) || "(no summary stored)";
-    return `<li class="hist-item"><div class="hist-time">${esc(humanTime(h.at))}</div><div class="hist-meta">${h.shownChanges}/${h.totalChanges} changes</div><div class="hist-text">${esc(firstLine)}</div></li>`;
+    return `<li class="hist-item${i === 0 ? " active" : ""}" data-idx="${i}"><div class="hist-time">${esc(humanTime(h.at))}</div><div class="hist-meta">${h.shownChanges}/${h.totalChanges} changes</div><div class="hist-text">${esc(firstLine)}</div></li>`;
   }).join(`
 `);
+  const historyJson = JSON.stringify(history).replace(/</g, "\\u003c");
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>activity</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Google+Sans+Code:wght@400;500;600&display=swap" rel="stylesheet" />
 <style>
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:rgb(15,17,21);--bg2:rgb(26,29,35);--border:rgba(107,114,128,.2);--text:rgb(201,204,209);--bright:rgb(229,231,235);--muted:rgb(107,114,128);--accent:rgb(245,158,11)}
-body{background:var(--bg);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:15px;line-height:1.6;min-height:100vh}
-nav{padding:20px 24px;display:flex;justify-content:space-between;align-items:center}.brand{color:var(--bright);text-decoration:none;font-weight:500}.brand:hover{color:var(--accent)}
-.layout{display:flex;min-height:calc(100vh - 70px)}
+:root{--bg:rgb(15,17,21);--bg2:rgb(26,29,35);--border:rgba(107,114,128,.2);--text:rgb(201,204,209);--bright:rgb(229,231,235);--muted:rgb(107,114,128);--accent:rgb(245,158,11);--serif:'Iowan Old Style','Palatino Linotype',Palatino,'Book Antiqua',Georgia,serif;--mono:'Google Sans Code',ui-monospace,'SF Mono',Menlo,Consolas,monospace}
+body{background:var(--bg);color:var(--text);font-family:var(--serif);font-size:17px;line-height:1.6;min-height:100vh}
+pre,code{font-family:var(--mono)}
+nav{padding:20px 24px;display:flex;justify-content:space-between;align-items:center}.nav-left{display:flex;align-items:center;gap:14px}.brand{color:var(--bright);text-decoration:none;font-weight:500}.brand:hover{color:var(--accent)}
+.layout{display:flex;height:calc(100vh - 70px)}
 #sidebar{width:340px;max-width:80vw;border-right:1px solid var(--border);padding:16px 14px;overflow:auto;transition:width .2s ease,padding .2s ease}
 #sidebar.collapsed{width:0;padding:0;border-right:none;overflow:hidden}
 .side-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .side-title{color:var(--bright);font-size:14px}
-.toggle{background:var(--bg2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px 10px;cursor:pointer;font-family:inherit;font-size:13px;line-height:1}
-main .toggle{display:inline-flex;align-items:center;margin-bottom:16px}
-.hist-list{list-style:none}.hist-item{padding:10px 2px;border-bottom:1px solid var(--border)}.hist-time{color:var(--bright);font-size:12px}.hist-meta{color:var(--muted);font-size:11px}.hist-text{color:var(--text);font-size:12px;margin-top:4px}
-main{flex:1;max-width:860px;padding:24px 32px 56px}h1{color:var(--bright);font-size:22px;font-weight:500;margin-bottom:8px;clear:both}.meta{color:var(--muted);font-size:13px;margin-bottom:24px}
-h2{color:var(--bright);font-size:18px;font-weight:500;margin:24px 0 12px}pre{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px;white-space:pre-wrap;overflow:auto}
+.toggle{background:var(--bg2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px 10px;cursor:pointer;font-family:inherit;font-size:16px;line-height:1}
+.toggle:hover{color:var(--bright)}
+.hist-list{list-style:none}.hist-item{padding:10px 8px;border-bottom:1px solid var(--border);cursor:pointer;border-radius:6px}.hist-item:hover{background:var(--bg2)}.hist-item.active{background:var(--bg2)}.hist-item.active .hist-time{color:var(--accent)}.hist-time{color:var(--bright);font-size:12px}.hist-meta{color:var(--muted);font-size:11px}.hist-text{color:var(--text);font-size:12px;margin-top:4px}
+main{flex:1;max-width:860px;padding:24px 32px 56px;overflow-y:auto}h1{color:var(--bright);font-size:22px;font-weight:500;margin-bottom:8px;clear:both}.meta{color:var(--muted);font-size:13px;margin-bottom:24px}
+h2{color:var(--bright);font-size:18px;font-weight:500;margin:24px 0 12px}pre{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px;white-space:pre-wrap;overflow:auto;font-size:14px}
 ul{list-style:none}
 .item{padding:14px 0;border-bottom:1px solid var(--border)}.item:last-child{border-bottom:none}.title{color:var(--bright)}
 code{background:var(--bg2);border:1px solid var(--border);padding:2px 6px;border-radius:4px;color:var(--muted);font-size:12px}.bits{margin-top:8px;padding-left:16px}.bits li{list-style:disc;color:var(--muted)}
@@ -324,27 +330,56 @@ code{background:var(--bg2);border:1px solid var(--border);padding:2px 6px;border
   nav{padding:14px 18px}
   #sidebar{position:fixed;top:64px;left:0;bottom:0;background:var(--bg);z-index:10}
   main{padding:16px 18px 40px}
-  main .toggle{display:block;width:auto;margin:0 0 20px;padding:8px 12px}
 }
 </style>
 </head><body>
-<nav><a class="brand" href="/">swair.dev</a></nav>
+<nav><div class="nav-left"><button class="toggle" onclick="toggleSidebar()" title="Toggle history">&#9776;</button><a class="brand" href="/updates/">reMarkable diffs</a></div></nav>
 <div class="layout">
 <aside id="sidebar" class="collapsed">
-  <div class="side-header"><div class="side-title">previous summaries</div><button class="toggle" onclick="toggleSidebar()">hide</button></div>
+  <div class="side-header"><div class="side-title">previous summaries</div></div>
   <ul class="hist-list">${historyItems || "<li class='hist-item'><div class='hist-text'>No previous summaries yet.</div></li>"}</ul>
 </aside>
 <main>
-  <button class="toggle" onclick="toggleSidebar()" style="margin-bottom:12px">history</button>
-  <h1>reMarkable activity</h1><p class="meta">updated ${esc(nowHuman)}</p>
-  <h2>agent summary</h2><pre>${esc(summary)}</pre>
-  <h2>detected changes (latest ${MAX_VISIBLE_CHANGES})</h2>
-  <ul>${changes.map((c) => `<li class="item"><div class="title">${esc(c.name)} <code>${esc(c.uuid)}</code></div><ul class="bits">${c.bits.map((b) => `<li>${esc(b)}</li>`).join("")}</ul></li>`).join(`
+  <h1>reMarkable activity</h1><p class="meta" id="meta">updated ${esc(nowHuman)}</p>
+  <h2>agent summary</h2><pre id="summary">${esc(summary)}</pre>
+  <h2>detected changes</h2>
+  <ul id="changes">${changes.map((c) => `<li class="item"><div class="title">${esc(c.name)} <code>${esc(c.uuid)}</code></div><ul class="bits">${c.bits.map((b) => `<li>${esc(b)}</li>`).join("")}</ul></li>`).join(`
 `)}</ul>
 </main>
 </div>
 <script>
 function toggleSidebar(){document.getElementById('sidebar').classList.toggle('collapsed')}
+const HISTORY = ${historyJson};
+function fmtTime(iso){
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString('en-US',{year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+}
+function renderEntry(i){
+  const h = HISTORY[i];
+  if (!h) return;
+  document.getElementById('summary').textContent = h.summary || '(no summary stored)';
+  document.getElementById('meta').textContent =
+    (i === 0 ? 'latest · ' : '') + fmtTime(h.at) + ' · ' + h.shownChanges + '/' + h.totalChanges + ' changes';
+  const ul = document.getElementById('changes');
+  ul.replaceChildren();
+  for (const c of (h.changes || [])) {
+    const li = document.createElement('li'); li.className = 'item';
+    const title = document.createElement('div'); title.className = 'title';
+    title.textContent = (c.name || c.uuid) + ' ';
+    const code = document.createElement('code'); code.textContent = c.uuid;
+    title.appendChild(code);
+    const bits = document.createElement('ul'); bits.className = 'bits';
+    for (const b of (c.bits || [])) {
+      const bi = document.createElement('li'); bi.textContent = b; bits.appendChild(bi);
+    }
+    li.appendChild(title); li.appendChild(bits); ul.appendChild(li);
+  }
+  document.querySelectorAll('.hist-item').forEach((el) =>
+    el.classList.toggle('active', Number(el.dataset.idx) === i));
+}
+document.querySelectorAll('.hist-item[data-idx]').forEach((el) =>
+  el.addEventListener('click', () => renderEntry(Number(el.dataset.idx))));
 </script>
 </body></html>`;
 }
@@ -354,6 +389,15 @@ async function main() {
   const statePath = import_node_path.default.join(cli.stateDir, "last-state.json");
   const latestPath = import_node_path.default.join(cli.stateDir, "latest.md");
   const historyPath = import_node_path.default.join(cli.stateDir, "history.jsonl");
+  if (cli.rerender) {
+    const summary2 = await exists(latestPath) ? (await import_node_fs.promises.readFile(latestPath, "utf8")).trim() : "(no summary published yet)";
+    const history2 = await readHistory(historyPath);
+    const changes2 = history2[0]?.changes ?? [];
+    await import_node_fs.promises.mkdir(import_node_path.default.dirname(cli.outputHtml), { recursive: true });
+    await import_node_fs.promises.writeFile(cli.outputHtml, renderHtml(summary2, changes2, history2), "utf8");
+    console.log(`Re-rendered ${cli.outputHtml} from stored state.`);
+    return;
+  }
   const prev = await readJson(statePath);
   const cur = await buildState(cli.sourceDir);
   await import_node_fs.promises.writeFile(statePath, JSON.stringify(cur, null, 2), "utf8");
