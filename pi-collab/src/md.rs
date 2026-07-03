@@ -13,14 +13,15 @@
 //! language), a bare <svg>…</svg>, leading #/-/* on a line. `height` and
 //! `draw` walk the same segment list so scroll math and painting agree.
 
-use crate::conv::wrap;
-use crate::draw::{BLACK, GRAY, LIGHT};
-use crate::font::{ADVANCE, CHAR_ROWS};
+use crate::draw::{GRAY, LIGHT};
+use crate::font::CHAR_ROWS;
 use crate::qtfb::Framebuffer;
+use crate::text::{self, Face};
 use crate::svg;
 
-const BG: i32 = 12; /* gap between segments */
+const BG: i32 = 14; /* gap between segments */
 const CODE_PAD: i32 = 12;
+const LABEL_H: i32 = CHAR_ROWS * 2 + 8; /* bitmap-font language label */
 
 pub enum Seg {
     Heading(u8, String),
@@ -140,33 +141,32 @@ fn clean_inline(s: &str) -> String {
     s.replace("**", "").replace("__", "").replace('`', "")
 }
 
-/* ---- per-segment metrics (height + draw share these) --------------------- */
+/* ---- per-segment metrics (height + draw share these) ---------------------
+ * `base` is a pixel size now (not a bitmap-font integer scale): the body
+ * text height. Headings scale up from it, code scales slightly down. */
 
-fn line_h(scale: i32) -> i32 {
-    CHAR_ROWS * scale + 8
+fn heading_px(level: u8, base: i32) -> f32 {
+    base as f32
+        * match level {
+            1 => 1.5,
+            2 => 1.28,
+            _ => 1.12,
+        }
 }
 
-fn heading_scale(level: u8, base: i32) -> i32 {
-    match level {
-        1 => base + 2,
-        2 => base + 1,
-        _ => base,
-    }
+fn code_px(base: i32) -> f32 {
+    (base as f32 * 0.82).max(15.0)
 }
 
-fn code_scale(base: i32) -> i32 {
-    (base - 1).max(2)
-}
-
-fn code_line_h(base: i32) -> i32 {
-    CHAR_ROWS * code_scale(base) + 6
+fn bullet_indent(base: i32) -> i32 {
+    (base as f32 * 1.4) as i32
 }
 
 /// A code block's pixel height for `n` lines. Also used for the SVG
 /// fallback, so both paths agree.
 fn code_height(n: i32, base: i32, has_lang: bool) -> i32 {
-    let label = if has_lang { CHAR_ROWS * 2 + 6 } else { 0 };
-    CODE_PAD + label + n.max(1) * code_line_h(base) + CODE_PAD
+    let label = if has_lang { LABEL_H } else { 0 };
+    CODE_PAD + label + n.max(1) * text::line_h(Face::Mono, code_px(base)) + CODE_PAD
 }
 
 /// If an SVG rasterizes, its (w, h, pixels); otherwise None (draw as code).
@@ -175,23 +175,26 @@ fn svg_image(src: &str, width: i32) -> Option<(i32, i32, Vec<u8>)> {
 }
 
 fn seg_height(seg: &Seg, base: i32, width: i32) -> i32 {
+    let bpx = base as f32;
     match seg {
         Seg::Heading(l, txt) => {
-            let s = heading_scale(*l, base);
-            wrap(txt, cols(width, s)).len() as i32 * line_h(s) + 6 /* underline */
+            let hpx = heading_px(*l, base);
+            text::wrap(Face::Heading, hpx, width, txt).len() as i32 * text::line_h(Face::Heading, hpx)
+                + 8 /* underline + spacing */
         }
-        Seg::Bullet(txt) => wrap(txt, cols(width, base) - 2).len() as i32 * line_h(base),
-        Seg::Para(txt) => wrap(txt, cols(width, base)).len() as i32 * line_h(base),
+        Seg::Bullet(txt) => {
+            let w = width - bullet_indent(base);
+            text::wrap(Face::Body, bpx, w, txt).len() as i32 * text::line_h(Face::Body, bpx)
+        }
+        Seg::Para(txt) => {
+            text::wrap(Face::Body, bpx, width, txt).len() as i32 * text::line_h(Face::Body, bpx)
+        }
         Seg::Code(lang, lines) => code_height(lines.len() as i32, base, !lang.is_empty()),
         Seg::Svg(src) => match svg_image(src, width) {
             Some((_, h, _)) => h + 8,
             None => code_height(src.split('\n').count() as i32, base, true),
         },
     }
-}
-
-fn cols(width: i32, scale: i32) -> usize {
-    (width / (ADVANCE * scale)).max(1) as usize
 }
 
 pub fn height(segs: &[Seg], base: i32, width: i32) -> i32 {
@@ -211,32 +214,32 @@ pub fn draw(fb: &mut Framebuffer, x: i32, y0: i32, width: i32, segs: &[Seg], bas
 }
 
 fn draw_seg(fb: &mut Framebuffer, x: i32, y: i32, width: i32, seg: &Seg, base: i32) {
+    let bpx = base as f32;
     match seg {
         Seg::Heading(l, txt) => {
-            let s = heading_scale(*l, base);
+            let hpx = heading_px(*l, base);
             let mut ly = y;
-            for line in wrap(txt, cols(width, s)) {
-                fb.text(x, ly, &line, s, BLACK);
-                ly += line_h(s);
+            for line in text::wrap(Face::Heading, hpx, width, txt) {
+                text::draw_line(fb, x, ly, Face::Heading, hpx, &line);
+                ly += text::line_h(Face::Heading, hpx);
             }
-            fb.fill_rect(x, ly, width, 2, LIGHT); /* underline */
+            fb.fill_rect(x, ly + 2, width, 2, LIGHT); /* underline */
         }
         Seg::Bullet(txt) => {
-            /* the ASCII font has no bullet glyph, so draw a small filled dot
-             * centered on the first line, then hang the text to its right */
-            fb.disc(x + 2 * base, y + CHAR_ROWS * base / 2, base, BLACK);
-            let ix = x + 2 * ADVANCE * base;
+            let indent = bullet_indent(base);
+            let lh = text::line_h(Face::Body, bpx);
+            fb.disc(x + indent / 2, y + lh / 2, (base / 7).max(3), crate::draw::BLACK);
             let mut ly = y;
-            for line in wrap(txt, cols(width, base) - 2) {
-                fb.text(ix, ly, &line, base, BLACK);
-                ly += line_h(base);
+            for line in text::wrap(Face::Body, bpx, width - indent, txt) {
+                text::draw_line(fb, x + indent, ly, Face::Body, bpx, &line);
+                ly += lh;
             }
         }
         Seg::Para(txt) => {
             let mut ly = y;
-            for line in wrap(txt, cols(width, base)) {
-                fb.text(x, ly, &line, base, BLACK);
-                ly += line_h(base);
+            for line in text::wrap(Face::Body, bpx, width, txt) {
+                text::draw_line(fb, x, ly, Face::Body, bpx, &line);
+                ly += text::line_h(Face::Body, bpx);
             }
         }
         Seg::Code(lang, lines) => draw_code(fb, x, y, width, lang, lines, base),
@@ -258,17 +261,19 @@ fn draw_code(fb: &mut Framebuffer, x: i32, y: i32, width: i32, lang: &str, lines
     /* box + left accent bar */
     fb.fill_rect(x - 8, y, width + 16, h, LIGHT);
     fb.fill_rect(x - 8, y, 4, h, GRAY);
-    let cs = code_scale(base);
+    let cpx = code_px(base);
+    let clh = text::line_h(Face::Mono, cpx);
     let mut ly = y + CODE_PAD;
     if !lang.is_empty() {
+        /* the small language tag stays on the dim bitmap font */
         fb.text(x, ly, lang, 2, GRAY);
-        ly += CHAR_ROWS * 2 + 6;
+        ly += LABEL_H;
     }
-    let maxc = (width / (ADVANCE * cs)).max(1) as usize;
+    let maxc = (width / text::advance(Face::Mono, cpx)).max(1) as usize;
     for line in lines {
         /* preserve line breaks; clip overlong lines rather than wrapping */
         let shown: String = line.chars().take(maxc).collect();
-        fb.text(x, ly, &shown, cs, BLACK);
-        ly += code_line_h(base);
+        text::draw_line(fb, x, ly, Face::Mono, cpx, &shown);
+        ly += clh;
     }
 }

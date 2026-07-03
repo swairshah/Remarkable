@@ -91,6 +91,36 @@ impl Framebuffer {
         cx - x
     }
 
+    /// Blend an 8-bit coverage bitmap as BLACK over the current contents
+    /// (antialiased glyphs from text.rs). Coverage 255 = solid black, 0 =
+    /// untouched; partial coverage darkens whatever background is there, so
+    /// text over the white page and over gray code boxes both look right.
+    pub fn blend_black(&mut self, x: i32, y: i32, w: i32, h: i32, cov: &[u8]) {
+        let (cy0, cy1) = (self.clip_y0, self.clip_y1);
+        let px = self.pixels();
+        for row in 0..h {
+            let py = y + row;
+            if py < cy0 || py >= cy1 {
+                continue;
+            }
+            for col in 0..w {
+                let a = cov[(row * w + col) as usize] as u32;
+                if a == 0 {
+                    continue;
+                }
+                let sx = x + col;
+                if sx < 0 || sx >= RM2_WIDTH {
+                    continue;
+                }
+                let idx = (py * RM2_WIDTH + sx) as usize;
+                /* background luminance from the green channel, then darken */
+                let bg = (((px[idx] >> 5) & 0x3F) as u32) * 255 / 63;
+                let g = (bg * (255 - a) / 255) as u16;
+                px[idx] = ((g >> 3) << 11) | ((g >> 2) << 5) | (g >> 3);
+            }
+        }
+    }
+
     /// Blit an 8-bit grayscale image (the stored ink of a sent message).
     pub fn blit_gray(&mut self, x: i32, y: i32, w: i32, h: i32, gray: &[u8]) {
         for j in 0..h {

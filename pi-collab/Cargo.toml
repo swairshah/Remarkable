@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 libc = "0.2"        # SEQPACKET sockets, mmap, poll, sigaction, evdev
 serde_json = "1"    # pi's RPC protocol is JSON lines over stdin/stdout
+fontdue = "0.9"     # pure-Rust TrueType rasterizer (antialiased glyphs)
 
 [profile.release]
 strip = true

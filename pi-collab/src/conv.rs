@@ -16,10 +16,6 @@ const LABEL_H: i32 = CHAR_ROWS * LABEL_SCALE + 8; /* 22 */
 const ENTRY_GAP: i32 = 24;
 const PAD_TOP: i32 = 16;
 
-/// pi text is rendered at a user-adjustable scale (A- / A+ in the header).
-pub const MIN_SCALE: i32 = 2;
-pub const MAX_SCALE: i32 = 6;
-
 /// How many characters of pi text fit on one line at the given scale.
 pub fn wrap_cols(scale: i32) -> usize {
     ((FB_W - 2 * MARGIN) / (ADVANCE * scale)).max(1) as usize

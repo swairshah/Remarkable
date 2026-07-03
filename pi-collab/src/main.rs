@@ -30,6 +30,7 @@ mod pi_rpc;
 mod png;
 mod qtfb;
 mod svg;
+mod text;
 
 use conv::{total_height, Entry, GrayImg};
 use draw::{text_width, BLACK, GRAY, WHITE};
@@ -80,6 +81,12 @@ const FUP_X: i32 = FDN_X + 66;
 const AZ_W: i32 = 60; /* the A-/A+ buttons */
 const REFRESH_X: i32 = FUP_X + AZ_W + 22;
 const REFRESH_W: i32 = 200;
+
+/* pi body-text size in pixels; A- / A+ step it within these bounds */
+const PI_PX_DEFAULT: i32 = 34;
+const PI_PX_MIN: i32 = 22;
+const PI_PX_MAX: i32 = 58;
+const PI_PX_STEP: i32 = 4;
 
 /* nib sizes (base stroke radius): small / medium / large. Pressure adds a
  * little on top; large ~ matches the old fixed nib at its max. */
@@ -143,9 +150,10 @@ struct App {
     live_pi: Option<usize>, /* index of the assistant entry being streamed */
     streaming: bool, /* pi is mid-reply (between agent_start and agent_end) */
     status: String,
-    pi_scale: i32, /* font scale for pi's text (A- / A+) */
+    pi_px: i32, /* body text size in pixels for pi's replies (A- / A+) */
     nib: usize, /* pen nib size, index into NIB_BASE (S/M/L) */
     deghost_at: Option<Instant>, /* when to do the next cleanup flash */
+    wave: i32, /* current e-ink waveform mode (RefreshMode as i32) */
 
     /* pen writing in the canvas */
     pen_last: Option<(i32, i32)>,
@@ -162,7 +170,7 @@ struct App {
 
 impl App {
     fn max_scroll(&self) -> i32 {
-        (total_height(&self.entries, self.pi_scale) - (VIEW_Y1 - VIEW_Y0)).max(0)
+        (total_height(&self.entries, self.pi_px) - (VIEW_Y1 - VIEW_Y0)).max(0)
     }
 
     /* -- painting -- */
@@ -264,10 +272,21 @@ impl App {
     }
 
     fn redraw_view(&mut self) {
-        conv::draw(&mut self.fb, &self.entries, VIEW_Y0, VIEW_Y1, self.scroll, self.pi_scale);
+        /* antialiased text wants the quality waveform, not the near-binary
+         * UFAST one we ink with; switch just for the viewport blit */
+        self.use_wave(RefreshMode::Ui);
+        conv::draw(&mut self.fb, &self.entries, VIEW_Y0, VIEW_Y1, self.scroll, self.pi_px);
         let _ = self.sock.update_region(0, VIEW_Y0, FB_W, VIEW_Y1 - VIEW_Y0);
         self.view_dirty = false;
         self.last_view_flush = Instant::now();
+    }
+
+    /// Switch the e-ink waveform mode, but only when it actually changes.
+    fn use_wave(&mut self, m: RefreshMode) {
+        if self.wave != m as i32 {
+            self.wave = m as i32;
+            let _ = self.sock.set_refresh_mode(m);
+        }
     }
 
     /* -- buttons, font size, deghosting -- */
@@ -298,11 +317,11 @@ impl App {
     }
 
     fn change_scale(&mut self, delta: i32) {
-        let new = (self.pi_scale + delta).clamp(conv::MIN_SCALE, conv::MAX_SCALE);
-        if new == self.pi_scale {
+        let new = (self.pi_px + delta * PI_PX_STEP).clamp(PI_PX_MIN, PI_PX_MAX);
+        if new == self.pi_px {
             return;
         }
-        self.pi_scale = new;
+        self.pi_px = new;
         /* keep the view pinned to the bottom if it was; else clamp */
         self.scroll = if self.stuck { self.max_scroll() } else { self.scroll.min(self.max_scroll()) };
         self.redraw_view();
@@ -596,9 +615,10 @@ fn main() -> std::process::ExitCode {
         live_pi: None,
         streaming: false,
         status: String::new(),
-        pi_scale: 3,
+        pi_px: PI_PX_DEFAULT,
         nib: 2, /* largest by default — the nib we had before */
         deghost_at: None,
+        wave: RefreshMode::UltraFast as i32,
         pen_last: None,
         ink_dirty: None,
         last_ink_flush: now,
@@ -707,6 +727,7 @@ fn main() -> std::process::ExitCode {
         /* -- due flushes -- */
         if app.ink_dirty.is_some() && app.last_ink_flush.elapsed() >= INK_FLUSH {
             let (x0, y0, x1, y1) = app.ink_dirty.take().unwrap();
+            app.use_wave(RefreshMode::UltraFast); /* pen ink wants low latency */
             let _ = app
                 .sock
                 .update_region(x0.max(0), y0.max(0), x1 - x0 + 1, y1 - y0 + 1);

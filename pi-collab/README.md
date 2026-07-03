@@ -51,12 +51,21 @@ tap SEND. Drag the conversation with a finger to scroll.
 - **pi's reply → streamed text, rendered by content type.** `message_update`
   text deltas append to the live reply bubble; tool runs and errors show as
   dimmed notes. Each reply is parsed (`md.rs`) into typed blocks and rendered
-  in style: headings underlined, bullets dotted, fenced code in a gray
-  monospace box with the language labelled and indentation preserved, and
-  SVG diagrams rasterized to a bitmap by a tiny built-in renderer (`svg.rs`)
-  — which falls back to a code box for anything it can't draw. The viewport
-  repaints on a throttle (e-ink can't animate) and auto-follows the bottom
-  while pi types — unless you've scrolled up to read history.
+  in style: prose and headings in **EB Garamond**, fenced code in **Google
+  Sans Code** in a gray box (language labelled, indentation preserved),
+  bullets dotted, and SVG diagrams rasterized to a bitmap by a tiny built-in
+  renderer (`svg.rs`) that falls back to a code box for anything it can't
+  draw. Text is real antialiased TrueType (`text.rs`, via the pure-Rust
+  `fontdue`); the small UI chrome (buttons, labels, logo) stays on the crisp
+  5x7 bitmap font. The conversation viewport is painted with the quality
+  e-ink waveform (so the antialiased grays are clean) while pen ink uses the
+  fast waveform; it repaints on a throttle and auto-follows the bottom while
+  pi types — unless you've scrolled up to read history.
+
+  Fonts are embedded from `assets/fonts/` (both OFL-licensed). To swap the
+  body face (e.g. to Iowan Old Style) replace `EBGaramond-*.ttf` and the
+  `include_bytes!` paths in `text.rs`. A `.ttc` collection needs a face
+  extracted first (`fonttools`), since fontdue loads a single face.
 - **pi's replies are plain text.** The prompt asks pi to avoid markdown,
   since the log renders with a plain bitmap font. pi keeps its full tool set
   and whatever model/config your `~/.pi` settings specify (default here was
@@ -68,7 +77,9 @@ tap SEND. Drag the conversation with a finger to scroll.
 src/main.rs     the app: layout, input routing, send, pi-event handling
 src/conv.rs     conversation model + scrollable layout/rendering + word wrap
 src/md.rs       content detection: split a reply into typed blocks + render
+src/text.rs     antialiased TrueType text (fontdue) + glyph cache + wrapping
 src/svg.rs      minimal SVG rasterizer (rect/line/circle/polygon/path)
+assets/fonts/   embedded TrueType fonts (EB Garamond, Google Sans Code)
 src/pi_rpc.rs   the pi child process and its JSONL protocol
 src/png.rs      grayscale PNG encoder + base64 (no dependencies)
 src/qtfb.rs     AppLoad protocol (framebuffer + input)   [from sample-app-rust]
