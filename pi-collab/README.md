@@ -48,8 +48,13 @@ tap SEND. Drag the conversation with a finger to scroll.
   out of the framebuffer, cropped to the ink's bounding box, downscaled, and
   encoded as a grayscale PNG (`src/png.rs`, no deps) that rides along in the
   RPC `prompt` command as a base64 image attachment.
-- **pi's reply → streamed text.** `message_update` text deltas append to the
-  live reply bubble; tool runs and errors show as dimmed notes. The viewport
+- **pi's reply → streamed text, rendered by content type.** `message_update`
+  text deltas append to the live reply bubble; tool runs and errors show as
+  dimmed notes. Each reply is parsed (`md.rs`) into typed blocks and rendered
+  in style: headings underlined, bullets dotted, fenced code in a gray
+  monospace box with the language labelled and indentation preserved, and
+  SVG diagrams rasterized to a bitmap by a tiny built-in renderer (`svg.rs`)
+  — which falls back to a code box for anything it can't draw. The viewport
   repaints on a throttle (e-ink can't animate) and auto-follows the bottom
   while pi types — unless you've scrolled up to read history.
 - **pi's replies are plain text.** The prompt asks pi to avoid markdown,
@@ -62,6 +67,8 @@ tap SEND. Drag the conversation with a finger to scroll.
 ```
 src/main.rs     the app: layout, input routing, send, pi-event handling
 src/conv.rs     conversation model + scrollable layout/rendering + word wrap
+src/md.rs       content detection: split a reply into typed blocks + render
+src/svg.rs      minimal SVG rasterizer (rect/line/circle/polygon/path)
 src/pi_rpc.rs   the pi child process and its JSONL protocol
 src/png.rs      grayscale PNG encoder + base64 (no dependencies)
 src/qtfb.rs     AppLoad protocol (framebuffer + input)   [from sample-app-rust]

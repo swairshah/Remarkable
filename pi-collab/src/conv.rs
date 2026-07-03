@@ -6,7 +6,7 @@
 //! draw.rs clip band means an entry straddling the top/bottom edge is
 //! simply cut off, no per-entry scissoring needed here.
 
-use crate::draw::{BLACK, GRAY, LIGHT, WHITE};
+use crate::draw::{GRAY, LIGHT, WHITE};
 use crate::font::{ADVANCE, CHAR_ROWS};
 use crate::qtfb::{Framebuffer, RM2_WIDTH as FB_W};
 
@@ -19,11 +19,6 @@ const PAD_TOP: i32 = 16;
 /// pi text is rendered at a user-adjustable scale (A- / A+ in the header).
 pub const MIN_SCALE: i32 = 2;
 pub const MAX_SCALE: i32 = 6;
-
-/// Line height (row advance) for pi text at the given scale.
-fn line_h(scale: i32) -> i32 {
-    CHAR_ROWS * scale + 8
-}
 
 /// How many characters of pi text fit on one line at the given scale.
 pub fn wrap_cols(scale: i32) -> usize {
@@ -83,11 +78,16 @@ pub fn wrap(text: &str, cols: usize) -> Vec<String> {
 fn entry_height(e: &Entry, scale: i32) -> i32 {
     match e {
         Entry::You(img) => LABEL_H + img.h,
-        Entry::Pi(text) => LABEL_H + wrap(text, wrap_cols(scale)).len() as i32 * line_h(scale),
+        Entry::Pi(text) => LABEL_H + crate::md::height(&crate::md::parse(text), scale, content_w()),
         Entry::Note(text) => {
             wrap(text, wrap_cols(LABEL_SCALE)).len() as i32 * (CHAR_ROWS * LABEL_SCALE + 6)
         }
     }
+}
+
+/// Usable content width for pi's rendered blocks.
+fn content_w() -> i32 {
+    FB_W - 2 * MARGIN
 }
 
 pub fn total_height(entries: &[Entry], scale: i32) -> i32 {
@@ -109,11 +109,8 @@ fn draw_entry(fb: &mut Framebuffer, e: &Entry, y: i32, scale: i32) {
         }
         Entry::Pi(text) => {
             fb.text(MARGIN, y, "pi", LABEL_SCALE, GRAY);
-            let mut ly = y + LABEL_H;
-            for line in wrap(text, wrap_cols(scale)) {
-                fb.text(MARGIN, ly, &line, scale, BLACK);
-                ly += line_h(scale);
-            }
+            let segs = crate::md::parse(text);
+            crate::md::draw(fb, MARGIN, y + LABEL_H, content_w(), &segs, scale);
         }
         Entry::Note(text) => {
             let mut ly = y;

@@ -24,10 +24,12 @@
 mod conv;
 mod draw;
 mod font;
+mod md;
 mod pen;
 mod pi_rpc;
 mod png;
 mod qtfb;
+mod svg;
 
 use conv::{total_height, Entry, GrayImg};
 use draw::{text_width, BLACK, GRAY, WHITE};

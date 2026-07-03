@@ -112,15 +112,8 @@ def main():
     drain(0.9)  # pi is now in its "thinking" window
     write_png(out_png.replace(".png", "-thinking.png"))  # catch the dot
 
-    drain(2.5)  # let pi's reply stream in
-
-    # bump the font up twice to check A+ reflow + the deghost flash
-    for _ in range(2):
-        pen(PEN_PRESS, FUP_X + 30, HB_Y + HB_H // 2)
-        pen(PEN_RELEASE, FUP_X + 30, HB_Y + HB_H // 2)
-        drain(0.4)
+    drain(4.0)  # let pi's markdown + code + svg reply stream in
     drain(1.2)  # let the coalesced deghost settle
-
     write_png(out_png)
 
     app.terminate()
