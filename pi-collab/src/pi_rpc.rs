@@ -16,7 +16,16 @@ use std::io::Write;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
-const SESSION_ID: &str = "pi-collab";
+/// Where pi-collab keeps its own conversation history — a dedicated data
+/// dir, NOT the cluttered /home/root. `$PI_COLLAB_SESSION_DIR` overrides it
+/// (the preview harness points it at a scratch dir).
+fn session_dir() -> String {
+    if let Ok(d) = std::env::var("PI_COLLAB_SESSION_DIR") {
+        return d;
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/root".into());
+    format!("{home}/.local/share/pi-collab/sessions")
+}
 
 /// What the UI cares about, distilled from the event stream.
 pub enum PiEvent {
@@ -37,18 +46,53 @@ pub struct Pi {
     stdin: ChildStdin,
     stdout_fd: RawFd,
     buf: Vec<u8>,
+    resumed: bool,
 }
 
 impl Pi {
     /// Spawn pi in RPC mode. PI_COLLAB_BIN overrides the binary (the
     /// preview harness points it at a fake); the default is where
     /// pi-harness installs it on the tablet.
+    ///
+    /// Sessions live in a dedicated dir (see `session_dir`), one timestamped
+    /// JSONL file per conversation. If a prior session exists we `--continue`
+    /// it, so pi keeps its memory across app restarts; either way pi is told
+    /// where the dated history lives so it can read older ones on request.
     pub fn spawn() -> std::io::Result<Pi> {
         let bin = std::env::var("PI_COLLAB_BIN")
             .unwrap_or_else(|_| "/home/root/bin/pi".into());
         let home = std::env::var("HOME").unwrap_or_else(|_| "/home/root".into());
+        let dir = session_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let resumed = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .any(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+            })
+            .unwrap_or(false);
+
+        let sys = format!(
+            "Your past conversations with this user are saved as timestamped \
+             JSONL session files in {dir}. If the user refers to an earlier \
+             session or a previous day, you may read those files with your \
+             tools to recall what was discussed."
+        );
+        let mut args = vec![
+            "--mode".to_string(),
+            "rpc".into(),
+            "--session-dir".into(),
+            dir.clone(),
+            "--name".into(),
+            "pi-collab".into(),
+            "--append-system-prompt".into(),
+            sys,
+        ];
+        if resumed {
+            args.push("--continue".into()); /* resume the latest session */
+        }
+
         let mut child = Command::new(&bin)
-            .args(["--mode", "rpc", "--session-id", SESSION_ID])
+            .args(&args)
             .current_dir(&home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -61,8 +105,16 @@ impl Pi {
             let fl = libc::fcntl(stdout_fd, libc::F_GETFL, 0);
             libc::fcntl(stdout_fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
         }
-        println!("pi-collab: spawned {bin} (session {SESSION_ID})");
-        Ok(Pi { child, stdin, stdout_fd, buf: Vec::new() })
+        println!(
+            "pi-collab: spawned {bin} (session-dir {dir}, {})",
+            if resumed { "continued" } else { "fresh" }
+        );
+        Ok(Pi { child, stdin, stdout_fd, buf: Vec::new(), resumed })
+    }
+
+    /// True if we resumed a prior conversation (pi already has context).
+    pub fn resumed(&self) -> bool {
+        self.resumed
     }
 
     pub fn raw_fd(&self) -> RawFd {

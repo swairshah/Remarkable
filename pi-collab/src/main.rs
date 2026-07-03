@@ -590,9 +590,14 @@ fn main() -> std::process::ExitCode {
         view_dirty: false,
         last_view_flush: now,
     };
-    if app.pi.is_none() {
-        app.entries
-            .push(Entry::Note("[pi did not start — check the journal]".into()));
+    match app.pi.as_ref() {
+        None => app
+            .entries
+            .push(Entry::Note("[pi did not start — check the journal]".into())),
+        Some(pi) if pi.resumed() => app
+            .entries
+            .push(Entry::Note("[resumed your previous session — pi remembers earlier context]".into())),
+        Some(_) => {}
     }
 
     /* first paint */
