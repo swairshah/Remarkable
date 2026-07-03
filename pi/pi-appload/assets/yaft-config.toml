@@ -1,0 +1,21 @@
+# yaft config for the pi terminal on the reMarkable 2 (AppLoad).
+# Requires the patched yaft build shipped by pi-appload (see yaft-tablet.patch).
+
+layout = "qwerty"
+keymap = "rm-qwerty"
+
+# Type Folio attached -> landscape + hidden on-screen keyboard.
+auto-rotate = true
+rotation = "none"
+
+# Full e-ink refresh every 512 partial updates (clears ghosting).
+auto-refresh = 512
+
+repeat-delay = 600
+repeat-rate = 25
+
+# 2x font: 32x64 px cells -> 43 columns, comfortable for pi's TUI.
+font-scale = 2
+
+# Blank border around the terminal area, in pixels.
+padding = 16

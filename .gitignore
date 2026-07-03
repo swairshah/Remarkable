@@ -11,3 +11,8 @@ activity/
 
 # Environment files
 .env
+
+# Installer download/build caches (reMarkable pi projects)
+pi/pi-appload/.cache/
+pi/pi-harness/.cache/
+pi/ghostwriter/.cache/

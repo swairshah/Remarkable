@@ -1,0 +1,307 @@
+diff --git a/apps/yaft/YaftWidget.h b/apps/yaft/YaftWidget.h
+index b14395c..4164f11 100644
+--- a/apps/yaft/YaftWidget.h
++++ b/apps/yaft/YaftWidget.h
+@@ -65,7 +65,11 @@ public:
+     return Rotated(
+       rotation,
+       Column(
+-        Expanded(Screen(term.get(), false, config.autoRefresh)),
++        Expanded(Screen(term.get(),
++                        false,
++                        config.autoRefresh,
++                        config.fontScale,
++                        config.padding)),
+         Keyboard(term.get(),
+                  KeyboardParams{
+                    .layout = layout,
+diff --git a/apps/yaft/config.cpp b/apps/yaft/config.cpp
+index 983eead..2127c0f 100644
+--- a/apps/yaft/config.cpp
++++ b/apps/yaft/config.cpp
+@@ -24,6 +24,12 @@ rotation = "none"
+ # Set to 0 to disable auto refresh.
+ auto-refresh = 1024
+ 
++# Integer font scale factor (1 = native 16x32 px cells, 2 = 32x64).
++font-scale = 1
++
++# Blank border around the terminal area, in pixels.
++padding = 0
++
+ # Repeat delay for keyboards.
+ repeat-delay = 600
+ # Repeat rate in chars per second.
+@@ -103,6 +109,10 @@ getConfig(const toml::table& input) {
+   parseValue(errors, cfg.autoRefresh, tbl, "auto-refresh");
+   parseValue(errors, cfg.repeatDelay, tbl, "repeat-delay");
+   parseValue(errors, cfg.repeatRate, tbl, "repeat-rate");
++  parseValue(errors, cfg.fontScale, tbl, "font-scale");
++  parseValue(errors, cfg.padding, tbl, "padding");
++  cfg.fontScale = std::clamp(cfg.fontScale, 1, 8);
++  cfg.padding = std::clamp(cfg.padding, 0, 200);
+ 
+   if (!tbl.empty()) {
+     for (const auto& [key, _] : tbl) {
+diff --git a/apps/yaft/config.h b/apps/yaft/config.h
+index 7146b6a..92cf65e 100644
+--- a/apps/yaft/config.h
++++ b/apps/yaft/config.h
+@@ -25,6 +25,12 @@ struct YaftConfig {
+   // Set to 0 to disable.
+   int autoRefresh = 0;
+ 
++  // Integer scale factor for the terminal font (1 = native 16x32 px cells).
++  int fontScale = 1;
++
++  // Blank border around the terminal area, in pixels.
++  int padding = 0;
++
+   // Key repeat delay in ms
+   int repeatDelay = 600;
+   // Key repeat rate in chars / sec.
+diff --git a/apps/yaft/keyboard.cpp b/apps/yaft/keyboard.cpp
+index 69e61ce..dfbbba3 100644
+--- a/apps/yaft/keyboard.cpp
++++ b/apps/yaft/keyboard.cpp
+@@ -450,6 +450,21 @@ KeyboardRenderObject::handleTouchEvent(const Ev& ev) {
+       return;
+     }
+ 
++    // AppLoad's qtfb window (used on rM2 with xovi) forwards each finger tap
++    // as both a touch and a synthesized pen event. Drop the mirrored press:
++    // same key, other device type, within the mirror window. State is only
++    // updated for accepted presses, so a real fast double-tap (same device
++    // type) is never suppressed.
++    const bool isPen = getSlot(ev) == pen_slot;
++    const auto now = TimeSource::now();
++    if (key == lastPressKey && isPen != lastPressWasPen &&
++        (now - lastPressTime) < std::chrono::milliseconds(300)) {
++      return;
++    }
++    lastPressKey = key;
++    lastPressTime = now;
++    lastPressWasPen = isPen;
++
+     sendKeyDown(*key);
+ 
+     auto& state = keyState[key];
+diff --git a/apps/yaft/keyboard.h b/apps/yaft/keyboard.h
+index 5fe77ad..596d207 100644
+--- a/apps/yaft/keyboard.h
++++ b/apps/yaft/keyboard.h
+@@ -107,6 +107,12 @@ private:
+   const KeyInfo* altKey = nullptr;
+   std::unordered_map<const KeyInfo*, KeyState> keyState;
+ 
++  // Cross-device tap dedup: AppLoad's qtfb window mirrors every finger tap
++  // as both a touch and a synthesized pen event.
++  const KeyInfo* lastPressKey = nullptr;
++  TimeSource::time_point lastPressTime{};
++  bool lastPressWasPen = false;
++
+   struct PhysKeyState {
+     TimeSource::time_point nextRepeat;
+     bool down = false;
+diff --git a/apps/yaft/screen.cpp b/apps/yaft/screen.cpp
+index 7303872..4f39df1 100644
+--- a/apps/yaft/screen.cpp
++++ b/apps/yaft/screen.cpp
+@@ -1,6 +1,8 @@
+ #include "screen.h"
+ #include "conf.h"
+ 
++#include <algorithm>
++
+ using namespace rmlib;
+ 
+ namespace {
+@@ -41,11 +43,11 @@ brightness2gray(uint16_t brightness) {
+ }
+ 
+ void
+-initMouseBuf(std::array<char, 6>& buf, Point loc) {
++initMouseBuf(std::array<char, 6>& buf, Point loc, int scale, int padding) {
+   constexpr char esc_char = '\x1b';
+ 
+-  loc.x /= CELL_WIDTH;
+-  loc.y /= CELL_HEIGHT;
++  loc.x = std::max(0, loc.x - padding) / (CELL_WIDTH * scale);
++  loc.y = std::max(0, loc.y - padding) / (CELL_HEIGHT * scale);
+ 
+   char cx = 33 + loc.x;
+   char cy = 33 + loc.y;
+@@ -81,10 +83,19 @@ ScreenRenderObject::doLayout(const rmlib::Constraints& constraints) {
+   const auto size = constraints.isBounded() ? constraints.max : constraints.min;
+   assert(size.width != 0 && size.height != 0);
+ 
++  // The terminal works in unscaled cell coordinates: give it the usable
++  // area (minus padding) divided by the font scale.
++  const int scale = widget->fontScale;
++  const int pad = widget->padding;
++  const int usableWidth =
++    std::max<int>(CELL_WIDTH, (size.width - 2 * pad) / scale);
++  const int usableHeight =
++    std::max<int>(CELL_HEIGHT, (size.height - 2 * pad) / scale);
++
+   if (widget->isLandscape) {
+-    term_resize(widget->term, size.height, size.width, /* report */ true);
++    term_resize(widget->term, usableHeight, usableWidth, /* report */ true);
+   } else {
+-    term_resize(widget->term, size.width, size.height, /* report */ true);
++    term_resize(widget->term, usableWidth, usableHeight, /* report */ true);
+   }
+   return size;
+ }
+@@ -110,9 +121,10 @@ ScreenRenderObject::doDraw(rmlib::Canvas& canvas) {
+       return;
+     }
+ 
+-    bool useA2 = widget->isLandscape
+-                   ? term.lines * CELL_HEIGHT <= currentRect.width()
+-                   : term.lines * CELL_HEIGHT <= currentRect.height();
++    bool useA2 =
++      widget->isLandscape
++        ? term.lines * CELL_HEIGHT * widget->fontScale <= currentRect.width()
++        : term.lines * CELL_HEIGHT * widget->fontScale <= currentRect.height();
+     fb->doUpdate(canvas.subCanvas(currentRect),
+                  useA2 ? fb::Waveform::A2 : fb::Waveform::DU,
+                  useA2 ? fb::UpdateFlags::None : fb::UpdateFlags::Priority);
+@@ -140,19 +152,49 @@ ScreenRenderObject::doDraw(rmlib::Canvas& canvas) {
+   return {};
+ }
+ 
++namespace {
++// Whiten the padding border around the terminal cell area.
++void
++clearPadding(rmlib::Canvas& canvas, int pad) {
++  if (pad <= 0) {
++    return;
++  }
++  const auto full = canvas.rect();
++  canvas.set(Rect{ full.topLeft, { full.bottomRight.x, pad - 1 } }, white);
++  canvas.set(
++    Rect{ { full.topLeft.x, full.bottomRight.y - pad + 1 }, full.bottomRight },
++    white);
++  canvas.set(Rect{ full.topLeft, { pad - 1, full.bottomRight.y } }, white);
++  canvas.set(
++    Rect{ { full.bottomRight.x - pad + 1, full.topLeft.y }, full.bottomRight },
++    white);
++}
++} // namespace
++
+ rmlib::Rect
+ ScreenRenderObject::drawLine(rmlib::Canvas& canvas,
+                              terminal_t& term,
+                              int line) const {
+ 
+   const bool isLandscape = widget->isLandscape;
++  const int scale = widget->fontScale;
++  const int pad = widget->padding;
++  const int cellWidthPx = CELL_WIDTH * scale;
++  const int cellHeightPx = CELL_HEIGHT * scale;
+ 
+-  // x in landscape, y in portrait.
+-  int zStart = isLandscape ? term.height - (term.marginTop + line * CELL_HEIGHT)
+-                           : term.marginTop + line * CELL_HEIGHT;
++  if (isFullDraw()) {
++    clearPadding(canvas, pad);
++  }
++
++  // x in landscape, y in portrait. Terminal coordinates are unscaled; canvas
++  // positions are terminal coordinates * scale + padding.
++  int zStart =
++    isLandscape
++      ? pad + (term.height - (term.marginTop + line * CELL_HEIGHT)) * scale
++      : pad + (term.marginTop + line * CELL_HEIGHT) * scale;
+ 
+   for (int col = 0; col < term.cols; col++) {
+-    int marginLeft = term.marginLeft + col * CELL_WIDTH;
++    int marginLeft = pad + (term.marginLeft + col * CELL_WIDTH) * scale;
+ 
+     auto& cell = term.cells[line][col];
+ 
+@@ -206,14 +248,17 @@ ScreenRenderObject::drawLine(rmlib::Canvas& canvas,
+       }
+     }
+ 
+-    for (int h = 0; h < CELL_HEIGHT; h++) {
++    for (int h = 0; h < cellHeightPx; h++) {
++      const int glyphRow = h / scale;
++
+       /* if UNDERLINE attribute on, swap bg/fg */
+-      if ((h == (CELL_HEIGHT - 1)) &&
++      if ((glyphRow == (CELL_HEIGHT - 1)) && (h % scale == 0) &&
+           ((cell.attribute & attr_mask[ATTR_UNDERLINE]) != 0)) {
+         std::swap(bgGray, fgGray);
+       }
+ 
+-      for (int w = 0; w < CELL_WIDTH; w++) {
++      for (int w = 0; w < cellWidthPx; w++) {
++        const int glyphCol = w / scale;
+         const auto pos = isLandscape ? Point{ zStart - h, marginLeft + w }
+                                      : Point{ marginLeft + w, zStart + h };
+ 
+@@ -223,7 +268,8 @@ ScreenRenderObject::drawLine(rmlib::Canvas& canvas,
+                               : cell.glyph.regularp;
+ 
+         const auto grayMode =
+-          (glyph->bitmap[h] & (0x01 << (bdfPadding + CELL_WIDTH - 1 - w))) != 0U
++          (glyph->bitmap[glyphRow] &
++           (0x01 << (bdfPadding + CELL_WIDTH - 1 - glyphCol))) != 0U
+             ? fgGray
+             : bgGray;
+ 
+@@ -252,9 +298,9 @@ ScreenRenderObject::drawLine(rmlib::Canvas& canvas,
+ 
+   const auto size = this->getSize();
+   return isLandscape
+-           ? Rect{ { zStart - CELL_HEIGHT, 0 }, { zStart, size.height - 1 } }
++           ? Rect{ { zStart - cellHeightPx, 0 }, { zStart, size.height - 1 } }
+            : Rect{ { 0, zStart },
+-                   { size.width - 1, zStart + CELL_HEIGHT - 1 } };
++                   { size.width - 1, zStart + cellHeightPx - 1 } };
+ }
+ 
+ template<typename Ev>
+@@ -290,7 +336,7 @@ ScreenRenderObject::handleTouchEvent(const Ev& ev) {
+                         : scaledLoc;
+ 
+   std::array<char, 6> buf{};
+-  initMouseBuf(buf, rotatedLoc);
++  initMouseBuf(buf, rotatedLoc, widget->fontScale, widget->padding);
+ 
+   // Mouse down on first finger if mouse is not down.
+   if (ev.isDown() && mouseSlot == -1 /*&& lastFingers == 0*/) {
+diff --git a/apps/yaft/screen.h b/apps/yaft/screen.h
+index cc493e5..987f450 100644
+--- a/apps/yaft/screen.h
++++ b/apps/yaft/screen.h
+@@ -9,8 +9,16 @@ class ScreenRenderObject;
+ 
+ class Screen : public rmlib::Widget<ScreenRenderObject> {
+ public:
+-  Screen(struct terminal_t* term, bool isLandscape, int autoRefresh)
+-    : term(term), isLandscape(isLandscape) {}
++  Screen(struct terminal_t* term,
++         bool isLandscape,
++         int autoRefresh,
++         int fontScale = 1,
++         int padding = 0)
++    : term(term)
++    , isLandscape(isLandscape)
++    , autoRefresh(autoRefresh)
++    , fontScale(fontScale)
++    , padding(padding) {}
+ 
+   std::unique_ptr<rmlib::RenderObject> createRenderObject() const;
+ 
+@@ -20,6 +28,8 @@ private:
+ 
+   bool isLandscape = false;
+   int autoRefresh = 0;
++  int fontScale = 1;
++  int padding = 0;
+ };
+ 
+ class ScreenRenderObject : public rmlib::LeafRenderObject<Screen> {

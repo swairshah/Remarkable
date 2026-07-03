@@ -1,0 +1,10 @@
+[Unit]
+Description=Re-enable xovi (xochitl extensions) after boot
+After=multi-user.target xochitl.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/root/xovi/start
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+{
+    "name": "pi",
+    "application": "/home/root/opt/yaft/yaft",
+    "args": ["/home/root/xovi/exthome/appload/pi/pi-session.sh"],
+    "workingDirectory": "/home/root",
+    "environment": {
+        "HOME": "/home/root",
+        "LD_PRELOAD": "/home/root/shims/qtfb-shim.so",
+        "LD_LIBRARY_PATH": "/home/root/opt/yaft/lib",
+        "QTFB_SHIM_MODEL": "1",
+        "QTFB_SHIM_INPUT_PATH_TOUCHSCREEN": "/dev/input/event2"
+    },
+    "qtfb": true,
+    "aspectRatio": "original",
+    "disablesWindowedMode": false
+}
