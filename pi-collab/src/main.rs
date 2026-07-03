@@ -277,7 +277,14 @@ impl App {
     fn redraw_view(&mut self) {
         /* antialiased text wants the quality waveform, not the near-binary
          * UFAST one we ink with; switch just for the viewport blit */
-        self.use_wave(RefreshMode::Ui);
+        self.redraw_view_wave(RefreshMode::Ui);
+    }
+
+    /// Repaint the viewport with a specific e-ink waveform. Scrolling uses
+    /// the fast, flash-free UltraFast one; streaming/settled text uses the
+    /// quality one so the antialiasing is clean.
+    fn redraw_view_wave(&mut self, wave: RefreshMode) {
+        self.use_wave(wave);
         conv::draw(&mut self.fb, &self.entries, VIEW_Y0, VIEW_Y1, self.scroll, self.pi_px);
         let _ = self.sock.update_region(0, VIEW_Y0, FB_W, VIEW_Y1 - VIEW_Y0);
         self.view_dirty = false;
@@ -433,11 +440,12 @@ impl App {
             }
             Phase::Release => {
                 if self.drag_last.take().is_some() && self.scroll_pending {
-                    /* the drag ended: paint the final position once, then
-                     * let the settle timer deghost it */
+                    /* the drag ended: paint the final position ONCE with the
+                     * fast flash-free waveform, and do NOT deghost. Scrolling
+                     * stays flicker-free; any residue is cleared on demand
+                     * with the REFRESH button. */
                     self.scroll_pending = false;
-                    self.redraw_view();
-                    self.schedule_deghost();
+                    self.redraw_view_wave(RefreshMode::UltraFast);
                 }
             }
         }
