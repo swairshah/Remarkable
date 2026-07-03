@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "types": [],
+    "noEmit": true
+  },
+  "include": [
+    "flue.config.ts",
+    "src",
+    "test"
+  ],
+  "exclude": [
+    "dist"
+  ]
+}

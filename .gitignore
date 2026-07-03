@@ -16,3 +16,8 @@ activity/
 pi/pi-appload/.cache/
 pi/pi-harness/.cache/
 pi/ghostwriter/.cache/
+
+# Build artifacts and dependencies
+node_modules/
+agent/dist/
+sample-app-rust/target/
