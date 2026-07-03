@@ -164,7 +164,11 @@ rsh 'journalctl -u xochitl -n 200 --no-pager 2>/dev/null | grep -iE "xovi|apploa
 
 step "Enabling xovi at boot (xovi-boot.service)"
 cat "$DIR/assets/xovi-boot.service" | rsh 'cat > /etc/systemd/system/xovi-boot.service'
-rsh 'systemctl daemon-reload && systemctl enable xovi-boot >/dev/null 2>&1'
+
+step "Installing library-refresh units (docs dropped by pi appear when the terminal closes)"
+cat "$DIR/assets/pi-rm-refresh.service" | rsh 'cat > /etc/systemd/system/pi-rm-refresh.service'
+cat "$DIR/assets/pi-rm-refresh.path" | rsh 'cat > /etc/systemd/system/pi-rm-refresh.path'
+rsh 'systemctl daemon-reload && systemctl enable xovi-boot >/dev/null 2>&1 && systemctl enable --now pi-rm-refresh.path >/dev/null 2>&1'
 
 printf '\n\033[1mDone.\033[0m On the tablet:\n'
 printf '  1. WiFi on (pi needs internet at runtime).\n'

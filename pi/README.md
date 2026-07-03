@@ -151,7 +151,7 @@ gives pi three tools instead of letting it poke at that with bash:
 |---|---|
 | `remarkable_list` | search/browse documents & folders (names, paths, page counts, dates) |
 | `remarkable_read` | reads notebooks: **typed** text extracted from the v6 blocks (best effort), and **handwritten** pages parsed from raw pen strokes and rendered to PNGs attached to the tool result — pi's multimodal model reads the handwriting from the image (no OCR engine involved) |
-| `remarkable_write` | markdown → minimal EPUB (hand-rolled stored zip, no deps) → uploaded via xochitl's USB web-interface API (appears instantly) or dropped into storage (appears after the next xochitl restart) |
+| `remarkable_write` | two formats: **`text-notebook`** (default) writes a native notebook page of *editable typed text* — a hand-built .rm v6 file (root-text block, validated against rmscene); **`epub`** renders markdown to a reflowable read-only doc. New documents appear automatically: a `pi-rm-refresh` systemd path unit waits until the pi terminal closes, then reloads the UI |
 
 The extension also uses pi's extension API for two environment fixes:
 
@@ -177,6 +177,8 @@ The extension also uses pi's extension API for two environment fixes:
 /home/root/xovi/exthome/appload/pi/   the launcher app (manifest, icon, session script)
 /home/root/shims/qtfb-shim.so   rM1 emulation shim
 /etc/systemd/system/xovi-boot.service   re-enables xovi after reboot
+/etc/systemd/system/pi-rm-refresh.{path,service}   reloads the UI (once the
+                                        terminal closes) when pi drops new docs
 ```
 
 ## Lifecycle, rescue, updates
@@ -201,9 +203,10 @@ The extension also uses pi's extension API for two environment fixes:
   (fine for linearly written notes). Handwriting is delivered as rendered
   page images (capped per call — use `firstPage`/`maxPages` to window big
   notebooks), so reading it costs image tokens and needs a vision model.
-- `remarkable_write`'s instant path needs the USB web interface enabled
-  (Settings → Storage); otherwise new documents appear on the next xochitl
-  restart.
+- New documents from `remarkable_write` appear via an automatic UI reload
+  that waits for the pi terminal to close first (xochitl only scans its
+  library at startup, and restarting it would kill the session). Practical
+  effect: write notes, exit pi, and the library refreshes itself.
 - No `git` on the tablet yet, so pi can edit files but not manage repos.
 - Deep sleep kills the session: the terminal is a child of xochitl, so
   letting the tablet sleep for hours ends the pi conversation (pi's session

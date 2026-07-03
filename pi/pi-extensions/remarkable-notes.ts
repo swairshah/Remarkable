@@ -24,6 +24,19 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const XOCHITL = "/home/root/.local/share/remarkable/xochitl";
 const UPLOAD_URLS = ["http://10.11.99.1:80/upload", "http://127.0.0.1:80/upload"];
+// Touching this flag arms pi-rm-refresh.service (installed by pi-appload):
+// it restarts the UI to pick up dropped documents as soon as no terminal
+// session is open, so nothing the user is doing gets killed.
+const REFRESH_FLAG = "/home/root/.local/share/pi-rm-refresh-pending";
+
+function armUiRefresh(): boolean {
+  try {
+    fs.writeFileSync(REFRESH_FLAG, String(Date.now()));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // metadata helpers
@@ -504,6 +517,280 @@ function makeEpub(title: string, markdown: string): Buffer {
   ]);
 }
 
+// ---------------------------------------------------------------------------
+// .rm v6 writing: a notebook page with editable TYPED text (root text block),
+// mirroring rmscene's simple_text_document block sequence.
+
+class Wr {
+  a: number[] = [];
+  u8(v: number) {
+    this.a.push(v & 0xff);
+  }
+  u16(v: number) {
+    this.u8(v);
+    this.u8(v >> 8);
+  }
+  u32(v: number) {
+    this.u8(v);
+    this.u8(v >> 8);
+    this.u8(v >> 16);
+    this.u8(v >> 24);
+  }
+  f32(v: number) {
+    const b = Buffer.alloc(4);
+    b.writeFloatLE(v);
+    this.bytes(b);
+  }
+  f64(v: number) {
+    const b = Buffer.alloc(8);
+    b.writeDoubleLE(v);
+    this.bytes(b);
+  }
+  bytes(b: Buffer | Uint8Array) {
+    for (const x of b) this.a.push(x);
+  }
+  varuint(v: number) {
+    do {
+      let byte = v & 0x7f;
+      v >>>= 7;
+      if (v) byte |= 0x80;
+      this.u8(byte);
+    } while (v);
+  }
+  tag(index: number, type: number) {
+    this.varuint((index << 4) | type);
+  }
+  id(index: number, p1: number, p2: number) {
+    this.tag(index, 0xf);
+    this.u8(p1);
+    this.varuint(p2);
+  }
+  idRaw(p1: number, p2: number) {
+    this.u8(p1);
+    this.varuint(p2);
+  }
+  bool(index: number, v: boolean) {
+    this.tag(index, 0x1);
+    this.u8(v ? 1 : 0);
+  }
+  int(index: number, v: number) {
+    this.tag(index, 0x4);
+    this.u32(v);
+  }
+  float(index: number, v: number) {
+    this.tag(index, 0x4);
+    this.f32(v);
+  }
+  sub(index: number, fn: (w: Wr) => void) {
+    const w = new Wr();
+    fn(w);
+    this.tag(index, 0xc);
+    this.u32(w.a.length);
+    this.a.push(...w.a);
+  }
+  str(index: number, s: string) {
+    this.sub(index, (w) => {
+      const b = Buffer.from(s, "utf8");
+      w.varuint(b.length);
+      w.u8(1);
+      w.bytes(b);
+    });
+  }
+  lwwStr(index: number, ts2: number, s: string) {
+    this.sub(index, (w) => {
+      w.id(1, 0, ts2);
+      w.str(2, s);
+    });
+  }
+  lwwBool(index: number, ts2: number, v: boolean) {
+    this.sub(index, (w) => {
+      w.id(1, 0, ts2);
+      w.bool(2, v);
+    });
+  }
+  buf() {
+    return Buffer.from(this.a);
+  }
+}
+
+function v6Block(type: number, minVer: number, curVer: number, fn: (w: Wr) => void): Buffer {
+  const w = new Wr();
+  fn(w);
+  const h = new Wr();
+  h.u32(w.a.length);
+  h.u8(0);
+  h.u8(minVer);
+  h.u8(curVer);
+  h.u8(type);
+  return Buffer.concat([h.buf(), w.buf()]);
+}
+
+/** Build a complete .rm v6 file whose page contains `text` as typed text. */
+function makeTextRm(text: string, authorUuid: string): Buffer {
+  const author = Buffer.from(authorUuid.replace(/-/g, ""), "hex");
+  // uuid bytes_le: first three fields byte-swapped
+  const authorLe = Buffer.concat([
+    Buffer.from([author[3], author[2], author[1], author[0]]),
+    Buffer.from([author[5], author[4]]),
+    Buffer.from([author[7], author[6]]),
+    author.subarray(8),
+  ]);
+  const nLines = text.split("\n").length;
+  const parts = [Buffer.from("reMarkable .lines file, version=6".padEnd(43, " "), "latin1")];
+  parts.push(
+    v6Block(0x09, 1, 1, (w) => {
+      w.varuint(1);
+      w.sub(0, (s) => {
+        s.varuint(16);
+        s.bytes(authorLe);
+        s.u16(1);
+      });
+    }),
+    v6Block(0x00, 1, 1, (w) => {
+      w.id(1, 1, 1);
+      w.bool(2, true);
+      w.bool(3, false);
+    }),
+    v6Block(0x0a, 0, 1, (w) => {
+      w.int(1, 1);
+      w.int(2, 0);
+      w.int(3, text.length + 1);
+      w.int(4, nLines);
+      w.int(5, 0);
+    }),
+    v6Block(0x01, 1, 1, (w) => {
+      w.id(1, 0, 11);
+      w.id(2, 0, 0);
+      w.bool(3, true);
+      w.sub(4, (s) => s.id(1, 0, 1));
+    }),
+    v6Block(0x07, 1, 1, (w) => {
+      w.id(1, 0, 0);
+      w.sub(2, (s) => {
+        s.sub(1, (a) =>
+          a.sub(1, (b) => {
+            b.varuint(1);
+            b.sub(0, (item) => {
+              item.id(2, 1, 16);
+              item.id(3, 0, 0);
+              item.id(4, 0, 0);
+              item.int(5, 0);
+              item.str(6, text);
+            });
+          }),
+        );
+        s.sub(2, (a) =>
+          a.sub(1, (b) => {
+            b.varuint(1);
+            b.idRaw(0, 0);
+            b.id(1, 1, 15);
+            b.sub(2, (c) => {
+              c.u8(17);
+              c.u8(1); // ParagraphStyle.PLAIN
+            });
+          }),
+        );
+      });
+      w.sub(3, (s) => {
+        s.f64(-468.0);
+        s.f64(234.0);
+      });
+      w.float(4, 936.0);
+    }),
+    v6Block(0x02, 1, 2, (w) => {
+      w.id(1, 0, 1);
+      w.lwwStr(2, 0, "");
+      w.lwwBool(3, 0, true);
+    }),
+    v6Block(0x02, 1, 2, (w) => {
+      w.id(1, 0, 11);
+      w.lwwStr(2, 12, "Layer 1");
+      w.lwwBool(3, 0, true);
+    }),
+    v6Block(0x04, 1, 1, (w) => {
+      w.id(1, 0, 1);
+      w.id(2, 0, 13);
+      w.id(3, 0, 0);
+      w.id(4, 0, 0);
+      w.int(5, 0);
+      w.sub(6, (s) => {
+        s.u8(0x02);
+        s.id(2, 0, 11);
+      });
+    }),
+  );
+  return Buffer.concat(parts);
+}
+
+function dropTextNotebook(title: string, text: string, parent: string): string {
+  const id = randomUUID();
+  const pageId = randomUUID();
+  const authorUuid = randomUUID();
+  const rm = makeTextRm(text, authorUuid);
+  fs.mkdirSync(path.join(XOCHITL, id), { recursive: true });
+  fs.writeFileSync(path.join(XOCHITL, id, `${pageId}.rm`), rm);
+  fs.writeFileSync(
+    path.join(XOCHITL, `${id}.content`),
+    JSON.stringify(
+      {
+        cPages: {
+          lastOpened: { timestamp: "1:1", value: pageId },
+          original: { timestamp: "0:0", value: -1 },
+          pages: [
+            {
+              id: pageId,
+              idx: { timestamp: "1:1", value: "ba" },
+              template: { timestamp: "1:1", value: "Blank" },
+            },
+          ],
+          uuids: [{ first: authorUuid, second: 1 }],
+        },
+        coverPageNumber: -1,
+        dummyDocument: false,
+        extraMetadata: {},
+        fileType: "notebook",
+        fontName: "",
+        formatVersion: 2,
+        lineHeight: -1,
+        margins: 125,
+        orientation: "portrait",
+        pageCount: 1,
+        pageTags: [],
+        sizeInBytes: String(rm.length),
+        tags: [],
+        textAlignment: "justify",
+        textScale: 1,
+        zoomMode: "bestFit",
+      },
+      null,
+      2,
+    ),
+  );
+  fs.writeFileSync(path.join(XOCHITL, `${id}.pagedata`), "Blank\n");
+  fs.writeFileSync(
+    path.join(XOCHITL, `${id}.metadata`),
+    JSON.stringify(
+      {
+        visibleName: title,
+        type: "DocumentType",
+        parent,
+        deleted: false,
+        lastModified: String(Date.now()),
+        lastOpened: "0",
+        lastOpenedPage: 0,
+        metadatamodified: false,
+        modified: false,
+        pinned: false,
+        synced: false,
+        version: 0,
+      },
+      null,
+      2,
+    ),
+  );
+  return id;
+}
+
 async function tryWebUpload(filename: string, epub: Buffer): Promise<string | null> {
   for (const url of UPLOAD_URLS) {
     try {
@@ -567,8 +854,10 @@ e-ink display). Adjust accordingly:
 - remarkable_read returns handwritten pages as rendered PNG images in the
   tool result - you can SEE and read the handwriting directly. Use it when
   the user asks about anything they wrote by hand.
-- remarkable_write is how you create a new note/document for the user
-  (markdown in, EPUB on the tablet out).
+- remarkable_write creates notes/documents. When the user asks you to "add
+  a note" or save text for them, use the default 'text-notebook' format: it
+  produces a real notebook page of EDITABLE TYPED TEXT (like they typed it
+  themselves). Only use 'epub' for longer read-only material.
 - NEVER run 'systemctl restart xochitl', kill xochitl, or reboot: this
   terminal session runs inside xochitl and would be killed instantly.
 - busybox coreutils only (no GNU flags like 'head -n5' shorthand 'head -5',
@@ -731,23 +1020,53 @@ export default function (pi: ExtensionAPI) {
     name: "remarkable_write",
     label: "reMarkable: write note",
     description:
-      "Create a new document on the reMarkable from markdown (rendered as an EPUB, which " +
-      "xochitl displays natively and reflows). Tries the tablet's USB web-interface upload " +
-      "API first (document appears immediately); otherwise drops files into storage, where " +
-      "the document appears after the next xochitl restart.",
+      "Create a new document on the reMarkable. Two formats:\n" +
+      "- 'text-notebook' (DEFAULT - use this for notes): a real notebook page with " +
+      "EDITABLE TYPED TEXT, exactly as if the user typed it on the tablet. Plain text " +
+      "only (no markdown rendering). Appears right after the pi terminal is closed.\n" +
+      "- 'epub': a reflowable read-only document rendered from markdown - use for " +
+      "longer reading material. Can appear instantly via the USB web-interface API.",
     parameters: {
       type: "object",
       properties: {
         title: { type: "string", description: "Document title" },
-        markdown: {
+        content: {
           type: "string",
-          description: "Content. Supports #/##/### headings, - lists, ``` code blocks, paragraphs.",
+          description:
+            "The note content. For text-notebook: plain text (line breaks preserved). " +
+            "For epub: markdown (#/##/### headings, - lists, ``` code blocks).",
+        },
+        format: {
+          type: "string",
+          enum: ["text-notebook", "epub"],
+          description: "Document type (default text-notebook)",
         },
       },
-      required: ["title", "markdown"],
+      required: ["title", "content"],
     },
     async execute(_id: string, params: any) {
-      const epub = makeEpub(params.title, params.markdown);
+      const format = params.format ?? "text-notebook";
+      const armed = () => armUiRefresh();
+      const appearNote = (ok: boolean) =>
+        ok
+          ? "It will appear automatically right after the user closes this pi terminal " +
+            "(the UI reloads itself; nothing is lost). Tell the user that."
+          : "The document is on disk but xochitl only scans at startup: it appears after " +
+            "the next reboot or 'systemctl restart xochitl' over SSH (NEVER from inside " +
+            "this terminal - it would kill this session).";
+
+      if (format === "text-notebook") {
+        const id = dropTextNotebook(params.title, params.content, "");
+        return {
+          content: [{
+            type: "text",
+            text: `Created notebook "${params.title}" with editable typed text (id=${id}). ${appearNote(armed())}`,
+          }],
+          details: { id, format },
+        };
+      }
+
+      const epub = makeEpub(params.title, params.content);
       const filename = `${params.title.replace(/[^\w\- ]+/g, "").trim() || "note"}.epub`;
       const via = await tryWebUpload(filename, epub);
       if (via) {
@@ -757,15 +1076,8 @@ export default function (pi: ExtensionAPI) {
       }
       const id = directDrop(params.title, epub, "");
       return {
-        content: [{
-          type: "text",
-          text:
-            `USB web-interface upload not available; wrote the document directly to storage (id=${id}). ` +
-            `xochitl will show it after its next restart - do NOT restart it from inside this terminal ` +
-            `(this session runs inside xochitl and would be killed). It will appear after the next ` +
-            `reboot/sleep-restart, or the user can run 'systemctl restart xochitl' over SSH.`,
-        }],
-        details: { id },
+        content: [{ type: "text", text: `USB web-interface upload not available; wrote the EPUB directly to storage (id=${id}). ${appearNote(armed())}` }],
+        details: { id, format },
       };
     },
   });

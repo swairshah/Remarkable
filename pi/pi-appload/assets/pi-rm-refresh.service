@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh xochitl's library once the pi terminal is closed
+
+[Service]
+Type=oneshot
+# Wait until no terminal session is open (a xochitl restart would kill it),
+# then consume the flag and restart the UI so dropped documents appear.
+ExecStart=/bin/sh -c 'while pidof yaft >/dev/null 2>&1; do sleep 5; done; rm -f /home/root/.local/share/pi-rm-refresh-pending; systemctl restart xochitl'

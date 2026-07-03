@@ -12,8 +12,8 @@ rsh() { ssh "${SSH_OPTS[@]}" "$HOST" "$@"; }
 echo "==> Reverting xochitl to stock"
 rsh '/home/root/xovi/stock 2>/dev/null || true'
 
-echo "==> Removing boot service"
-rsh 'systemctl disable xovi-boot 2>/dev/null; rm -f /etc/systemd/system/xovi-boot.service; systemctl daemon-reload'
+echo "==> Removing boot + refresh services"
+rsh 'systemctl disable xovi-boot 2>/dev/null; systemctl disable --now pi-rm-refresh.path 2>/dev/null; rm -f /etc/systemd/system/xovi-boot.service /etc/systemd/system/pi-rm-refresh.service /etc/systemd/system/pi-rm-refresh.path /home/root/.local/share/pi-rm-refresh-pending; systemctl daemon-reload'
 
 echo "==> Removing files"
 rsh 'rm -rf /home/root/xovi /home/root/xovi.bak /home/root/shims /home/root/opt/yaft /home/root/.terminfo/y/yaft-256color'

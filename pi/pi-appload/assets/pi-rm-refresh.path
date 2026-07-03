@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch for pending reMarkable library refresh (new docs from pi)
+
+[Path]
+PathExists=/home/root/.local/share/pi-rm-refresh-pending
+
+[Install]
+WantedBy=multi-user.target
