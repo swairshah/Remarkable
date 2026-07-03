@@ -5,9 +5,10 @@
  * (/home/root/.local/share/remarkable/xochitl):
  *
  *   remarkable_list   - browse/search documents and folders
- *   remarkable_read   - best-effort extraction of TYPED text from a notebook
- *                       (.rm v6 "root text" blocks; handwriting is strokes and
- *                       is NOT recognized)
+ *   remarkable_read   - read a notebook: typed text extracted from .rm v6
+ *                       "root text" blocks (best effort), and handwritten
+ *                       pages rendered from raw pen strokes into PNGs that
+ *                       are attached to the tool result for the model to see
  *   remarkable_write  - create a new document (markdown -> EPUB) and try to
  *                       make xochitl pick it up via its USB web-interface API
  *
@@ -17,6 +18,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as zlib from "node:zlib";
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -112,16 +114,17 @@ function resolveDoc(
 const RM_V6_HEADER = "reMarkable .lines file, version=6";
 
 /** Iterate top-level blocks of a v6 .rm file: [u32 len][u8?][u8 min][u8 cur][u8 type] payload */
-function* v6Blocks(buf: Buffer): Generator<{ type: number; payload: Buffer }> {
+function* v6Blocks(buf: Buffer): Generator<{ type: number; version: number; payload: Buffer }> {
   // The header magic is followed by space padding; blocks start after it.
   let off = RM_V6_HEADER.length;
   while (off < buf.length && buf[off] === 0x20) off++;
   while (off + 8 <= buf.length) {
     const len = buf.readUInt32LE(off);
+    const version = buf[off + 6];
     const type = buf[off + 7];
     const start = off + 8;
     if (len === 0 || start + len > buf.length) break;
-    yield { type, payload: buf.subarray(start, start + len) };
+    yield { type, version, payload: buf.subarray(start, start + len) };
     off = start + len;
   }
 }
@@ -160,36 +163,197 @@ function extractTextFromRootText(payload: Buffer): string[] {
   return runs;
 }
 
-function readTypedText(docId: string, contentJson: any): string {
-  const dir = path.join(XOCHITL, docId);
-  const pageIds: string[] =
-    contentJson?.cPages?.pages?.filter((p: any) => !p.deleted)?.map((p: any) => p.id) ??
-    contentJson?.pages ??
-    [];
-  const out: string[] = [];
-  pageIds.forEach((pid, idx) => {
-    const rmPath = path.join(dir, `${pid}.rm`);
-    if (!fs.existsSync(rmPath)) return;
-    const buf = fs.readFileSync(rmPath);
-    if (!buf.subarray(0, RM_V6_HEADER.length).toString("latin1").startsWith(RM_V6_HEADER)) {
-      out.push(`--- page ${idx + 1}: unsupported .rm version (not v6) ---`);
-      return;
+// ---------------------------------------------------------------------------
+// .rm v6 stroke parsing + PNG rendering (handwritten pages -> images the
+// model can read; no native deps, PNG via node:zlib)
+
+class Cur {
+  b: Buffer;
+  o = 0;
+  constructor(b: Buffer) {
+    this.b = b;
+  }
+  u8() {
+    return this.b[this.o++];
+  }
+  u16() {
+    const v = this.b.readUInt16LE(this.o);
+    this.o += 2;
+    return v;
+  }
+  u32() {
+    const v = this.b.readUInt32LE(this.o);
+    this.o += 4;
+    return v;
+  }
+  f32() {
+    const v = this.b.readFloatLE(this.o);
+    this.o += 4;
+    return v;
+  }
+  f64() {
+    const v = this.b.readDoubleLE(this.o);
+    this.o += 8;
+    return v;
+  }
+  varuint() {
+    let r = 0,
+      s = 0,
+      byte;
+    do {
+      byte = this.u8();
+      r |= (byte & 0x7f) << s;
+      s += 7;
+    } while (byte & 0x80);
+    return r >>> 0;
+  }
+  expect(index: number, type: number) {
+    const save = this.o;
+    const t = this.varuint();
+    if (t >> 4 !== index || (t & 0xf) !== type) {
+      this.o = save;
+      throw new Error("tag mismatch");
     }
-    let strokes = 0;
-    const texts: string[] = [];
-    for (const block of v6Blocks(buf)) {
-      if (block.type === 0x07) texts.push(...extractTextFromRootText(block.payload));
-      if (block.type === 0x05) strokes++; // SceneLineItemBlock = handwriting
+  }
+  crdtId(index: number) {
+    this.expect(index, 0xf);
+    this.u8();
+    this.varuint();
+  }
+  taggedU32(index: number) {
+    this.expect(index, 0x4);
+    return this.u32();
+  }
+  taggedF32(index: number) {
+    this.expect(index, 0x4);
+    return this.f32();
+  }
+  taggedF64(index: number) {
+    this.expect(index, 0x8);
+    return this.f64();
+  }
+  subblock(index: number) {
+    this.expect(index, 0xc);
+    return this.u32();
+  }
+}
+
+interface Stroke {
+  color: number;
+  pts: Array<{ x: number; y: number; w: number }>;
+}
+
+/** Parse SceneLineItemBlocks (0x05) into strokes (see rmscene for the spec). */
+function parseV6Strokes(buf: Buffer): Stroke[] {
+  const strokes: Stroke[] = [];
+  for (const blk of v6Blocks(buf)) {
+    if (blk.type !== 0x05) continue;
+    try {
+      const c = new Cur(blk.payload);
+      c.crdtId(1); // parent
+      c.crdtId(2); // item
+      c.crdtId(3); // left
+      c.crdtId(4); // right
+      c.taggedU32(5); // deleted_length
+      try {
+        c.subblock(6);
+      } catch {
+        continue; // tombstone item: no value
+      }
+      if (c.u8() !== 0x03) continue; // not a Line
+      c.taggedU32(1); // tool
+      const color = c.taggedU32(2);
+      c.taggedF64(3); // thickness_scale
+      c.taggedF32(4); // starting_length
+      const ptLen = c.subblock(5);
+      const ptSize = blk.version >= 2 ? 14 : 24;
+      const n = Math.floor(ptLen / ptSize);
+      const pts: Stroke["pts"] = [];
+      for (let i = 0; i < n; i++) {
+        const x = c.f32();
+        const y = c.f32();
+        let w: number;
+        if (blk.version >= 2) {
+          c.u16(); // speed
+          w = c.u16();
+          c.u8(); // direction
+          c.u8(); // pressure
+        } else {
+          c.f32();
+          c.f32();
+          w = Math.round(c.f32() * 4);
+          c.f32();
+        }
+        pts.push({ x, y, w });
+      }
+      if (pts.length) strokes.push({ color, pts });
+    } catch {
+      /* skip malformed blocks */
     }
-    const pageText = texts.join("").trim();
-    if (pageText || strokes) {
-      out.push(
-        `--- page ${idx + 1}${strokes ? ` (${strokes} handwritten stroke groups, not OCRed)` : ""} ---`,
-      );
-      if (pageText) out.push(pageText);
+  }
+  return strokes;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length);
+  const td = Buffer.concat([Buffer.from(type), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(td));
+  return Buffer.concat([len, td, crc]);
+}
+
+/** Render strokes to an 8-bit grayscale PNG at `scale` of device pixels. */
+function renderStrokesPng(strokes: Stroke[], scale = 0.5): Buffer {
+  const W = Math.round(1404 * scale);
+  let maxY = 1872;
+  for (const s of strokes) for (const p of s.pts) maxY = Math.max(maxY, p.y + 40);
+  const H = Math.round(Math.min(maxY, 4000) * scale);
+  const img = Buffer.alloc(W * H, 255);
+  const stamp = (cx: number, cy: number, r: number, val: number) => {
+    const x0 = Math.max(0, Math.floor(cx - r));
+    const x1 = Math.min(W - 1, Math.ceil(cx + r));
+    const y0 = Math.max(0, Math.floor(cy - r));
+    const y1 = Math.min(H - 1, Math.ceil(cy + r));
+    for (let y = y0; y <= y1; y++)
+      for (let x = x0; x <= x1; x++)
+        if ((x - cx) ** 2 + (y - cy) ** 2 <= r * r && img[y * W + x] > val) img[y * W + x] = val;
+  };
+  for (const s of strokes) {
+    if (s.color === 2) continue; // white "ink"
+    const val = s.color === 1 ? 128 : 0; // gray or black
+    let prev: { x: number; y: number } | null = null;
+    for (const p of s.pts) {
+      const x = (p.x + 702) * scale;
+      const y = p.y * scale;
+      const r = Math.max(0.8, ((p.w / 4) * scale) / 2);
+      if (prev) {
+        const d = Math.hypot(x - prev.x, y - prev.y);
+        const steps = Math.max(1, Math.ceil(d / Math.max(1, r * 0.7)));
+        for (let i = 1; i <= steps; i++)
+          stamp(prev.x + ((x - prev.x) * i) / steps, prev.y + ((y - prev.y) * i) / steps, r, val);
+      } else {
+        stamp(x, y, r, val);
+      }
+      prev = { x, y };
     }
-  });
-  return out.join("\n");
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(W, 0);
+  ihdr.writeUInt32BE(H, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 0; // grayscale
+  const raw = Buffer.alloc(H * (W + 1));
+  for (let y = 0; y < H; y++) {
+    raw[y * (W + 1)] = 0; // filter: none
+    img.copy(raw, y * (W + 1) + 1, y * W, (y + 1) * W);
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", zlib.deflateSync(raw, { level: 6 })),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +564,9 @@ e-ink display). Adjust accordingly:
   /home/root/.local/share/remarkable/xochitl with bash: documents there are
   stored as uuid-named files in reMarkable's proprietary formats (.rm v6
   binary strokes + json sidecars) that the tools already decode/encode.
+- remarkable_read returns handwritten pages as rendered PNG images in the
+  tool result - you can SEE and read the handwriting directly. Use it when
+  the user asks about anything they wrote by hand.
 - remarkable_write is how you create a new note/document for the user
   (markdown in, EPUB on the tablet out).
 - NEVER run 'systemctl restart xochitl', kill xochitl, or reboot: this
@@ -464,15 +631,19 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "remarkable_read",
-    label: "reMarkable: read typed text",
+    label: "reMarkable: read notebook",
     description:
-      "Extract TYPED text from a reMarkable notebook (best effort, .rm v6 format). " +
-      "Handwriting is stored as pen strokes and is reported but not recognized. " +
-      "Pass a document uuid or a (partial) name.",
+      "Read a reMarkable notebook: extracts TYPED text (best effort, .rm v6), and " +
+      "renders HANDWRITTEN pages as PNG images attached to the result so you can " +
+      "read the handwriting yourself. Pass a document uuid or a (partial) name. " +
+      "Use firstPage/maxPages to window large notebooks (default: first 4 pages " +
+      "with content).",
     parameters: {
       type: "object",
       properties: {
         document: { type: "string", description: "Document uuid or (partial) visible name" },
+        firstPage: { type: "number", description: "1-based page to start from (default 1)" },
+        maxPages: { type: "number", description: "Max pages to return (default 4, max 8)" },
       },
       required: ["document"],
     },
@@ -493,17 +664,66 @@ export default function (pi: ExtensionAPI) {
             type: "text",
             text:
               `"${doc.visibleName}" is a ${doc.fileType}; the original file is at ` +
-              `${path.join(XOCHITL, doc.id + "." + doc.fileType)}. Typed-text extraction only works for notebooks.`,
+              `${path.join(XOCHITL, doc.id + "." + doc.fileType)}. Page reading only works for notebooks.`,
           }],
         };
       }
-      const text = readTypedText(doc.id, content);
-      return {
-        content: [{
+
+      const pageIds: string[] =
+        content?.cPages?.pages?.filter((p: any) => !p.deleted)?.map((p: any) => p.id) ??
+        content?.pages ??
+        [];
+      const first = Math.max(1, params.firstPage ?? 1);
+      const maxPages = Math.min(params.maxPages ?? 4, 8);
+      const out: any[] = [];
+      let included = 0;
+      let skippedEmpty = 0;
+
+      for (let idx = first - 1; idx < pageIds.length && included < maxPages; idx++) {
+        const rmPath = path.join(XOCHITL, doc.id, `${pageIds[idx]}.rm`);
+        if (!fs.existsSync(rmPath)) {
+          skippedEmpty++;
+          continue;
+        }
+        const buf = fs.readFileSync(rmPath);
+        if (!buf.subarray(0, RM_V6_HEADER.length).toString("latin1").startsWith(RM_V6_HEADER)) {
+          out.push({ type: "text", text: `--- page ${idx + 1}: unsupported .rm version (not v6) ---` });
+          included++;
+          continue;
+        }
+        const texts: string[] = [];
+        for (const block of v6Blocks(buf)) {
+          if (block.type === 0x07) texts.push(...extractTextFromRootText(block.payload));
+        }
+        const typed = texts.join("").trim();
+        const strokes = parseV6Strokes(buf);
+        if (!typed && strokes.length === 0) {
+          skippedEmpty++;
+          continue;
+        }
+        out.push({
           type: "text",
-          text: text || `"${doc.visibleName}": no typed text found (handwriting-only or empty).`,
-        }],
-      };
+          text: `--- page ${idx + 1}${strokes.length ? ` (${strokes.length} pen strokes, rendered below)` : ""} ---${typed ? `\n${typed}` : ""}`,
+        });
+        if (strokes.length) {
+          out.push({
+            type: "image",
+            data: renderStrokesPng(strokes).toString("base64"),
+            mimeType: "image/png",
+          });
+        }
+        included++;
+      }
+
+      if (out.length === 0) {
+        return {
+          content: [{ type: "text", text: `"${doc.visibleName}": no content found in the requested page range (${pageIds.length} pages total).` }],
+        };
+      }
+      const summary =
+        `"${doc.visibleName}" (${pageIds.length} pages total, showing from page ${first}` +
+        `${skippedEmpty ? `, ${skippedEmpty} empty pages skipped` : ""})`;
+      return { content: [{ type: "text", text: summary }, ...out] };
     },
   });
 

@@ -4,7 +4,7 @@
 reMarkable 2 e-ink tablet, launched from an icon in the stock UI, with tools
 that let it read and write the tablet's own notebooks.
 
-Everything installs from this Mac over SSH. Nothing modifies the OS partition
+Everything installs from Mac over SSH. Nothing modifies the OS partition
 beyond two systemd files; a reboot without our boot unit returns the tablet to
 100% stock, and every project has an uninstall script.
 
@@ -58,8 +58,6 @@ beyond two systemd files; a reboot without our boot unit returns the tablet to
 
 Then tap the Pi icon in the sidebar's AppLoad menu. WiFi must be on — the
 tablet talks to the model APIs directly.
-
-## The stack, layer by layer
 
 ### 1. Running pi at all (`pi-harness/`)
 
@@ -152,7 +150,7 @@ gives pi three tools instead of letting it poke at that with bash:
 | Tool | What it does |
 |---|---|
 | `remarkable_list` | search/browse documents & folders (names, paths, page counts, dates) |
-| `remarkable_read` | best-effort extraction of **typed** text from v6 notebooks; handwriting is reported as stroke counts (no OCR) |
+| `remarkable_read` | reads notebooks: **typed** text extracted from the v6 blocks (best effort), and **handwritten** pages parsed from raw pen strokes and rendered to PNGs attached to the tool result — pi's multimodal model reads the handwriting from the image (no OCR engine involved) |
 | `remarkable_write` | markdown → minimal EPUB (hand-rolled stored zip, no deps) → uploaded via xochitl's USB web-interface API (appears instantly) or dropped into storage (appears after the next xochitl restart) |
 
 The extension also uses pi's extension API for two environment fixes:
@@ -199,8 +197,10 @@ The extension also uses pi's extension API for two environment fixes:
 
 ## Known limits
 
-- `remarkable_read` cannot OCR handwriting, and its typed-text extraction is a
-  heuristic over the v6 format (fine for linearly written notes).
+- `remarkable_read`'s typed-text extraction is a heuristic over the v6 format
+  (fine for linearly written notes). Handwriting is delivered as rendered
+  page images (capped per call — use `firstPage`/`maxPages` to window big
+  notebooks), so reading it costs image tokens and needs a vision model.
 - `remarkable_write`'s instant path needs the USB web interface enabled
   (Settings → Storage); otherwise new documents appear on the next xochitl
   restart.
