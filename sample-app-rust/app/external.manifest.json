@@ -1,0 +1,11 @@
+{
+    "name": "sample-rs",
+    "application": "/home/root/xovi/exthome/appload/sample-app-rust/sample-app-rs",
+    "workingDirectory": "/home/root/xovi/exthome/appload/sample-app-rust",
+    "environment": {
+        "HOME": "/home/root"
+    },
+    "qtfb": true,
+    "aspectRatio": "original",
+    "disablesWindowedMode": false
+}

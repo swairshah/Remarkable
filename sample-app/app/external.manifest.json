@@ -1,0 +1,11 @@
+{
+    "name": "sample",
+    "application": "/home/root/xovi/exthome/appload/sample-app/sample-app",
+    "workingDirectory": "/home/root/xovi/exthome/appload/sample-app",
+    "environment": {
+        "HOME": "/home/root"
+    },
+    "qtfb": true,
+    "aspectRatio": "original",
+    "disablesWindowedMode": false
+}
