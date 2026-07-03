@@ -80,9 +80,12 @@ QTFB_SHIM32=$(find "$STAGE/appload" -name qtfb-shim-32bit.so | head -n1)
 [ -n "$APPLOAD_SO" ] && [ -n "$QTFB_SHIM" ] || { echo "appload extraction failed"; exit 1; }
 
 step "Installing xovi tree to /home/root/xovi"
+# Preserve coexisting xovi content (e.g. rm-hacks qmd patches, extra
+# extensions): timestamped backup that is never overwritten, then seed the
+# new tree from the old one and extract our bundle over it - only files we
+# ship get replaced, foreign files stay in place.
 if rsh 'test -d /home/root/xovi'; then
-    echo "existing /home/root/xovi found - backing up to /home/root/xovi.bak"
-    rsh 'rm -rf /home/root/xovi.bak && mv /home/root/xovi /home/root/xovi.bak'
+    rsh 'BAK="/home/root/xovi.bak.$(date +%s)" && mv /home/root/xovi "$BAK" && cp -a "$BAK" /home/root/xovi && echo "backed up existing tree to $BAK (foreign files preserved in place)"'
 fi
 cat "$CACHE/xovi-ext-arm32.tar.gz" | rsh 'tar xzf - -C /home/root'
 rsh 'chmod +x /home/root/xovi/start /home/root/xovi/stock /home/root/xovi/debug /home/root/xovi/rebuild_hashtable /home/root/xovi/xovi.so 2>/dev/null || true'

@@ -73,6 +73,20 @@ docker run --rm --platform linux/amd64 -v "$PWD:/src" -w /src \
 cp build/release-toltec/apps/yaft/yaft ../payload/yaft
 ```
 
+## Coexisting with rm-hacks (and other xovi mods)
+
+[rm-hacks](https://github.com/asivery/rm-hacks-qmd) (gesture shortcuts, pen
+tweaks, UI toggles) shares this exact stack: its qmd patches live in
+`/home/root/xovi/exthome/qt-resource-rebuilder/` next to the hashtab. To
+(re)install it: copy `zz_rmhacks.qmd` + the `rmHacks/` folder from the
+matching version directory of that repo into that path (strip macOS `._*`
+files) and restart xochitl via `xovi/start`. It loads alongside AppLoad.
+
+`install.sh` preserves foreign files in the xovi tree across reinstalls and
+takes timestamped backups (`/home/root/xovi.bak.<epoch>`), so mods like
+rm-hacks survive. Note that `uninstall.sh` still removes the whole xovi tree,
+including other mods.
+
 ## On-device layout
 
 ```
