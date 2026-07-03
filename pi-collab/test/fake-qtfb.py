@@ -68,6 +68,7 @@ def main():
     env = dict(os.environ,
                QTFB_KEY="12345",
                PI_COLLAB_BIN=os.path.join(here, "fake-pi.py"),
+               PI_COLLAB_HISTORY="/src/build/hist.jsonl",  # persists on host
                HOME="/tmp")
     app = subprocess.Popen(["qemu-arm-static", app_bin], env=env)
 
@@ -115,6 +116,21 @@ def main():
     drain(4.0)  # let pi's markdown + code + svg reply stream in
     drain(1.2)  # let the coalesced deghost settle
     write_png(out_png)
+
+    # drag the viewport DOWN (finger down => scroll toward the top) to reveal
+    # earlier content; the redraw is deferred to release, then screenshot.
+    TOUCH_PRESS, TOUCH_RELEASE, TOUCH_UPDATE = 0x10, 0x11, 0x12
+
+    def touch(itype, x, y):
+        conn.send(struct.pack("<B3xiiiii", MESSAGE_USERINPUT, itype, 0, x, y, 0))
+
+    time.sleep(1.7)  # let palm-rejection lapse after the last pen tap
+    touch(TOUCH_PRESS, 700, 300)
+    for i in range(1, 16):
+        touch(TOUCH_UPDATE, 700, 300 + i * 60)
+    touch(TOUCH_RELEASE, 700, 1200)
+    drain(1.5)
+    write_png(out_png.replace(".png", "-scrolled.png"))
 
     app.terminate()
     try:

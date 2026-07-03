@@ -46,7 +46,6 @@ pub struct Pi {
     stdin: ChildStdin,
     stdout_fd: RawFd,
     buf: Vec<u8>,
-    resumed: bool,
 }
 
 impl Pi {
@@ -109,12 +108,7 @@ impl Pi {
             "pi-collab: spawned {bin} (session-dir {dir}, {})",
             if resumed { "continued" } else { "fresh" }
         );
-        Ok(Pi { child, stdin, stdout_fd, buf: Vec::new(), resumed })
-    }
-
-    /// True if we resumed a prior conversation (pi already has context).
-    pub fn resumed(&self) -> bool {
-        self.resumed
+        Ok(Pi { child, stdin, stdout_fd, buf: Vec::new() })
     }
 
     pub fn raw_fd(&self) -> RawFd {

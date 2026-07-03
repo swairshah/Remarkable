@@ -24,6 +24,7 @@
 mod conv;
 mod draw;
 mod font;
+mod history;
 mod md;
 mod pen;
 mod pi_rpc;
@@ -149,11 +150,13 @@ struct App {
     stuck: bool, /* auto-follow the bottom as content grows */
     live_pi: Option<usize>, /* index of the assistant entry being streamed */
     streaming: bool, /* pi is mid-reply (between agent_start and agent_end) */
+    reply_buf: String, /* full text of the current reply, for history */
     status: String,
     pi_px: i32, /* body text size in pixels for pi's replies (A- / A+) */
     nib: usize, /* pen nib size, index into NIB_BASE (S/M/L) */
     deghost_at: Option<Instant>, /* when to do the next cleanup flash */
     wave: i32, /* current e-ink waveform mode (RefreshMode as i32) */
+    scroll_pending: bool, /* scroll moved during a drag; repaint on release */
 
     /* pen writing in the canvas */
     pen_last: Option<(i32, i32)>,
@@ -415,19 +418,25 @@ impl App {
             }
             Phase::Move => {
                 if let Some(prev) = self.drag_last {
-                    /* finger up (y shrinks) reveals newer content below */
+                    /* finger up (y shrinks) reveals newer content below.
+                     * We move the scroll position but do NOT repaint the
+                     * e-ink mid-drag — repainting every frame smears the
+                     * panel. The view is redrawn once, on release. */
                     let new = (self.scroll + (prev - y)).clamp(0, self.max_scroll());
                     if new != self.scroll {
                         self.scroll = new;
                         self.stuck = self.scroll >= self.max_scroll() - 4;
-                        self.view_dirty = true;
+                        self.scroll_pending = true;
                     }
                     self.drag_last = Some(y);
                 }
             }
             Phase::Release => {
-                if self.drag_last.take().is_some() {
-                    /* scrolling smears the panel; clean it once we settle */
+                if self.drag_last.take().is_some() && self.scroll_pending {
+                    /* the drag ended: paint the final position once, then
+                     * let the settle timer deghost it */
+                    self.scroll_pending = false;
+                    self.redraw_view();
                     self.schedule_deghost();
                 }
             }
@@ -448,6 +457,7 @@ impl App {
                 self.entries.push(Entry::Note(format!("[send failed: {e}]")));
             }
         }
+        history::append_you(&img); /* persist for scrollback next launch */
         self.entries.push(Entry::You(img));
         self.live_pi = None; /* pi's reply starts a fresh bubble */
         self.stuck = true;
@@ -520,6 +530,7 @@ impl App {
         match ev {
             PiEvent::Start => {
                 self.streaming = true;
+                self.reply_buf.clear();
                 self.status.clear();
                 self.draw_header(); /* show the working dot */
             }
@@ -535,6 +546,7 @@ impl App {
                 if let Entry::Pi(t) = &mut self.entries[idx] {
                     t.push_str(&d);
                 }
+                self.reply_buf.push_str(&d); /* accumulate for history */
                 self.content_changed();
             }
             PiEvent::Notice(n) => {
@@ -545,6 +557,9 @@ impl App {
             PiEvent::End => {
                 self.streaming = false;
                 self.live_pi = None;
+                if !self.reply_buf.trim().is_empty() {
+                    history::append_pi(&self.reply_buf); /* persist the reply */
+                }
                 self.status.clear();
                 self.draw_header(); /* clear the working dot */
                 self.content_changed();
@@ -602,23 +617,34 @@ fn main() -> std::process::ExitCode {
      * why we don't try to auto-detect windowed mode. */
     let direct_pen = pen.is_some();
 
+    /* reload the past conversation so scrolling up shows history */
+    let mut entries = history::load();
+    if entries.is_empty() {
+        entries.push(Entry::Note(
+            "write a message below and tap send. pi is listening.".into(),
+        ));
+    } else {
+        /* ASCII only — the Note bitmap font has no em-dash glyph */
+        entries.push(Entry::Note("---------- new ----------".into()));
+    }
+
     let now = Instant::now();
     let mut app = App {
         fb,
         sock,
         pi,
-        entries: vec![Entry::Note(
-            "write a message below and tap send. pi is listening.".into(),
-        )],
+        entries,
         scroll: 0,
         stuck: true,
         live_pi: None,
         streaming: false,
+        reply_buf: String::new(),
         status: String::new(),
         pi_px: PI_PX_DEFAULT,
         nib: 2, /* largest by default — the nib we had before */
         deghost_at: None,
         wave: RefreshMode::UltraFast as i32,
+        scroll_pending: false,
         pen_last: None,
         ink_dirty: None,
         last_ink_flush: now,
@@ -627,14 +653,9 @@ fn main() -> std::process::ExitCode {
         view_dirty: false,
         last_view_flush: now,
     };
-    match app.pi.as_ref() {
-        None => app
-            .entries
-            .push(Entry::Note("[pi did not start — check the journal]".into())),
-        Some(pi) if pi.resumed() => app
-            .entries
-            .push(Entry::Note("[resumed your previous session — pi remembers earlier context]".into())),
-        Some(_) => {}
+    if app.pi.is_none() {
+        app.entries
+            .push(Entry::Note("[pi did not start — check the journal]".into()));
     }
 
     /* first paint */
@@ -733,13 +754,18 @@ fn main() -> std::process::ExitCode {
                 .update_region(x0.max(0), y0.max(0), x1 - x0 + 1, y1 - y0 + 1);
             app.last_ink_flush = Instant::now();
         }
-        if app.view_dirty && app.last_view_flush.elapsed() >= VIEW_FLUSH {
+        /* don't repaint the viewport mid-drag — scrolling defers to release */
+        if app.view_dirty && app.drag_last.is_none() && app.last_view_flush.elapsed() >= VIEW_FLUSH {
             app.redraw_view();
         }
         /* deghost only once everything else has settled — never mid-stroke,
          * mid-scroll, or with a pending viewport repaint */
         if let Some(at) = app.deghost_at {
-            if Instant::now() >= at && !app.view_dirty && app.ink_dirty.is_none() {
+            if Instant::now() >= at
+                && !app.view_dirty
+                && app.ink_dirty.is_none()
+                && app.drag_last.is_none()
+            {
                 app.deghost_now();
             }
         }
