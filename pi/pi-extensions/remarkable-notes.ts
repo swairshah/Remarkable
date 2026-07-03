@@ -1,0 +1,552 @@
+/**
+ * reMarkable notebook tools for pi, for running ON the tablet itself.
+ *
+ * Gives pi three tools over xochitl's document storage
+ * (/home/root/.local/share/remarkable/xochitl):
+ *
+ *   remarkable_list   - browse/search documents and folders
+ *   remarkable_read   - best-effort extraction of TYPED text from a notebook
+ *                       (.rm v6 "root text" blocks; handwriting is strokes and
+ *                       is NOT recognized)
+ *   remarkable_write  - create a new document (markdown -> EPUB) and try to
+ *                       make xochitl pick it up via its USB web-interface API
+ *
+ * No dependencies beyond node stdlib: the JSON schemas are plain objects and
+ * the EPUB writer emits a STORED (uncompressed) zip by hand.
+ */
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { randomUUID } from "node:crypto";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+const XOCHITL = "/home/root/.local/share/remarkable/xochitl";
+const UPLOAD_URLS = ["http://10.11.99.1:80/upload", "http://127.0.0.1:80/upload"];
+
+// ---------------------------------------------------------------------------
+// metadata helpers
+
+interface DocMeta {
+  id: string;
+  visibleName: string;
+  type: string; // DocumentType | CollectionType
+  parent: string; // "" root, "trash", or folder uuid
+  deleted?: boolean;
+  lastModified?: string;
+  fileType?: string; // notebook | pdf | epub (from .content)
+  pageCount?: number;
+}
+
+function readJson(p: string): any | null {
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function loadAll(): Map<string, DocMeta> {
+  const docs = new Map<string, DocMeta>();
+  for (const f of fs.readdirSync(XOCHITL)) {
+    if (!f.endsWith(".metadata")) continue;
+    const id = f.slice(0, -".metadata".length);
+    const md = readJson(path.join(XOCHITL, f));
+    if (!md || md.deleted) continue;
+    const doc: DocMeta = {
+      id,
+      visibleName: md.visibleName ?? id,
+      type: md.type ?? "?",
+      parent: md.parent ?? "",
+      lastModified: md.lastModified,
+    };
+    const content = readJson(path.join(XOCHITL, `${id}.content`));
+    if (content) {
+      doc.fileType = content.fileType || "notebook";
+      doc.pageCount =
+        content.cPages?.pages?.filter((p: any) => !p.deleted)?.length ??
+        content.pageCount ??
+        content.pages?.length;
+    }
+    docs.set(id, doc);
+  }
+  return docs;
+}
+
+function fullPath(doc: DocMeta, docs: Map<string, DocMeta>): string {
+  const parts = [doc.visibleName];
+  let cur = doc.parent;
+  let hops = 0;
+  while (cur && cur !== "trash" && hops++ < 20) {
+    const p = docs.get(cur);
+    if (!p) break;
+    parts.unshift(p.visibleName);
+    cur = p.parent;
+  }
+  return (doc.parent === "trash" ? "[trash] /" : "/") + parts.join("/");
+}
+
+function fmtDate(ms?: string): string {
+  if (!ms) return "?";
+  const d = new Date(Number(ms));
+  return Number.isNaN(d.getTime()) ? "?" : d.toISOString().slice(0, 16).replace("T", " ");
+}
+
+function resolveDoc(
+  docs: Map<string, DocMeta>,
+  idOrName: string,
+): { doc?: DocMeta; candidates?: DocMeta[] } {
+  if (docs.has(idOrName)) return { doc: docs.get(idOrName) };
+  const q = idOrName.toLowerCase();
+  const hits = [...docs.values()].filter(
+    (d) => d.type === "DocumentType" && d.visibleName.toLowerCase().includes(q),
+  );
+  if (hits.length === 1) return { doc: hits[0] };
+  const exact = hits.filter((d) => d.visibleName.toLowerCase() === q);
+  if (exact.length === 1) return { doc: exact[0] };
+  return { candidates: hits.slice(0, 10) };
+}
+
+// ---------------------------------------------------------------------------
+// .rm v6 typed-text extraction (best effort)
+
+const RM_V6_HEADER = "reMarkable .lines file, version=6";
+
+/** Iterate top-level blocks of a v6 .rm file: [u32 len][u8?][u8 min][u8 cur][u8 type] payload */
+function* v6Blocks(buf: Buffer): Generator<{ type: number; payload: Buffer }> {
+  // The header magic is followed by space padding; blocks start after it.
+  let off = RM_V6_HEADER.length;
+  while (off < buf.length && buf[off] === 0x20) off++;
+  while (off + 8 <= buf.length) {
+    const len = buf.readUInt32LE(off);
+    const type = buf[off + 7];
+    const start = off + 8;
+    if (len === 0 || start + len > buf.length) break;
+    yield { type, payload: buf.subarray(start, start + len) };
+    off = start + len;
+  }
+}
+
+/**
+ * Pull text runs out of a RootText (0x07) block payload. Text items store
+ * their string as [varuint len][u8 isAscii][bytes]; rather than fully decode
+ * the CRDT item framing, scan for that shape and keep plausible UTF-8 runs.
+ * File order approximates typing order for linearly-written notes.
+ */
+function extractTextFromRootText(payload: Buffer): string[] {
+  const runs: string[] = [];
+  for (let i = 0; i < payload.length - 2; i++) {
+    // varuint length (1-2 bytes is plenty for note text chunks)
+    let len = payload[i];
+    let lenBytes = 1;
+    if (len >= 0x80) {
+      if (i + 1 >= payload.length) continue;
+      len = (len & 0x7f) | (payload[i + 1] << 7);
+      lenBytes = 2;
+      if (payload[i + 1] >= 0x80) continue;
+    }
+    const flag = payload[i + lenBytes];
+    if (flag !== 0x01 || len === 0 || len > 4096) continue;
+    const start = i + lenBytes + 1;
+    if (start + len > payload.length) continue;
+    const slice = payload.subarray(start, start + len);
+    const text = slice.toString("utf8");
+    // printable check: reject if it contains control chars / replacement chars
+    if (/[\u0000-\u0008\u000B-\u001F\u007F\uFFFD]/.test(text)) continue;
+    if (len >= 2 || /[\w\s.,!?'"()\-\n]/.test(text)) {
+      runs.push(text);
+      i = start + len - 1;
+    }
+  }
+  return runs;
+}
+
+function readTypedText(docId: string, contentJson: any): string {
+  const dir = path.join(XOCHITL, docId);
+  const pageIds: string[] =
+    contentJson?.cPages?.pages?.filter((p: any) => !p.deleted)?.map((p: any) => p.id) ??
+    contentJson?.pages ??
+    [];
+  const out: string[] = [];
+  pageIds.forEach((pid, idx) => {
+    const rmPath = path.join(dir, `${pid}.rm`);
+    if (!fs.existsSync(rmPath)) return;
+    const buf = fs.readFileSync(rmPath);
+    if (!buf.subarray(0, RM_V6_HEADER.length).toString("latin1").startsWith(RM_V6_HEADER)) {
+      out.push(`--- page ${idx + 1}: unsupported .rm version (not v6) ---`);
+      return;
+    }
+    let strokes = 0;
+    const texts: string[] = [];
+    for (const block of v6Blocks(buf)) {
+      if (block.type === 0x07) texts.push(...extractTextFromRootText(block.payload));
+      if (block.type === 0x05) strokes++; // SceneLineItemBlock = handwriting
+    }
+    const pageText = texts.join("").trim();
+    if (pageText || strokes) {
+      out.push(
+        `--- page ${idx + 1}${strokes ? ` (${strokes} handwritten stroke groups, not OCRed)` : ""} ---`,
+      );
+      if (pageText) out.push(pageText);
+    }
+  });
+  return out.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// markdown -> EPUB (stored zip, no deps)
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(buf: Buffer): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+/** Minimal STORED zip: good enough for EPUB (mimetype must be stored anyway). */
+function makeZip(entries: Array<[string, Buffer | string]>): Buffer {
+  const locals: Buffer[] = [];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+  for (const [name, data] of entries) {
+    const nameB = Buffer.from(name, "utf8");
+    const dataB = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
+    const crc = crc32(dataB);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4); // version needed
+    local.writeUInt16LE(0, 6); // flags
+    local.writeUInt16LE(0, 8); // method: stored
+    local.writeUInt32LE(0, 10); // dos time/date
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(dataB.length, 18);
+    local.writeUInt32LE(dataB.length, 22);
+    local.writeUInt16LE(nameB.length, 26);
+    local.writeUInt16LE(0, 28);
+    locals.push(local, nameB, dataB);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt32LE(0, 12);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(dataB.length, 20);
+    central.writeUInt32LE(dataB.length, 24);
+    central.writeUInt16LE(nameB.length, 28);
+    central.writeUInt32LE(0, 30); // extra/comment/disk/attrs(int)
+    central.writeUInt32LE(0, 34); // disk start / internal attrs
+    central.writeUInt32LE(0, 38); // external attrs
+    central.writeUInt32LE(offset, 42);
+    centrals.push(central, nameB);
+    offset += local.length + nameB.length + dataB.length;
+  }
+  const centralStart = offset;
+  const centralBuf = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralBuf.length, 12);
+  end.writeUInt32LE(centralStart, 16);
+  return Buffer.concat([...locals, centralBuf, end]);
+}
+
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** Small markdown subset: #/##/### headings, ``` code, - lists, paragraphs. */
+function mdToXhtml(md: string): string {
+  const out: string[] = [];
+  const lines = md.split("\n");
+  let inCode = false;
+  let inList = false;
+  const closeList = () => {
+    if (inList) out.push("</ul>");
+    inList = false;
+  };
+  for (const line of lines) {
+    if (line.trim().startsWith("```")) {
+      closeList();
+      out.push(inCode ? "</pre>" : "<pre>");
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) {
+      out.push(esc(line));
+      continue;
+    }
+    const h = line.match(/^(#{1,3})\s+(.*)/);
+    if (h) {
+      closeList();
+      const n = h[1].length;
+      out.push(`<h${n}>${esc(h[2])}</h${n}>`);
+      continue;
+    }
+    const li = line.match(/^\s*[-*]\s+(.*)/);
+    if (li) {
+      if (!inList) out.push("<ul>");
+      inList = true;
+      out.push(`<li>${esc(li[1])}</li>`);
+      continue;
+    }
+    closeList();
+    if (line.trim() === "") continue;
+    out.push(`<p>${esc(line)}</p>`);
+  }
+  if (inCode) out.push("</pre>");
+  closeList();
+  return out.join("\n");
+}
+
+function makeEpub(title: string, markdown: string): Buffer {
+  const body = mdToXhtml(markdown);
+  const uuid = randomUUID();
+  const xhtml = `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>${esc(title)}</title></head>
+<body>${body}</body></html>`;
+  const opf = `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="id">urn:uuid:${uuid}</dc:identifier>
+    <dc:title>${esc(title)}</dc:title>
+    <dc:language>en</dc:language>
+    <meta property="dcterms:modified">${new Date().toISOString().slice(0, 19)}Z</meta>
+  </metadata>
+  <manifest><item id="doc" href="doc.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="doc"/></spine>
+</package>`;
+  const container = `<?xml version="1.0" encoding="utf-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>`;
+  return makeZip([
+    ["mimetype", "application/epub+zip"],
+    ["META-INF/container.xml", container],
+    ["content.opf", opf],
+    ["doc.xhtml", xhtml],
+  ]);
+}
+
+async function tryWebUpload(filename: string, epub: Buffer): Promise<string | null> {
+  for (const url of UPLOAD_URLS) {
+    try {
+      const form = new FormData();
+      form.append("file", new Blob([epub], { type: "application/epub+zip" }), filename);
+      const res = await fetch(url, { method: "POST", body: form, signal: AbortSignal.timeout(8000) });
+      if (res.ok) return url;
+    } catch {
+      /* interface disabled or unreachable; try next */
+    }
+  }
+  return null;
+}
+
+function directDrop(title: string, epub: Buffer, parent: string): string {
+  const id = randomUUID();
+  fs.writeFileSync(path.join(XOCHITL, `${id}.epub`), epub);
+  fs.writeFileSync(
+    path.join(XOCHITL, `${id}.metadata`),
+    JSON.stringify(
+      {
+        visibleName: title,
+        type: "DocumentType",
+        parent,
+        deleted: false,
+        lastModified: String(Date.now()),
+        lastOpened: "0",
+        lastOpenedPage: 0,
+        metadatamodified: false,
+        modified: false,
+        pinned: false,
+        synced: false,
+        version: 0,
+      },
+      null,
+      2,
+    ),
+  );
+  fs.writeFileSync(
+    path.join(XOCHITL, `${id}.content`),
+    JSON.stringify({ fileType: "epub", coverPageNumber: 0 }, null, 2),
+  );
+  return id;
+}
+
+// ---------------------------------------------------------------------------
+
+const REMARKABLE_PROMPT = `
+
+## Environment: reMarkable 2 e-ink tablet
+
+You are running ON a reMarkable 2 (armv7 Linux, 1 GB RAM, busybox userland,
+e-ink display). Adjust accordingly:
+
+- For anything involving the user's notes, notebooks, quick sheets, books or
+  documents on this device, ALWAYS use the remarkable_list / remarkable_read /
+  remarkable_write tools. Do NOT explore
+  /home/root/.local/share/remarkable/xochitl with bash: documents there are
+  stored as uuid-named files in reMarkable's proprietary formats (.rm v6
+  binary strokes + json sidecars) that the tools already decode/encode.
+- remarkable_write is how you create a new note/document for the user
+  (markdown in, EPUB on the tablet out).
+- NEVER run 'systemctl restart xochitl', kill xochitl, or reboot: this
+  terminal session runs inside xochitl and would be killed instantly.
+- busybox coreutils only (no GNU flags like 'head -n5' shorthand 'head -5',
+  no perl); git is not installed; node is at /home/root/opt/node/bin/node.
+- RAM is tight (1 GB shared with the UI): avoid heavyweight one-off
+  processes; prefer the provided tools.
+- The display is e-ink: your output is being read on paper-like refresh, so
+  prefer concise output over long scrolling dumps.`;
+
+export default function (pi: ExtensionAPI) {
+  // Make pi aware it lives on the tablet and steer it to the tools above.
+  pi.on("before_agent_start", async (event: any) => {
+    return { systemPrompt: event.systemPrompt + REMARKABLE_PROMPT };
+  });
+
+  // E-ink: the default animated spinner + tick counter redraw several times a
+  // second, which flickers badly on this panel. Use a static indicator.
+  pi.on("session_start", async (_event: any, ctx: any) => {
+    try {
+      ctx.ui?.setWorkingIndicator?.({ frames: ["◆ working - esc interrupts"], intervalMs: 3600000 });
+    } catch {
+      /* headless modes have no UI */
+    }
+  });
+  pi.registerTool({
+    name: "remarkable_list",
+    label: "reMarkable: list documents",
+    description:
+      "List/search documents and folders in the reMarkable's own storage (xochitl). " +
+      "Returns name paths, uuids, types and page counts. Use query to filter by name.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Case-insensitive name filter" },
+        limit: { type: "number", description: "Max entries to return (default 50)" },
+        folders: { type: "boolean", description: "Include folders (default true)" },
+      },
+    },
+    async execute(_id: string, params: any) {
+      const docs = loadAll();
+      const q = (params.query ?? "").toLowerCase();
+      const limit = params.limit ?? 50;
+      const includeFolders = params.folders !== false;
+      const rows = [...docs.values()]
+        .filter((d) => includeFolders || d.type === "DocumentType")
+        .filter((d) => !q || d.visibleName.toLowerCase().includes(q))
+        .sort((a, b) => Number(b.lastModified ?? 0) - Number(a.lastModified ?? 0));
+      const shown = rows.slice(0, limit);
+      const lines = shown.map((d) => {
+        const kind = d.type === "CollectionType" ? "folder" : (d.fileType ?? "doc");
+        const pages = d.pageCount != null ? ` pages=${d.pageCount}` : "";
+        return `${fullPath(d, docs)}  [${kind}]${pages}  modified=${fmtDate(d.lastModified)}  id=${d.id}`;
+      });
+      const more = rows.length > shown.length ? `\n... and ${rows.length - shown.length} more (raise limit or refine query)` : "";
+      return {
+        content: [{ type: "text", text: lines.join("\n") + more || "no matches" }],
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "remarkable_read",
+    label: "reMarkable: read typed text",
+    description:
+      "Extract TYPED text from a reMarkable notebook (best effort, .rm v6 format). " +
+      "Handwriting is stored as pen strokes and is reported but not recognized. " +
+      "Pass a document uuid or a (partial) name.",
+    parameters: {
+      type: "object",
+      properties: {
+        document: { type: "string", description: "Document uuid or (partial) visible name" },
+      },
+      required: ["document"],
+    },
+    async execute(_id: string, params: any) {
+      const docs = loadAll();
+      const { doc, candidates } = resolveDoc(docs, params.document);
+      if (!doc) {
+        const c = (candidates ?? []).map((d) => `${fullPath(d, docs)}  id=${d.id}`).join("\n");
+        return {
+          content: [{ type: "text", text: candidates?.length ? `Ambiguous or not found. Candidates:\n${c}` : "No matching document." }],
+          isError: true,
+        };
+      }
+      const content = readJson(path.join(XOCHITL, `${doc.id}.content`));
+      if (doc.fileType && doc.fileType !== "notebook") {
+        return {
+          content: [{
+            type: "text",
+            text:
+              `"${doc.visibleName}" is a ${doc.fileType}; the original file is at ` +
+              `${path.join(XOCHITL, doc.id + "." + doc.fileType)}. Typed-text extraction only works for notebooks.`,
+          }],
+        };
+      }
+      const text = readTypedText(doc.id, content);
+      return {
+        content: [{
+          type: "text",
+          text: text || `"${doc.visibleName}": no typed text found (handwriting-only or empty).`,
+        }],
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "remarkable_write",
+    label: "reMarkable: write note",
+    description:
+      "Create a new document on the reMarkable from markdown (rendered as an EPUB, which " +
+      "xochitl displays natively and reflows). Tries the tablet's USB web-interface upload " +
+      "API first (document appears immediately); otherwise drops files into storage, where " +
+      "the document appears after the next xochitl restart.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Document title" },
+        markdown: {
+          type: "string",
+          description: "Content. Supports #/##/### headings, - lists, ``` code blocks, paragraphs.",
+        },
+      },
+      required: ["title", "markdown"],
+    },
+    async execute(_id: string, params: any) {
+      const epub = makeEpub(params.title, params.markdown);
+      const filename = `${params.title.replace(/[^\w\- ]+/g, "").trim() || "note"}.epub`;
+      const via = await tryWebUpload(filename, epub);
+      if (via) {
+        return {
+          content: [{ type: "text", text: `Uploaded "${params.title}" via ${via} - it should appear in the root folder right away.` }],
+        };
+      }
+      const id = directDrop(params.title, epub, "");
+      return {
+        content: [{
+          type: "text",
+          text:
+            `USB web-interface upload not available; wrote the document directly to storage (id=${id}). ` +
+            `xochitl will show it after its next restart - do NOT restart it from inside this terminal ` +
+            `(this session runs inside xochitl and would be killed). It will appear after the next ` +
+            `reboot/sleep-restart, or the user can run 'systemctl restart xochitl' over SSH.`,
+        }],
+        details: { id },
+      };
+    },
+  });
+}

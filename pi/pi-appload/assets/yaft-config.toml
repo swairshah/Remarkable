@@ -8,13 +8,18 @@ keymap = "rm-qwerty"
 auto-rotate = true
 rotation = "none"
 
-# Full e-ink refresh every 512 partial updates (clears ghosting).
-auto-refresh = 512
+# Never full-refresh based on update count (each one is a flashing inversion;
+# pi's TUI redraws constantly and made the panel strobe).
+auto-refresh = 0
+
+# App-triggered full refreshes (TUI clear-screens) at most every 120 s.
+# Five-finger tap forces a refresh any time (AppLoad gesture).
+full-refresh-interval = 120
 
 repeat-delay = 600
 repeat-rate = 25
 
-# 2x font: 32x64 px cells -> 43 columns, comfortable for pi's TUI.
+# 2x of the embedded 12x24 Terminus: 24x48 px cells -> ~57 columns.
 font-scale = 2
 
 # Blank border around the terminal area, in pixels.

@@ -1,8 +1,8 @@
 diff --git a/apps/yaft/YaftWidget.h b/apps/yaft/YaftWidget.h
-index b14395c..4164f11 100644
+index b14395c..b90c9ae 100644
 --- a/apps/yaft/YaftWidget.h
 +++ b/apps/yaft/YaftWidget.h
-@@ -65,7 +65,11 @@ public:
+@@ -65,7 +65,12 @@ public:
      return Rotated(
        rotation,
        Column(
@@ -11,15 +11,16 @@ index b14395c..4164f11 100644
 +                        false,
 +                        config.autoRefresh,
 +                        config.fontScale,
-+                        config.padding)),
++                        config.padding,
++                        config.refreshInterval)),
          Keyboard(term.get(),
                   KeyboardParams{
                     .layout = layout,
 diff --git a/apps/yaft/config.cpp b/apps/yaft/config.cpp
-index 983eead..2127c0f 100644
+index 983eead..ac8a52b 100644
 --- a/apps/yaft/config.cpp
 +++ b/apps/yaft/config.cpp
-@@ -24,6 +24,12 @@ rotation = "none"
+@@ -24,6 +24,16 @@ rotation = "none"
  # Set to 0 to disable auto refresh.
  auto-refresh = 1024
  
@@ -29,25 +30,30 @@ index 983eead..2127c0f 100644
 +# Blank border around the terminal area, in pixels.
 +padding = 0
 +
++# Minimum seconds between full (flashing) refreshes triggered by the app.
++# 0 = never flash automatically (five-finger tap forces a refresh).
++full-refresh-interval = 30
++
  # Repeat delay for keyboards.
  repeat-delay = 600
  # Repeat rate in chars per second.
-@@ -103,6 +109,10 @@ getConfig(const toml::table& input) {
+@@ -103,6 +113,11 @@ getConfig(const toml::table& input) {
    parseValue(errors, cfg.autoRefresh, tbl, "auto-refresh");
    parseValue(errors, cfg.repeatDelay, tbl, "repeat-delay");
    parseValue(errors, cfg.repeatRate, tbl, "repeat-rate");
 +  parseValue(errors, cfg.fontScale, tbl, "font-scale");
 +  parseValue(errors, cfg.padding, tbl, "padding");
++  parseValue(errors, cfg.refreshInterval, tbl, "full-refresh-interval");
 +  cfg.fontScale = std::clamp(cfg.fontScale, 1, 8);
 +  cfg.padding = std::clamp(cfg.padding, 0, 200);
  
    if (!tbl.empty()) {
      for (const auto& [key, _] : tbl) {
 diff --git a/apps/yaft/config.h b/apps/yaft/config.h
-index 7146b6a..92cf65e 100644
+index 7146b6a..80d1642 100644
 --- a/apps/yaft/config.h
 +++ b/apps/yaft/config.h
-@@ -25,6 +25,12 @@ struct YaftConfig {
+@@ -25,6 +25,17 @@ struct YaftConfig {
    // Set to 0 to disable.
    int autoRefresh = 0;
  
@@ -56,6 +62,11 @@ index 7146b6a..92cf65e 100644
 +
 +  // Blank border around the terminal area, in pixels.
 +  int padding = 0;
++
++  // Minimum seconds between full (flashing) e-ink refreshes triggered by
++  // the app clearing the screen. 0 disables them (five-finger tap still
++  // forces one via AppLoad).
++  int refreshInterval = 30;
 +
    // Key repeat delay in ms
    int repeatDelay = 600;
@@ -104,7 +115,7 @@ index 5fe77ad..596d207 100644
      TimeSource::time_point nextRepeat;
      bool down = false;
 diff --git a/apps/yaft/screen.cpp b/apps/yaft/screen.cpp
-index 7303872..4f39df1 100644
+index 7303872..d8466ae 100644
 --- a/apps/yaft/screen.cpp
 +++ b/apps/yaft/screen.cpp
 @@ -1,6 +1,8 @@
@@ -131,7 +142,7 @@ index 7303872..4f39df1 100644
  
    char cx = 33 + loc.x;
    char cy = 33 + loc.y;
-@@ -81,10 +83,19 @@ ScreenRenderObject::doLayout(const rmlib::Constraints& constraints) {
+@@ -81,18 +83,43 @@ ScreenRenderObject::doLayout(const rmlib::Constraints& constraints) {
    const auto size = constraints.isBounded() ? constraints.max : constraints.min;
    assert(size.width != 0 && size.height != 0);
  
@@ -153,7 +164,33 @@ index 7303872..4f39df1 100644
    }
    return size;
  }
-@@ -110,9 +121,10 @@ ScreenRenderObject::doDraw(rmlib::Canvas& canvas) {
+ 
+ bool
+ ScreenRenderObject::shouldRefresh() const {
+-  return isFullDraw() || widget->term->shouldClear ||
+-         (widget->autoRefresh > 0 && numUpdates > widget->autoRefresh);
++  if (isFullDraw()) {
++    return true;
++  }
++
++  const bool wants = widget->term->shouldClear ||
++                     (widget->autoRefresh > 0 && numUpdates > widget->autoRefresh);
++  if (!wants) {
++    return false;
++  }
++
++  // Full e-ink refreshes flash the panel, and TUIs clear the screen on
++  // every redraw - throttle app-triggered refreshes. AppLoad's
++  // five-finger tap can always force one manually.
++  if (widget->refreshInterval <= 0) {
++    return false;
++  }
++  return std::chrono::steady_clock::now() - lastFullRefresh >=
++         std::chrono::seconds(widget->refreshInterval);
+ }
+ 
+ rmlib::UpdateRegion
+@@ -110,9 +137,10 @@ ScreenRenderObject::doDraw(rmlib::Canvas& canvas) {
        return;
      }
  
@@ -167,7 +204,17 @@ index 7303872..4f39df1 100644
      fb->doUpdate(canvas.subCanvas(currentRect),
                   useA2 ? fb::Waveform::A2 : fb::Waveform::DU,
                   useA2 ? fb::UpdateFlags::None : fb::UpdateFlags::Priority);
-@@ -140,19 +152,49 @@ ScreenRenderObject::doDraw(rmlib::Canvas& canvas) {
+@@ -133,26 +161,59 @@ ScreenRenderObject::doDraw(rmlib::Canvas& canvas) {
+   if (shouldRefresh()) {
+     term.shouldClear = false;
+     numUpdates = 0;
++    lastFullRefresh = std::chrono::steady_clock::now();
+     // TODO: sync
+     return { canvas.rect(), fb::Waveform::GC16, fb::UpdateFlags::FullRefresh };
+   }
+ 
++  // Throttled: consume the clear request so it doesn't stay pending.
++  term.shouldClear = false;
    return {};
  }
  
@@ -200,14 +247,14 @@ index 7303872..4f39df1 100644
 +  const int pad = widget->padding;
 +  const int cellWidthPx = CELL_WIDTH * scale;
 +  const int cellHeightPx = CELL_HEIGHT * scale;
++
++  if (isFullDraw()) {
++    clearPadding(canvas, pad);
++  }
  
 -  // x in landscape, y in portrait.
 -  int zStart = isLandscape ? term.height - (term.marginTop + line * CELL_HEIGHT)
 -                           : term.marginTop + line * CELL_HEIGHT;
-+  if (isFullDraw()) {
-+    clearPadding(canvas, pad);
-+  }
-+
 +  // x in landscape, y in portrait. Terminal coordinates are unscaled; canvas
 +  // positions are terminal coordinates * scale + padding.
 +  int zStart =
@@ -221,7 +268,7 @@ index 7303872..4f39df1 100644
  
      auto& cell = term.cells[line][col];
  
-@@ -206,14 +248,17 @@ ScreenRenderObject::drawLine(rmlib::Canvas& canvas,
+@@ -206,14 +267,17 @@ ScreenRenderObject::drawLine(rmlib::Canvas& canvas,
        }
      }
  
@@ -242,7 +289,7 @@ index 7303872..4f39df1 100644
          const auto pos = isLandscape ? Point{ zStart - h, marginLeft + w }
                                       : Point{ marginLeft + w, zStart + h };
  
-@@ -223,7 +268,8 @@ ScreenRenderObject::drawLine(rmlib::Canvas& canvas,
+@@ -223,7 +287,8 @@ ScreenRenderObject::drawLine(rmlib::Canvas& canvas,
                                : cell.glyph.regularp;
  
          const auto grayMode =
@@ -252,7 +299,7 @@ index 7303872..4f39df1 100644
              ? fgGray
              : bgGray;
  
-@@ -252,9 +298,9 @@ ScreenRenderObject::drawLine(rmlib::Canvas& canvas,
+@@ -252,9 +317,9 @@ ScreenRenderObject::drawLine(rmlib::Canvas& canvas,
  
    const auto size = this->getSize();
    return isLandscape
@@ -264,7 +311,7 @@ index 7303872..4f39df1 100644
  }
  
  template<typename Ev>
-@@ -290,7 +336,7 @@ ScreenRenderObject::handleTouchEvent(const Ev& ev) {
+@@ -290,7 +355,7 @@ ScreenRenderObject::handleTouchEvent(const Ev& ev) {
                          : scaledLoc;
  
    std::array<char, 6> buf{};
@@ -274,10 +321,16 @@ index 7303872..4f39df1 100644
    // Mouse down on first finger if mouse is not down.
    if (ev.isDown() && mouseSlot == -1 /*&& lastFingers == 0*/) {
 diff --git a/apps/yaft/screen.h b/apps/yaft/screen.h
-index cc493e5..987f450 100644
+index cc493e5..5fbf1f3 100644
 --- a/apps/yaft/screen.h
 +++ b/apps/yaft/screen.h
-@@ -9,8 +9,16 @@ class ScreenRenderObject;
+@@ -5,12 +5,24 @@
+ 
+ #include <UI.h>
+ 
++#include <chrono>
++
+ class ScreenRenderObject;
  
  class Screen : public rmlib::Widget<ScreenRenderObject> {
  public:
@@ -287,21 +340,32 @@ index cc493e5..987f450 100644
 +         bool isLandscape,
 +         int autoRefresh,
 +         int fontScale = 1,
-+         int padding = 0)
++         int padding = 0,
++         int refreshInterval = 30)
 +    : term(term)
 +    , isLandscape(isLandscape)
 +    , autoRefresh(autoRefresh)
 +    , fontScale(fontScale)
-+    , padding(padding) {}
++    , padding(padding)
++    , refreshInterval(refreshInterval) {}
  
    std::unique_ptr<rmlib::RenderObject> createRenderObject() const;
  
-@@ -20,6 +28,8 @@ private:
+@@ -20,6 +32,9 @@ private:
  
    bool isLandscape = false;
    int autoRefresh = 0;
 +  int fontScale = 1;
 +  int padding = 0;
++  int refreshInterval = 30;
  };
  
  class ScreenRenderObject : public rmlib::LeafRenderObject<Screen> {
+@@ -49,6 +64,7 @@ private:
+   bool shouldRefresh() const;
+ 
+   int numUpdates = 0;
++  std::chrono::steady_clock::time_point lastFullRefresh{};
+ 
+   int mouseSlot = -1;
+   rmlib::Point lastMousePos;

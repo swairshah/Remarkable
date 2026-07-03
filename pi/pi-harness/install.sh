@@ -100,17 +100,28 @@ for f in auth.json models.json; do
     COPIED=1
   fi
 done
+# Tablet-specific extensions (see ../pi-extensions/)
+EXT_PATHS=()
+for ext in "$DIR/../pi-extensions/"*.ts; do
+  [ -f "$ext" ] || continue
+  base=$(basename "$ext")
+  cat "$ext" | rsh "mkdir -p /home/root/.pi/agent/extensions && cat > /home/root/.pi/agent/extensions/$base"
+  EXT_PATHS+=("/home/root/.pi/agent/extensions/$base")
+  echo "installed extension: $base"
+done
+
 # settings.json is sanitized, not copied verbatim: Mac packages/extensions
-# (git:/npm:/local paths) don't exist on the tablet and crash pi at startup
+# (git:/npm:/local paths) don't exist on the tablet and crash pi at startup.
+# The tablet gets only the extensions pushed above.
 if [ -f "$HOME/.pi/agent/settings.json" ]; then
-  python3 - "$HOME/.pi/agent/settings.json" <<'PY' | rsh 'mkdir -p /home/root/.pi/agent && cat > /home/root/.pi/agent/settings.json && chmod 600 /home/root/.pi/agent/settings.json'
+  python3 - "$HOME/.pi/agent/settings.json" "${EXT_PATHS[@]}" <<'PY' | rsh 'mkdir -p /home/root/.pi/agent && cat > /home/root/.pi/agent/settings.json && chmod 600 /home/root/.pi/agent/settings.json'
 import json, sys
 s = json.load(open(sys.argv[1]))
 s["packages"] = []
-s["extensions"] = []
+s["extensions"] = sys.argv[2:]
 print(json.dumps(s, indent=2))
 PY
-  echo "copied: ~/.pi/agent/settings.json (packages/extensions stripped for the tablet)"
+  echo "copied: ~/.pi/agent/settings.json (packages stripped; tablet extensions wired)"
   COPIED=1
 fi
 [ "$COPIED" = 1 ] || echo "NOTE: no ~/.pi/agent/auth.json found locally; run /login inside pi on the device instead."

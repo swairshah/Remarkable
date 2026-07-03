@@ -42,10 +42,20 @@ UI goes away for ~1 minute total.
 `payload/yaft` is built from [timower/rM2-stuff](https://github.com/timower/rM2-stuff)
 master with `assets/yaft-tablet.patch` applied, which adds:
 
-- `font-scale` config option (integer glyph scaling; the stock 16x32 cells are
-  tiny at 1404x1872) and `padding` (blank border around the terminal),
-- dedup of mirrored key presses: AppLoad's window forwards every finger tap as
-  both a touch *and* a synthesized pen event, which typed every key twice.
+- `font-scale` config option (integer glyph scaling) and `padding` (blank
+  border around the terminal),
+- `full-refresh-interval`: throttles full (flashing) e-ink refreshes - TUIs
+  like pi clear the screen constantly, which made the panel strobe; a
+  five-finger tap still forces a refresh at any time,
+- dedup of mirrored key presses (AppLoad can forward a tap as touch + pen),
+- the built-in font swapped from 16x32 to Terminus 12x24
+  (`tools/gen-glyphs.py` regenerates `vendor/libYaft/glyph.h` from BDFs), so
+  `font-scale = 2` gives 24x48 cells, ~57 columns.
+
+Input note: on the rM2, `/dev/input/touchscreen0` symlinks to the *pen*
+device, so the qtfb shim's default touch role matched two devices and every
+tap typed twice - the manifest pins `QTFB_SHIM_INPUT_PATH_TOUCHSCREEN` to
+`/dev/input/event2`.
 
 Terminal settings live in `/home/root/.config/yaft/config.toml` on the device
 (source: `assets/yaft-config.toml`; yaft hot-reloads it on save). To rebuild:
@@ -53,6 +63,10 @@ Terminal settings live in `/home/root/.config/yaft/config.toml` on the device
 ```sh
 git clone https://github.com/timower/rM2-stuff && cd rM2-stuff
 git apply ../assets/yaft-tablet.patch
+# swap the built-in font (Terminus BDFs from terminus-font-4.49.1.tar.gz):
+../tools/gen-glyphs.py ter-u24n.bdf ter-u24b.bdf vendor/libYaft/glyph.h
+# NOTE for colima on macOS: the source must live under $HOME (not /tmp),
+# and the emulated compiler occasionally segfaults - just rerun the build.
 docker run --rm --platform linux/amd64 -v "$PWD:/src" -w /src \
   ghcr.io/toltec-dev/base:v4.0 bash -c \
   ". /opt/x-tools/switch-arm.sh && cmake --preset release-toltec && cmake --build build/release-toltec --target yaft"
