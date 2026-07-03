@@ -80,9 +80,52 @@ fn width_f(f: Face, px: f32, s: &str) -> f32 {
     s.chars().map(|c| font(f).metrics(c, px).advance_width).sum()
 }
 
+pub fn width(f: Face, px: f32, s: &str) -> i32 {
+    width_f(f, px, s).ceil() as i32
+}
+
+pub fn ascent(f: Face, px: f32) -> f32 {
+    font(f).horizontal_line_metrics(px).map(|m| m.ascent).unwrap_or(px)
+}
+
 /// One character's advance — for the monospace code path.
 pub fn advance(f: Face, px: f32) -> i32 {
     font(f).metrics('0', px).advance_width.ceil().max(1.0) as i32
+}
+
+/// Draw a line into a standalone 8-bit grayscale buffer (0=black, 255=white),
+/// blending glyphs as black. Used to place `<text>` labels inside a
+/// rasterized SVG, whose pixels live in their own buffer rather than the fb.
+pub fn draw_gray(buf: &mut [u8], bw: i32, bh: i32, x: i32, y_top: i32, f: Face, px: f32, s: &str) {
+    let baseline = y_top as f32 + ascent(f, px);
+    let mut pen = x as f32;
+    for c in s.chars() {
+        with_glyph(f, c, px, |m, cov| {
+            if m.width > 0 && m.height > 0 {
+                let gx = (pen + m.xmin as f32).round() as i32;
+                let gy = (baseline - m.ymin as f32 - m.height as f32).round() as i32;
+                for row in 0..m.height as i32 {
+                    let py = gy + row;
+                    if py < 0 || py >= bh {
+                        continue;
+                    }
+                    for col in 0..m.width as i32 {
+                        let a = cov[(row * m.width as i32 + col) as usize] as u32;
+                        if a == 0 {
+                            continue;
+                        }
+                        let sx = gx + col;
+                        if sx < 0 || sx >= bw {
+                            continue;
+                        }
+                        let idx = (py * bw + sx) as usize;
+                        buf[idx] = (buf[idx] as u32 * (255 - a) / 255) as u8;
+                    }
+                }
+            }
+            pen += m.advance_width;
+        });
+    }
 }
 
 /* ---- drawing ------------------------------------------------------------- */

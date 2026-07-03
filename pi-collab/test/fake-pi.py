@@ -29,11 +29,13 @@ fn map(wx: i32, wy: i32) -> (i32, i32) {
 and a quick sketch of the coordinate boxes:
 
 ```svg
-<svg viewBox="0 0 200 120">
-  <rect x="10" y="10" width="80" height="60" fill="none" stroke="black"/>
-  <line x1="90" y1="40" x2="150" y2="40" stroke="black"/>
-  <polygon points="150,30 170,40 150,50" fill="black"/>
-  <circle cx="40" cy="90" r="15" fill="none" stroke="black"/>
+<svg viewBox="0 0 260 90">
+  <rect x="10" y="25" width="90" height="40" fill="none" stroke="black"/>
+  <text x="55" y="50" text-anchor="middle" font-size="13">digitizer</text>
+  <line x1="100" y1="45" x2="150" y2="45" stroke="black"/>
+  <polygon points="150,38 168,45 150,52" fill="black"/>
+  <rect x="168" y="25" width="82" height="40" fill="none" stroke="black"/>
+  <text x="209" y="50" text-anchor="middle" font-size="13">screen</text>
 </svg>
 ```
 

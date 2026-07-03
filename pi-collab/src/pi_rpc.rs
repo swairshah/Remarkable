@@ -146,10 +146,15 @@ impl Pi {
                         Your reply is rendered on an e-ink screen that DOES format \
                         markdown: use headings (#), bullet lists (-), and fenced code \
                         blocks (```lang) where they help. You may also include a simple \
-                        SVG diagram in a ```svg fenced block — it will be drawn — using \
-                        basic shapes (rect, line, circle, ellipse, polyline, polygon, \
-                        path with straight segments), black stroke/fill on white, with a \
-                        viewBox. Avoid tables, raster images, and very wide code lines.",
+                        SVG diagram in a ```svg fenced block — it will be drawn. For \
+                        diagrams: use a viewBox; draw boxes/nodes UNFILLED \
+                        (fill=\"none\" stroke=\"black\"), never solid-filled, so their \
+                        labels stay readable; put every label in a <text> element with \
+                        text-anchor=\"middle\" positioned at the box center, font-size \
+                        around 12-16; use <line>/<polyline> for connectors and small \
+                        solid <polygon> arrowheads. Stick to rect, line, circle, \
+                        ellipse, polyline, polygon, path (straight segments), and text. \
+                        Avoid tables, raster images, and very wide code lines.",
             "images": [{
                 "type": "image",
                 "data": png::base64(&png),

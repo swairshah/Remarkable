@@ -8,10 +8,26 @@
 //! Everything renders in black on white; fills are scanline-filled, strokes
 //! are drawn as thick segments. No anti-aliasing (e-ink is near-binary).
 
+use crate::text::{self, Face};
+
 struct Shape {
     pts: Vec<(f32, f32)>,
     filled: bool,
     stroke: f32, /* stroke width in user units; 0 = none */
+}
+
+enum Anchor {
+    Start,
+    Middle,
+    End,
+}
+
+struct TextEl {
+    x: f32,
+    y: f32, /* SVG baseline */
+    size: f32,
+    anchor: Anchor,
+    content: String,
 }
 
 /// Rasterize `src` to (width, height, grayscale bytes), fitting within
@@ -84,11 +100,12 @@ pub fn rasterize(src: &str, max_w: i32, max_h: i32) -> Option<(i32, i32, Vec<u8>
         }
     }
 
-    if shapes.is_empty() {
+    let texts = parse_texts(src);
+    if shapes.is_empty() && texts.is_empty() {
         return None;
     }
 
-    /* source coordinate bounds: viewBox if given, else the shapes' bbox */
+    /* source coordinate bounds: viewBox if given, else the shapes'/text bbox */
     let (mnx, mny, sw, sh) = view.unwrap_or_else(|| {
         let (mut a, mut b, mut c, mut d) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
         for s in &shapes {
@@ -98,6 +115,12 @@ pub fn rasterize(src: &str, max_w: i32, max_h: i32) -> Option<(i32, i32, Vec<u8>
                 c = c.max(x);
                 d = d.max(y);
             }
+        }
+        for t in &texts {
+            a = a.min(t.x);
+            b = b.min(t.y);
+            c = c.max(t.x);
+            d = d.max(t.y);
         }
         (a, b, c - a, d - b)
     });
@@ -118,17 +141,42 @@ pub fn rasterize(src: &str, max_w: i32, max_h: i32) -> Option<(i32, i32, Vec<u8>
     let mut buf = vec![255u8; (out_w * out_h) as usize];
     let tf = |(x, y): (f32, f32)| ((x - mnx) * scale + pad, (y - mny) * scale + pad);
 
+    /* Only SMALL closed shapes are filled solid (arrowheads, dots, markers);
+     * large ones are outlined. Solid-filling a labelled box would bury its
+     * text — this is what turned diagrams into black blocks. */
+    let area_limit = 0.04 * (out_w as f32) * (out_h as f32);
     for s in &shapes {
         let pts: Vec<(f32, f32)> = s.pts.iter().map(|&p| tf(p)).collect();
-        if s.filled {
+        let small = poly_area(&pts) <= area_limit;
+        if s.filled && small {
             fill_polygon(&mut buf, out_w, out_h, &pts);
-        }
-        if s.stroke > 0.0 || !s.filled {
+        } else {
+            /* outline: closed shapes need the wrap-around segment too */
             let r = ((s.stroke.max(1.0) * scale) / 2.0).round().max(1.0) as i32;
-            for w in pts.windows(2) {
-                stroke_seg(&mut buf, out_w, out_h, w[0], w[1], r);
+            let n = pts.len();
+            let last = if s.filled { n } else { n - 1 };
+            for i in 0..last {
+                stroke_seg(&mut buf, out_w, out_h, pts[i], pts[(i + 1) % n], r);
             }
         }
+    }
+
+    /* text labels, placed by baseline and horizontal anchor */
+    for t in &texts {
+        if t.content.is_empty() {
+            continue;
+        }
+        let px = (t.size * scale).max(11.0);
+        let mut tx = (t.x - mnx) * scale + pad;
+        let ty = (t.y - mny) * scale + pad;
+        let tw = text::width(Face::Body, px, &t.content) as f32;
+        tx -= match t.anchor {
+            Anchor::Middle => tw / 2.0,
+            Anchor::End => tw,
+            Anchor::Start => 0.0,
+        };
+        let y_top = ty - text::ascent(Face::Body, px);
+        text::draw_gray(&mut buf, out_w, out_h, tx as i32, y_top as i32, Face::Body, px, &t.content);
     }
     Some((out_w, out_h, buf))
 }
@@ -147,6 +195,79 @@ fn shape_from(tag: &str, pts: Vec<(f32, f32)>, closed: bool) -> Shape {
         0.0
     };
     Shape { pts, filled: has_fill, stroke }
+}
+
+/// Absolute polygon area (shoelace), for the small-shape fill test.
+fn poly_area(pts: &[(f32, f32)]) -> f32 {
+    if pts.len() < 3 {
+        return 0.0;
+    }
+    let mut a = 0.0;
+    for i in 0..pts.len() {
+        let (x1, y1) = pts[i];
+        let (x2, y2) = pts[(i + 1) % pts.len()];
+        a += x1 * y2 - x2 * y1;
+    }
+    (a / 2.0).abs()
+}
+
+/// Parse `<text x y font-size text-anchor>content</text>` elements. Nested
+/// markup (e.g. <tspan>) inside the content is stripped to plain text.
+fn parse_texts(src: &str) -> Vec<TextEl> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(a) = rest.find("<text") {
+        let open = &rest[a + 1..];
+        let gt = match open.find('>') {
+            Some(i) => i,
+            None => break,
+        };
+        let tag = &open[..gt]; /* "text x=.. y=.. …" */
+        let content_start = a + 1 + gt + 1;
+        let close = match rest[content_start..].find("</text>") {
+            Some(i) => i,
+            None => break,
+        };
+        let raw = &rest[content_start..content_start + close];
+        let content = strip_tags(raw);
+        let size = {
+            let s = fattr(tag, "font-size");
+            if s > 0.0 {
+                s
+            } else {
+                16.0
+            }
+        };
+        let anchor = match attr(tag, "text-anchor").as_deref() {
+            Some("middle") => Anchor::Middle,
+            Some("end") => Anchor::End,
+            _ => Anchor::Start,
+        };
+        out.push(TextEl {
+            x: fattr(tag, "x"),
+            y: fattr(tag, "y"),
+            size,
+            anchor,
+            content,
+        });
+        rest = &rest[content_start + close + "</text>".len()..];
+    }
+    out
+}
+
+/// Strip any `<...>` markup and collapse whitespace to plain text.
+fn strip_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0;
+    for c in s.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ if depth <= 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn ellipse_pts(cx: f32, cy: f32, rx: f32, ry: f32) -> Vec<(f32, f32)> {
