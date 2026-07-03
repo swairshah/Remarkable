@@ -45,14 +45,13 @@ JPG_DIR="$OUT_DIR/pages_jpg"
 PDF_OUT="$OUT_DIR/${SAFE_NAME}.pdf"
 LOG="$OUT_DIR/export.log"
 
-mkdir -p "$PAGES_DIR" "$JPG_DIR" "$OUT_BASE/activity-agent" "$OUT_BASE/activity"
+mkdir -p "$PAGES_DIR" "$JPG_DIR" "$OUT_BASE/activity-agent"
 
 echo "[$(date -Is)] export start uuid_arg=$UUID_ARG resolved_uuid=${UUID:-none} name=$NAME" >> "$LOG"
 
 if [[ -z "${UUID:-}" ]]; then
   echo "[$(date -Is)] no matching document found for visibleName='$NAME'" >> "$LOG"
   "$HOME/bin/remarkable-activity-agent-hook.sh" "Summarize reMarkable activity changes since last sync." >> "$OUT_BASE/activity-agent/run.log" 2>&1 || true
-  "$HOME/bin/remarkable-activity-diff.py" >> "$OUT_BASE/activity/run.log" 2>&1 || true
   exit 0
 fi
 
@@ -63,7 +62,6 @@ SRC_META="$BASE/$UUID.metadata"
 if [[ ! -f "$SRC_CONTENT" || ! -d "$SRC_THUMBS" ]]; then
   echo "[$(date -Is)] missing content or thumbnails for $UUID" >> "$LOG"
   "$HOME/bin/remarkable-activity-agent-hook.sh" "Summarize reMarkable activity changes since last sync." >> "$OUT_BASE/activity-agent/run.log" 2>&1 || true
-  "$HOME/bin/remarkable-activity-diff.py" >> "$OUT_BASE/activity/run.log" 2>&1 || true
   exit 0
 fi
 
@@ -119,10 +117,32 @@ else
   echo "[$(date -Is)] skipped pdf (no img2pdf)" >> "$LOG"
 fi
 
-# TS activity agent (preferred)
+# Activity agent (LLM digest)
 "$HOME/bin/remarkable-activity-agent-hook.sh" "Summarize reMarkable activity changes since last sync." >> "$OUT_BASE/activity-agent/run.log" 2>&1 || true
 
-# Legacy python activity diff (fallback / audit)
-"$HOME/bin/remarkable-activity-diff.py" >> "$OUT_BASE/activity/run.log" 2>&1 || true
+# Ping Shelley (the VM's resident agent) when the digest agent published new
+# changes. Cooldown-limited so an active writing session doesn't trigger an
+# agent run every 5 minutes. Requires EXE_API_TOKEN in ~/.env (scoped to the
+# `shelley` command, see sync/README.md).
+STATE_DIR="$OUT_BASE/activity-agent"
+PUB_MARKER="$STATE_DIR/last-published"
+TRG_MARKER="$STATE_DIR/last-shelley-trigger"
+COOLDOWN_MIN="${SHELLEY_COOLDOWN_MIN:-30}"
+if [[ -f "$PUB_MARKER" ]]; then
+  recent_trigger=""
+  [[ -f "$TRG_MARKER" ]] && recent_trigger="$(find "$TRG_MARKER" -mmin -"$COOLDOWN_MIN" 2>/dev/null || true)"
+  if [[ ! -f "$TRG_MARKER" ]] || { [[ "$PUB_MARKER" -nt "$TRG_MARKER" ]] && [[ -z "$recent_trigger" ]]; }; then
+    EXE_API_TOKEN="$(grep '^EXE_API_TOKEN=' "$HOME/.env" 2>/dev/null | cut -d= -f2-)"
+    if [[ -n "$EXE_API_TOKEN" ]]; then
+      curl -s -m 30 -X POST https://exe.dev/exec \
+        -H "Authorization: Bearer $EXE_API_TOKEN" \
+        --data-binary "shelley prompt remarkable 'A reMarkable sync just published new changes. Follow the reMarkable duties in ~/.config/shelley/AGENTS.md: read the latest diffs.jsonl entries and changed-page images, update your journal, and update todays exercises post under ~/notes/notes/.'" \
+        >> "$STATE_DIR/shelley-trigger.log" 2>&1 || true
+      echo "" >> "$STATE_DIR/shelley-trigger.log"
+      touch "$TRG_MARKER"
+      echo "[$(date -Is)] shelley triggered" >> "$LOG"
+    fi
+  fi
+fi
 
 echo "[$(date -Is)] export done" >> "$LOG"

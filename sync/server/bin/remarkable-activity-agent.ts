@@ -26,9 +26,13 @@ type Doc = {
   highlightsCount: number;
   highlightsSig: string;
   rmLatestMtime: number;
+  pageOrder: string[];
+  rmPages: Record<string, { m: number; s: number }>;
 };
 
 type State = { generatedAt: string; docs: Record<string, Doc> };
+
+type PageRef = { id: string; label: string };
 
 type Change = {
   uuid: string;
@@ -36,6 +40,7 @@ type Change = {
   type: string;
   lastModified: string;
   bits: string[];
+  pages?: { changed: PageRef[]; added: PageRef[]; removed: PageRef[] };
 };
 
 type HistoryEntry = {
@@ -163,14 +168,21 @@ async function buildState(base: string): Promise<State> {
       }
     }
 
+    const content = await readJson<{ cPages?: { pages?: Array<{ id?: string }> } }>(
+      path.join(base, `${uuid}.content`)
+    );
+    const pageOrder = (content?.cPages?.pages ?? []).map((p) => p.id ?? "").filter(Boolean);
+
     const rmDir = path.join(base, uuid);
     let rmLatestMtime = 0;
+    const rmPages: Record<string, { m: number; s: number }> = {};
     if (await exists(rmDir)) {
       const rmFiles = await fs.readdir(rmDir, { withFileTypes: true });
       for (const rf of rmFiles) {
         if (!rf.isFile() || !rf.name.endsWith(".rm")) continue;
         const st = await fs.stat(path.join(rmDir, rf.name));
         rmLatestMtime = Math.max(rmLatestMtime, Math.trunc(st.mtimeMs));
+        rmPages[rf.name.slice(0, -3)] = { m: Math.trunc(st.mtimeMs), s: st.size };
       }
     }
 
@@ -189,6 +201,8 @@ async function buildState(base: string): Promise<State> {
       highlightsCount,
       highlightsSig,
       rmLatestMtime,
+      pageOrder,
+      rmPages,
     };
   }
 
@@ -211,13 +225,78 @@ function diff(prev: State, cur: State): Change[] {
     if (p.lastModified !== d.lastModified) bits.push("modified");
     if (p.bookmHash !== d.bookmHash) bits.push(`bookmarks ${p.bookmCount} -> ${d.bookmCount}`);
     if (p.highlightsSig !== d.highlightsSig) bits.push(`highlights ${p.highlightsCount} -> ${d.highlightsCount}`);
-    if (p.rmLatestMtime !== d.rmLatestMtime) bits.push("handwriting changed");
 
-    if (bits.length) changes.push({ uuid, name: d.name || uuid, type: d.type, lastModified: d.lastModified, bits });
+    // Per-page handwriting diff (falls back to the coarse signal for
+    // states written before rmPages existed).
+    let pages: Change["pages"];
+    if (p.rmPages && Object.keys(p.rmPages).length + Object.keys(d.rmPages ?? {}).length > 0) {
+      const label = (pid: string): string => {
+        const idx = (d.pageOrder ?? []).indexOf(pid);
+        if (idx >= 0) return `p${idx + 1}`;
+        const pidx = (p.pageOrder ?? []).indexOf(pid);
+        return pidx >= 0 ? `p${pidx + 1}` : pid.slice(0, 8);
+      };
+      const ref = (pid: string): PageRef => ({ id: pid, label: label(pid) });
+      const changed: PageRef[] = [];
+      const added: PageRef[] = [];
+      const removed: PageRef[] = [];
+      for (const [pid, curPage] of Object.entries(d.rmPages ?? {})) {
+        const prevPage = p.rmPages[pid];
+        if (!prevPage) added.push(ref(pid));
+        else if (prevPage.m !== curPage.m || prevPage.s !== curPage.s) changed.push(ref(pid));
+      }
+      for (const pid of Object.keys(p.rmPages)) {
+        if (!(d.rmPages ?? {})[pid]) removed.push(ref(pid));
+      }
+      if (changed.length) bits.push(`handwriting edited: ${changed.map((x) => x.label).join(", ")}`);
+      if (added.length) bits.push(`pages added: ${added.map((x) => x.label).join(", ")}`);
+      if (removed.length) bits.push(`pages removed: ${removed.map((x) => x.label).join(", ")}`);
+      if (changed.length || added.length || removed.length) pages = { changed, added, removed };
+    } else if (p.rmLatestMtime !== d.rmLatestMtime) {
+      bits.push("handwriting changed");
+    }
+
+    // A lone lastOpened bump is xochitl housekeeping (e.g. the tablet waking
+    // with a book on screen), not user activity — suppress it.
+    if (bits.length === 1 && bits[0] === "opened") continue;
+
+    if (bits.length) changes.push({ uuid, name: d.name || uuid, type: d.type, lastModified: d.lastModified, bits, ...(pages ? { pages } : {}) });
   }
 
   changes.sort((a, b) => Number(b.lastModified || 0) - Number(a.lastModified || 0));
   return changes;
+}
+
+// Copy thumbnails of edited/added pages into stateDir/changed-pages/<run>/
+// so downstream consumers (e.g. Shelley) can see what was actually written.
+async function copyChangedPageImages(cli: Cli, changes: Change[], runStamp: string): Promise<void> {
+  const destRoot = path.join(cli.stateDir, "changed-pages");
+  const stamp = runStamp.replace(/[:.]/g, "-");
+  let copied = false;
+
+  for (const c of changes) {
+    if (!c.pages) continue;
+    const thumbs = path.join(cli.sourceDir, `${c.uuid}.thumbnails`);
+    if (!(await exists(thumbs))) continue;
+    const slug = (c.name || c.uuid).replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 40);
+    for (const pg of [...c.pages.changed, ...c.pages.added]) {
+      const src = path.join(thumbs, `${pg.id}.png`);
+      if (!(await exists(src))) continue;
+      const destDir = path.join(destRoot, stamp);
+      await fs.mkdir(destDir, { recursive: true });
+      await fs.copyFile(src, path.join(destDir, `${slug}-${pg.label}-${pg.id.slice(0, 8)}.png`));
+      copied = true;
+    }
+  }
+
+  if (!copied) return;
+  const dirs = (await fs.readdir(destRoot, { withFileTypes: true }))
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name)
+    .sort();
+  for (const old of dirs.slice(0, Math.max(0, dirs.length - 15))) {
+    await fs.rm(path.join(destRoot, old), { recursive: true, force: true });
+  }
 }
 
 async function collectNotebookImages(sourceDir: string, changes: Change[]): Promise<string[]> {
@@ -384,7 +463,7 @@ code{background:var(--bg2);border:1px solid var(--border);padding:2px 6px;border
 }
 </style>
 </head><body>
-<nav><div class="nav-left"><button class="toggle" onclick="toggleSidebar()" title="Toggle history">&#9776;</button><a class="brand" href="/updates/">reMarkable diffs</a></div></nav>
+<nav><div class="nav-left"><button class="toggle" onclick="toggleSidebar()" title="Toggle history">&#9776;</button><a class="brand" href="/updates/">reMarkable diffs</a></div><a class="brand" href="/notes/">notes</a></nav>
 <div class="layout">
 <aside id="sidebar" class="collapsed">
   <div class="side-header"><div class="side-title">previous summaries</div></div>
@@ -473,6 +552,16 @@ async function main() {
     return;
   }
 
+  // Machine-readable diff feed + page images for downstream consumers
+  // (persisted before the LLM call so they survive an API failure).
+  const runStamp = new Date().toISOString();
+  await fs.appendFile(
+    path.join(cli.stateDir, "diffs.jsonl"),
+    JSON.stringify({ at: runStamp, changes }) + "\n",
+    "utf8"
+  );
+  await copyChangedPageImages(cli, changes, runStamp);
+
   const visibleChanges = changes.slice(0, MAX_VISIBLE_CHANGES);
   const summary = await summarizeWithLLM(cli, visibleChanges);
   await fs.writeFile(latestPath, summary + "\n", "utf8");
@@ -492,6 +581,8 @@ async function main() {
 
   await fs.mkdir(path.dirname(cli.outputHtml), { recursive: true });
   await fs.writeFile(cli.outputHtml, renderHtml(summary, visibleChanges, history), "utf8");
+  // Marker consumed by remarkable-post-sync.sh to decide whether to ping Shelley.
+  await fs.writeFile(path.join(cli.stateDir, "last-published"), runStamp + "\n", "utf8");
 
   console.log(`Published ${visibleChanges.length}/${changes.length} change(s) to ${cli.outputHtml}`);
 }

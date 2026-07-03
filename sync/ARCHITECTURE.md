@@ -1,9 +1,9 @@
-# SYNC.md — reMarkable → remarkable.exe.xyz sync architecture
+# reMarkable → remarkable.exe.xyz sync architecture
 
 How handwritten notes on the reMarkable tablet end up as a browsable web page and
 an LLM-generated activity digest at **https://remarkable.exe.xyz/updates/**.
-Covers everything in `scripts/`, `server/`, and the device-side files in
-`remarkable/` that the scripts deploy.
+Covers everything in `sync/`: the deploy scripts (`deploy/`), the server-side
+pipeline (`server/`), and the device-side files (`tablet/`).
 
 > Historical note: this stack originally lived on swair.dev (dockerized nginx,
 > digest at blog.swair.dev). It was migrated to an exe.dev VM in July 2026;
@@ -26,9 +26,8 @@ Covers everything in `scripts/`, `server/`, and the device-side files in
 │         │                              tablet right after rsync)   │
 │         ├─ export "Notebook" pages → PNG / JPG / PDF               │
 │         │    → ~/remarkable-exports/Notebook/                      │
-│         ├─ remarkable-activity-agent-hook.sh → node agent (LLM)    │
-│         │    → ~/notes/updates/index.html   (activity digest)      │
-│         └─ remarkable-activity-diff.py      (legacy text reports)  │
+│         └─ remarkable-activity-agent-hook.sh → node agent (LLM)    │
+│              → ~/notes/updates/index.html   (activity digest)      │
 │              │                                                     │
 │  nginx (native, port 8000)                                         │
 │    /            → 302 /updates/                                    │
@@ -59,17 +58,17 @@ post-sync hook over the same SSH connection it used to rsync.
   port/scheme never leak into `Location` headers.
 - The VM is Ubuntu 24.04, user `exedev` (passwordless sudo), no docker needed.
 
-## Stage 1 — Tablet push (`remarkable/`)
+## Stage 1 — Tablet push (`tablet/`)
 
-Deployed by `scripts/deploy-remarkable.sh` to the tablet (`ssh remarkable`,
+Deployed by `deploy/deploy-tablet.sh` to the tablet (`ssh remarkable`,
 override with `REMARKABLE_HOST=`). The `remarkable` alias in `~/.ssh/config`
 points at the tablet's LAN IP (changes occasionally — update `Hostname` there).
 
 | File | Installed to | Role |
 |---|---|---|
-| `remarkable/bin/remarkable-push-sync.sh` | `/home/root/bin/` | The push itself |
-| `remarkable/systemd/remarkable-push-sync.timer` | `/etc/systemd/system/` | Fires 3 min after boot, then every 5 min |
-| `remarkable/systemd/remarkable-push-sync.service` | `/etc/systemd/system/` | Oneshot, low priority (`Nice=10`, best-effort IO) |
+| `tablet/bin/remarkable-push-sync.sh` | `/home/root/bin/` | The push itself |
+| `tablet/systemd/remarkable-push-sync.timer` | `/etc/systemd/system/` | Fires 3 min after boot, then every 5 min |
+| `tablet/systemd/remarkable-push-sync.service` | `/etc/systemd/system/` | Oneshot, low priority (`Nice=10`, best-effort IO) |
 
 `remarkable-push-sync.sh` does three things:
 
@@ -88,7 +87,7 @@ Logs append to `/home/root/.local/state/remarkable-sync/push.log`.
 
 ## Stage 2 — Server-side export (`server/bin/`)
 
-Deployed by `scripts/deploy-server.sh` to `~/bin` on the VM
+Deployed by `deploy/deploy-server.sh` to `~/bin` on the VM
 (`ssh exedev@remarkable.exe.xyz`, override with `SERVER_HOST=`). All scripts
 resolve paths from `$HOME` (overridable via `REMARKABLE_BASE` /
 `REMARKABLE_OUT`), so nothing is hardcoded to a particular user.
@@ -110,29 +109,24 @@ Called by the tablet after every sync as `remarkable-post-sync.sh auto Notebook`
 3. **Derive formats.** PNG → JPG (quality 92, via `magick` or `convert`) into
    `pages_jpg/`, and all PNGs → a single `Notebook.pdf` via `img2pdf`. Both
    steps are skipped gracefully if the tool is missing.
-4. **Run the activity trackers** (always — even on the early-exit paths where
-   the document isn't found, so the digest still updates):
-   - `remarkable-activity-agent-hook.sh` — the preferred TS/LLM agent (below)
-   - `remarkable-activity-diff.py` — legacy Python differ, kept as fallback/audit
+4. **Run the activity agent** via `remarkable-activity-agent-hook.sh`
+   (always — even on the early-exit paths where the document isn't found,
+   so the digest still updates).
 
 Everything logs to `~/remarkable-exports/Notebook/export.log`.
 
 ### `remarkable-post-sync-by-name.sh` — manual export
 
 Same resolve-and-export logic, but takes a document name as `$1`, does **not**
-run the activity trackers, and is what `deploy-server.sh --run` calls. Use it
+run the activity agent, and is what `deploy-server.sh --run` calls. Use it
 to (re)export any document by name without waiting for the tablet's timer.
 
-### `remarkable-activity-agent.ts` / `.js` — the LLM activity agent
+### `remarkable-activity-agent.ts` — the LLM activity agent
 
-The `.ts` is the source; the pre-compiled `.js` is what actually runs on the
-server (`node ~/bin/remarkable-activity-agent.js`), so the server needs Node
-but no TypeScript toolchain. Rebuild after editing the source:
-
-```bash
-bun build server/bin/remarkable-activity-agent.ts --target=node --format=cjs \
-  --outfile server/bin/remarkable-activity-agent.js
-```
+The `.ts` is the only committed source; `deploy/deploy-server.sh` bundles it
+with bun (`--target=node --format=cjs`) at deploy time, and the server runs
+the resulting `node ~/bin/remarkable-activity-agent.js` — so the server needs
+Node but no TypeScript toolchain, and git never sees generated code.
 
 `remarkable-activity-agent-hook.sh` is a thin wrapper supplying the production
 flags (source dir, state dir, output `~/notes/updates/index.html`, `~/.env`
@@ -157,9 +151,11 @@ Per run:
 4. **Publish.** Writes `latest.md` and appends a JSONL record to
    `history.jsonl` (state dir: `~/remarkable-exports/activity-agent/`), then
    renders a self-contained dark-themed HTML dashboard — summary, change list,
-   and a collapsible sidebar of the last 20 run summaries — to
-   `~/notes/updates/index.html`, served at `/updates/`. If nothing changed,
-   nothing is published and the previous page stays up.
+   and a hamburger-toggled sidebar of the last 20 runs, each clickable to view
+   that run's summary — to `~/notes/updates/index.html`, served at `/updates/`.
+   If nothing changed, nothing is published and the previous page stays up.
+   `--rerender` regenerates the page from stored state (no diff, no LLM) —
+   used after design changes.
 
 **Typography** (dashboard and viewer alike): body text is set in
 `Iowan Old Style` (falling back through Palatino/Georgia to any serif — it's
@@ -167,14 +163,32 @@ an Apple system font, not a webfont), and code/monospace runs (the summary
 `<pre>`, uuid chips, page counters) in **Google Sans Code**, loaded from
 Google Fonts.
 
-### `remarkable-activity-diff.py` — legacy differ
+### Shelley trigger — agentic post-processing
 
-The agent's predecessor: same snapshot/diff idea (plus full content-file
-hashes), but no LLM and no HTML. Writes timestamped plain-text reports and
-`latest.txt` to `~/remarkable-exports/activity/`. Kept running alongside the
-agent as an independent audit trail.
+After the digest agent runs, `remarkable-post-sync.sh` pings **Shelley** (the
+exe.dev coding agent resident on every VM, port 9999) via the exe.dev HTTPS
+API: `POST https://exe.dev/exec` with body `shelley prompt remarkable '...'`,
+authenticated by `EXE_API_TOKEN` from `~/.env` — a bearer token scoped to the
+`shelley prompt` subcommand only (note: exe.dev token scopes name subcommands
+as a single string; granting the parent `shelley` does NOT cover them):
+`ssh exe.dev "ssh-key generate-api-key --label=remarkable-shelley-trigger
+'--cmds=shelley prompt' --exp=1y"`.
 
-Both trackers keep **separate state files**, so they diff independently.
+- Fires only when the digest agent actually published (it writes a
+  `last-published` marker; the hook compares it to `last-shelley-trigger`).
+- Cooldown: at most one trigger per `SHELLEY_COOLDOWN_MIN` (default 30) so an
+  active writing session doesn't spawn an agent run every 5 minutes.
+- Shelley's standing instructions live in `server/shelley/AGENTS.md`,
+  deployed to `~/.config/shelley/AGENTS.md` on the VM. Its duties: read the
+  latest `diffs.jsonl` entries + `changed-pages/` images, keep a journal at
+  `~/remarkable-journal.md` (its memory across runs), and maintain a daily
+  exercises post under `~/notes/notes/` → https://remarkable.exe.xyz/notes/.
+- Trigger transcript: `~/remarkable-exports/activity-agent/shelley-trigger.log`.
+
+The diff feed Shelley consumes is written by the digest agent on every
+publishing run: `diffs.jsonl` (per-run JSON with per-page detail) and
+`changed-pages/<runstamp>/` (PNGs of exactly the pages that changed, newest
+15 runs kept).
 
 ## Stage 3 — Web serving (`server/nginx/`, `server/web/`)
 
@@ -193,6 +207,7 @@ stock `default` site removed).
 | other paths under `/` | `~/notes/` | Generic autoindex for ad-hoc files |
 | `/raw/` | viewer app (`~/notes-server/raw/`) | `server/web/raw/index.html` |
 | `/raw/pages/` | `~/remarkable-exports/Notebook/pages_jpg/` | `autoindex_format json` — this JSON listing **is** the viewer's API |
+| `/notes/` | `~/notes/notes/` | Shelley's exercises posts (served via the generic `/` root, no extra config) |
 
 `server/web/raw/index.html` is a single-file, dependency-free notebook viewer:
 it `fetch`es the `pages/` JSON autoindex, filters to image files, sorts by name
@@ -201,24 +216,26 @@ page — the assumption being you want to see what you wrote most recently.
 Navigation: thumbnail sidebar, click zones, arrow keys / Home / End / `b`, and
 touch swipe. New JPGs appear on the next page load with no server action.
 
-## Deploy scripts (`scripts/`)
+## Deploy scripts (`deploy/`)
 
 Both assume SSH is already configured and are safe to re-run (idempotent copies).
 
-### `scripts/deploy-remarkable.sh`
+### `deploy/deploy-tablet.sh`
 
-Ships tablet files: scp `remarkable/bin/*.sh` → `/home/root/bin/` (chmod 700),
+Ships tablet files: scp `tablet/bin/*.sh` → `/home/root/bin/` (chmod 700),
 systemd units → `/etc/systemd/system/`, then `daemon-reload` and
 `enable --now` + restart of the timer. Prints the timer status at the end.
 
-### `scripts/deploy-server.sh`
+### `deploy/deploy-server.sh`
 
-Ships server files: `server/bin/*` → `~/bin/` (chmod +x on the entrypoints),
-apt-installs missing runtime deps (`nodejs`, `img2pdf`, `imagemagick`), nginx
-config → `~/notes-server/default.conf` → `/etc/nginx/sites-available/remarkable`
-(+ symlink, `nginx -t`, `systemctl reload`), viewer →
-`~/notes-server/raw/index.html`. It also `chmod o+x $HOME` so the nginx worker
-(`www-data`) can traverse into the content dirs. Flags/env:
+Builds the agent bundle with bun (required locally), then ships server files:
+`server/bin/*.sh` + the built `remarkable-activity-agent.js` → `~/bin/`
+(chmod +x on the entrypoints), apt-installs missing runtime deps (`nodejs`,
+`img2pdf`, `imagemagick`), nginx config → `~/notes-server/default.conf` →
+`/etc/nginx/sites-available/remarkable` (+ symlink, `nginx -t`,
+`systemctl reload`), viewer → `~/notes-server/raw/index.html`. It also
+`chmod o+x $HOME` so the nginx worker (`www-data`) can traverse into the
+content dirs. Flags/env:
 
 - `--run` — after deploying, trigger a manual export
   (`remarkable-post-sync-by-name.sh "$DOC_NAME"`)
@@ -232,7 +249,6 @@ config → `~/notes-server/default.conf` → `/etc/nginx/sites-available/remarka
 | `~/remarkable-backup/xochitl/` | rsync mirror of the tablet's document store |
 | `~/remarkable-exports/Notebook/` | `pages_png/`, `pages_jpg/`, `Notebook.pdf`, copied `.content`/`.metadata`, `export.log` |
 | `~/remarkable-exports/activity-agent/` | agent state: `last-state.json`, `latest.md`, `history.jsonl`, `run.log` |
-| `~/remarkable-exports/activity/` | legacy differ: `last_state.json`, `latest.txt`, timestamped reports, `run.log` |
 | `~/notes/updates/index.html` | published activity digest (`/updates/`) |
 | `~/notes-server/` | nginx config + viewer html |
 | `~/.env` | `OPENROUTER_API_KEY` for the activity agent |
@@ -253,7 +269,7 @@ migration was an incremental diff, not a re-upload.
   snapshot diff is non-empty, so a sync with no activity changes nothing.
 - **Graceful degradation everywhere.** Missing document, missing ImageMagick,
   missing `img2pdf`, missing API key, LLM failure — each step logs and skips
-  rather than aborting, and the activity trackers run even when the export
+  rather than aborting, and the activity agent runs even when the export
   bails early.
 - **`--delete` cuts both ways.** The backup is a mirror, not an archive — a
   document deleted on the tablet disappears from the server on the next sync

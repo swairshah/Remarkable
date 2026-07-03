@@ -3,11 +3,15 @@
 # Push server-side files to remarkable.exe.xyz and (re)load nginx.
 # Assumes `ssh exedev@remarkable.exe.xyz` works (override with SERVER_HOST=...).
 #
+# The activity agent ships as a node bundle built here at deploy time
+# (bun build server/bin/remarkable-activity-agent.ts); only the .ts is
+# committed.
+#
 # Files shipped:
-#   server/bin/*.sh, *.py, *.js, *.ts -> ~/bin/
-#   server/nginx/default.conf          -> ~/notes-server/default.conf
-#                                         -> /etc/nginx/sites-enabled/remarkable
-#   server/web/raw/index.html          -> ~/notes-server/raw/index.html
+#   server/bin/*.sh + built remarkable-activity-agent.js -> ~/bin/
+#   server/nginx/default.conf -> ~/notes-server/default.conf
+#                                -> /etc/nginx/sites-enabled/remarkable
+#   server/web/raw/index.html -> ~/notes-server/raw/index.html
 #
 # Flags:
 #   --run   after deploying, trigger a manual post-sync export run
@@ -27,13 +31,22 @@ for arg in "$@"; do
   esac
 done
 
+command -v bun >/dev/null 2>&1 || { echo "[deploy-server] bun is required to build the activity agent (https://bun.sh)" >&2; exit 1; }
+
 echo "[deploy-server] target=$HOST"
+
+echo "[deploy-server] build activity agent bundle"
+BUILD_DIR="$(mktemp -d)"
+trap 'rm -rf "$BUILD_DIR"' EXIT
+bun build "$HERE/server/bin/remarkable-activity-agent.ts" \
+  --target=node --format=cjs \
+  --outfile "$BUILD_DIR/remarkable-activity-agent.js" >/dev/null
 
 ssh "$HOST" 'mkdir -p ~/bin ~/notes-server/raw ~/notes/updates ~/remarkable-backup/xochitl ~/remarkable-exports'
 
-echo "[deploy-server] scp server/bin scripts"
-scp -q "$HERE"/server/bin/*.sh "$HERE"/server/bin/*.py "$HERE"/server/bin/*.js "$HERE"/server/bin/*.ts "$HOST:bin/"
-ssh "$HOST" 'chmod +x ~/bin/remarkable-post-sync.sh ~/bin/remarkable-post-sync-by-name.sh ~/bin/remarkable-activity-diff.py ~/bin/remarkable-activity-agent-hook.sh 2>/dev/null || true'
+echo "[deploy-server] scp server/bin scripts + agent bundle"
+scp -q "$HERE"/server/bin/*.sh "$BUILD_DIR/remarkable-activity-agent.js" "$HOST:bin/"
+ssh "$HOST" 'chmod +x ~/bin/remarkable-post-sync.sh ~/bin/remarkable-post-sync-by-name.sh ~/bin/remarkable-activity-agent-hook.sh 2>/dev/null || true'
 
 echo "[deploy-server] ensure runtime deps (node, img2pdf, imagemagick)"
 ssh "$HOST" '
@@ -51,6 +64,10 @@ ssh "$HOST" '
 echo "[deploy-server] scp nginx config + viewer html"
 scp -q "$HERE"/server/nginx/default.conf "$HOST:notes-server/default.conf"
 scp -q "$HERE"/server/web/raw/index.html "$HOST:notes-server/raw/index.html"
+
+echo "[deploy-server] scp shelley AGENTS.md"
+ssh "$HOST" 'mkdir -p ~/.config/shelley'
+scp -q "$HERE"/server/shelley/AGENTS.md "$HOST:.config/shelley/AGENTS.md"
 
 echo "[deploy-server] install nginx site + reload"
 ssh "$HOST" '

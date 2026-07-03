@@ -21,3 +21,5 @@ pi/ghostwriter/.cache/
 node_modules/
 agent/dist/
 sample-app-rust/target/
+# built from the .ts by sync/deploy/deploy-server.sh at deploy time
+sync/server/bin/remarkable-activity-agent.js

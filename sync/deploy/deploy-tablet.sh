@@ -1,30 +1,30 @@
 #!/usr/bin/env bash
 #
-# Push reMarkable-device files to the tablet and (re)load the systemd timer.
+# Push tablet-side files to the reMarkable and (re)load the systemd timer.
 # Assumes `ssh remarkable` works (override with REMARKABLE_HOST=...).
 #
 # Files shipped:
-#   remarkable/bin/*.sh          -> /home/root/bin/
-#   remarkable/systemd/*.service -> /etc/systemd/system/
-#   remarkable/systemd/*.timer   -> /etc/systemd/system/
+#   tablet/bin/*.sh          -> /home/root/bin/
+#   tablet/systemd/*.service -> /etc/systemd/system/
+#   tablet/systemd/*.timer   -> /etc/systemd/system/
 #
 set -euo pipefail
 
 HOST="${REMARKABLE_HOST:-remarkable}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="$HERE/remarkable"
+SRC="$HERE/tablet"
 
-echo "[deploy-remarkable] target=$HOST"
+echo "[deploy-tablet] target=$HOST"
 
 ssh "$HOST" 'mkdir -p /home/root/bin'
 
-echo "[deploy-remarkable] scp bin scripts"
+echo "[deploy-tablet] scp bin scripts"
 scp -q "$SRC"/bin/*.sh "$HOST:/home/root/bin/"
 
-echo "[deploy-remarkable] scp systemd units"
+echo "[deploy-tablet] scp systemd units"
 scp -q "$SRC"/systemd/*.service "$SRC"/systemd/*.timer "$HOST:/etc/systemd/system/"
 
-echo "[deploy-remarkable] chmod + daemon-reload + enable timer"
+echo "[deploy-tablet] chmod + daemon-reload + enable timer"
 ssh "$HOST" '
   set -e
   chmod 700 /home/root/bin/*.sh
@@ -34,4 +34,4 @@ ssh "$HOST" '
   systemctl list-timers --all | grep remarkable-push-sync || true
 '
 
-echo "[deploy-remarkable] done"
+echo "[deploy-tablet] done"
