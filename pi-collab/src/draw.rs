@@ -12,7 +12,10 @@ use crate::qtfb::{Framebuffer, RM2_HEIGHT, RM2_WIDTH};
 pub const WHITE: u16 = 0xFFFF;
 pub const BLACK: u16 = 0x0000;
 pub const GRAY: u16 = 0x8410;
-pub const LIGHT: u16 = 0xC618; /* light gray, for subtle borders */
+pub const LIGHT: u16 = 0xC618; /* light gray, for subtle borders/underlines */
+/// Very pale gray for the code-block background — kept near white so it
+/// barely differs from the page, which minimizes e-ink flicker on redraw.
+pub const CODE_BG: u16 = 0xEF7D; /* ~93% */
 
 impl Framebuffer {
     /// Restrict all drawing to rows y0..y1 (screen stays the x bound).

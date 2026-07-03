@@ -13,7 +13,7 @@
 //! language), a bare <svg>…</svg>, leading #/-/* on a line. `height` and
 //! `draw` walk the same segment list so scroll math and painting agree.
 
-use crate::draw::{GRAY, LIGHT};
+use crate::draw::{CODE_BG, GRAY, LIGHT};
 use crate::font::CHAR_ROWS;
 use crate::qtfb::Framebuffer;
 use crate::text::{self, Face};
@@ -258,8 +258,9 @@ fn draw_seg(fb: &mut Framebuffer, x: i32, y: i32, width: i32, seg: &Seg, base: i
 
 fn draw_code(fb: &mut Framebuffer, x: i32, y: i32, width: i32, lang: &str, lines: &[String], base: i32) {
     let h = code_height(lines.len() as i32, base, !lang.is_empty());
-    /* box + left accent bar */
-    fb.fill_rect(x - 8, y, width + 16, h, LIGHT);
+    /* very pale box + a darker left accent bar so it still reads as code
+     * without a heavy gray fill that flickers on e-ink */
+    fb.fill_rect(x - 8, y, width + 16, h, CODE_BG);
     fb.fill_rect(x - 8, y, 4, h, GRAY);
     let cpx = code_px(base);
     let clh = text::line_h(Face::Mono, cpx);
