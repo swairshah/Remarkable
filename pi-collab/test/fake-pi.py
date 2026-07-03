@@ -40,6 +40,7 @@ for line in sys.stdin:
     # a tool notice, to exercise the Note rendering path
     emit({"type": "tool_execution_start", "toolName": "read",
           "args": {"path": "src/pen.rs"}})
+    time.sleep(1.5)  # "thinking" window, so the harness can catch the dot
     # stream the reply a few words at a time
     words = REPLY.split(" ")
     for i in range(0, len(words), 3):

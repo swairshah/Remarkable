@@ -37,6 +37,22 @@ def nib_center(i):
     return NIB0_X + i * (NIB_W + 10) + NIB_W // 2, NIB_Y + NIB_H // 2
 
 
+def write_png(path):
+    raw = memoryview(open(SHM_PATH, "rb").read()).cast("H")
+    gray = bytes(((v >> 5) & 0x3F) * 255 // 63 for v in raw)
+
+    def chunk(tag, data):
+        c = tag + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
+
+    ihdr = struct.pack(">IIBBBBB", W, H, 8, 0, 0, 0, 0)
+    rows = b"".join(b"\x00" + gray[y * W:(y + 1) * W] for y in range(H))
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) +
+                chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+    print(f"fake-qtfb: wrote {path}")
+
+
 def main():
     app_bin, out_png = sys.argv[1], sys.argv[2]
 
@@ -93,7 +109,10 @@ def main():
         except (socket.timeout, OSError):
             pass
 
-    drain(3.0)  # let pi's reply stream in
+    drain(0.9)  # pi is now in its "thinking" window
+    write_png(out_png.replace(".png", "-thinking.png"))  # catch the dot
+
+    drain(2.5)  # let pi's reply stream in
 
     # bump the font up twice to check A+ reflow + the deghost flash
     for _ in range(2):
@@ -102,20 +121,7 @@ def main():
         drain(0.4)
     drain(1.2)  # let the coalesced deghost settle
 
-    # framebuffer -> grayscale PNG (green channel is enough for B/W)
-    raw = memoryview(open(SHM_PATH, "rb").read()).cast("H")
-    gray = bytes(((v >> 5) & 0x3F) * 255 // 63 for v in raw)
-
-    def chunk(tag, data):
-        c = tag + data
-        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
-
-    ihdr = struct.pack(">IIBBBBB", W, H, 8, 0, 0, 0, 0)
-    rows = b"".join(b"\x00" + gray[y * W:(y + 1) * W] for y in range(H))
-    with open(out_png, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) +
-                chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
-    print(f"fake-qtfb: wrote {out_png}")
+    write_png(out_png)
 
     app.terminate()
     try:

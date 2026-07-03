@@ -171,9 +171,14 @@ impl App {
         self.hdr_button(FDN_X, AZ_W, "A-");
         self.hdr_button(FUP_X, AZ_W, "A+");
         self.hdr_button(REFRESH_X, REFRESH_W, "REFRESH");
-        let s = self.status.clone();
-        self.fb
-            .text(FB_W - 28 - text_width(&s, 3), 30, &s, 3, GRAY);
+        /* top-right: a filled dot while pi is working (thinking / typing),
+         * otherwise a short status word only for notable states (errors) */
+        if self.streaming {
+            self.fb.disc(FB_W - 40, HEADER_H / 2 - 1, 9, BLACK);
+        } else if !self.status.is_empty() {
+            let s = self.status.clone();
+            self.fb.text(FB_W - 28 - text_width(&s, 3), 30, &s, 3, GRAY);
+        }
         self.fb.fill_rect(0, HEADER_H - 2, FB_W, 2, BLACK);
         let _ = self.sock.update_region(0, 0, FB_W, HEADER_H);
     }
@@ -426,7 +431,11 @@ impl App {
         self.live_pi = None; /* pi's reply starts a fresh bubble */
         self.stuck = true;
         self.scroll = self.max_scroll();
-        self.set_status("thinking");
+        if self.pi.is_some() {
+            self.streaming = true; /* show the working dot until pi replies */
+            self.status.clear();
+        }
+        self.draw_header();
         self.redraw_view();
         self.draw_input_strip(true); /* wipe the canvas for the next message */
     }
@@ -490,7 +499,8 @@ impl App {
         match ev {
             PiEvent::Start => {
                 self.streaming = true;
-                self.set_status("thinking");
+                self.status.clear();
+                self.draw_header(); /* show the working dot */
             }
             PiEvent::Delta(d) => {
                 let idx = match self.live_pi {
@@ -504,7 +514,6 @@ impl App {
                 if let Entry::Pi(t) = &mut self.entries[idx] {
                     t.push_str(&d);
                 }
-                self.set_status("typing");
                 self.content_changed();
             }
             PiEvent::Notice(n) => {
@@ -515,7 +524,8 @@ impl App {
             PiEvent::End => {
                 self.streaming = false;
                 self.live_pi = None;
-                self.set_status("ready");
+                self.status.clear();
+                self.draw_header(); /* clear the working dot */
                 self.content_changed();
                 /* a streamed reply is many partial updates; deghost once */
                 self.schedule_deghost();
@@ -603,7 +613,6 @@ fn main() -> std::process::ExitCode {
     /* first paint */
     app.fb.fill_rect(0, 0, FB_W, FB_H, WHITE);
     app.draw_header();
-    app.set_status("ready");
     app.redraw_view();
     app.draw_input_strip(true);
     let _ = app.sock.update_all();
