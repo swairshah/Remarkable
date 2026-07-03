@@ -142,9 +142,14 @@ impl Pi {
         let mut cmd = json!({
             "type": "prompt",
             "message": "The attached image is a message the user just handwrote to you \
-                        on a reMarkable tablet. Read it and respond to it directly. \
-                        Answer in plain text only (no markdown syntax) — your reply is \
-                        rendered on e-ink with a plain bitmap font. Be concise.",
+                        on a reMarkable tablet. Read it and respond directly, concisely. \
+                        Your reply is rendered on an e-ink screen that DOES format \
+                        markdown: use headings (#), bullet lists (-), and fenced code \
+                        blocks (```lang) where they help. You may also include a simple \
+                        SVG diagram in a ```svg fenced block — it will be drawn — using \
+                        basic shapes (rect, line, circle, ellipse, polyline, polygon, \
+                        path with straight segments), black stroke/fill on white, with a \
+                        viewBox. Avoid tables, raster images, and very wide code lines.",
             "images": [{
                 "type": "image",
                 "data": png::base64(&png),
