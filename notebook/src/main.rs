@@ -34,6 +34,7 @@ mod hershey_data;
 mod ink;
 mod ipc;
 mod library;
+mod live;
 mod md_view;
 mod pen;
 mod pi_rpc;
@@ -111,16 +112,18 @@ enum SbRow {
     GoTo,     /* opens the number pad */
     Agent,
     Library,  /* pi's saved material */
+    Live,     /* stream strokes to the web viewer */
     FontSize, /* [-] 100% [+]: zoom on pi's text */
     Refresh,
 }
-const SB_ROWS: [SbRow; 8] = [
+const SB_ROWS: [SbRow; 9] = [
     SbRow::First,
     SbRow::Last,
     SbRow::Active,
     SbRow::GoTo,
     SbRow::Agent,
     SbRow::Library,
+    SbRow::Live,
     SbRow::FontSize,
     SbRow::Refresh,
 ];
@@ -300,6 +303,9 @@ struct App {
 
     /* pending deghost flash after rubber erasing (DU-erase leaves ghosts) */
     deghost_at: Option<Instant>,
+
+    /* LIVE web stream (sidebar toggle; off at launch) */
+    live: live::Live,
 }
 
 impl App {
@@ -463,6 +469,10 @@ impl App {
                         format!("LIBRARY ({})", library::scan().len()),
                         self.lib_view.is_some(),
                     ),
+                    SbRow::Live => (
+                        format!("LIVE STREAM: {}", if self.live.enabled { "ON" } else { "OFF" }),
+                        self.live.enabled,
+                    ),
                     SbRow::FontSize => (
                         format!("-   PI TEXT {:3}%   +", (self.text_scale * 100.0).round() as i32),
                         false,
@@ -558,6 +568,10 @@ impl App {
             SbRow::Library => {
                 self.sidebar = None;
                 self.open_library();
+            }
+            SbRow::Live => {
+                self.live.toggle(self.nb.current);
+                self.paint_sidebar(); /* stays open: shows the new state */
             }
             SbRow::FontSize => {
                 /* left third = smaller, right third = bigger, middle = 100% */
@@ -1034,6 +1048,7 @@ impl App {
         }
         self.draw_menu_icon();
         self.show_page_indicator();
+        self.live.page(self.nb.current);
         println!("notebook: page {} / {}", self.nb.current + 1, self.nb.count);
     }
 
@@ -1126,11 +1141,15 @@ impl App {
             _ => {
                 /* Press, or Move with no open stroke (e.g. after an erase) */
                 self.cur_stroke = Some(Stroke { pts: vec![p], gray: ink::USER_GRAY });
+                self.live.pen_break();
                 p
             }
         };
         ink::stamp_segment(&mut self.fb, prev, p, ink::USER_GRAY);
         self.mark_ink_dirty(prev, p);
+        if self.agent_page.is_none() {
+            self.live.pen(p.x, p.y, p.r);
+        }
     }
 
     fn mark_ink_dirty(&mut self, a: Pt, b: Pt) {
@@ -1150,6 +1169,7 @@ impl App {
         if let Some(gone) = self.nb.page.erase_at(x, y, ERASER_R) {
             self.contact_changed = true;
             self.last_activity_page = self.nb.current;
+            self.live.rub(x, y);
             /* DU-erased black ink ghosts badly; flash once the scrubbing
              * settles */
             self.deghost_at = Some(Instant::now() + Duration::from_millis(1100));
@@ -1276,6 +1296,7 @@ impl App {
                 self.page_changed = false;
                 self.streaming = true;
                 self.set_working(true);
+                self.live.status("think");
                 println!("notebook: page {} sent to pi", self.nb.current + 1);
             }
             Err(e) => println!("notebook: send failed: {e}"),
@@ -1296,6 +1317,7 @@ impl App {
             PiEvent::End => {
                 self.streaming = false;
                 self.set_working(false);
+                self.live.status("idle");
                 let t: String = self.reply_buf.trim().chars().take(300).collect();
                 if !t.is_empty() {
                     println!("notebook: pi said: {t}");
@@ -1391,6 +1413,9 @@ impl App {
              * screen right now (the strokes appear on return, via the full
              * repaint from the model) */
             let animate = self.agent_page.is_none() && self.lib_view.is_none();
+            if animate {
+                self.live.status("draw");
+            }
             for s in patch.strokes.iter().filter(|_| animate) {
                 if let Some(bb) = ink::stroke_bbox(s) {
                     self.anim.push_back(AnimStroke {
@@ -1538,6 +1563,10 @@ impl App {
                 continue;
             };
             let from = a.last.unwrap_or(next);
+            if a.last.is_none() {
+                self.live.ai_break();
+            }
+            self.live.ai(next.x, next.y, next.r);
             ink::stamp_segment(&mut self.fb, from, next, a.gray);
             let seg = Rect {
                 x0: (from.x.min(next.x) - 4.0) as i32,
@@ -1814,6 +1843,7 @@ fn main() -> std::process::ExitCode {
         text_scale: load_text_scale(),
         lib_view: None,
         deghost_at: None,
+        live: live::Live::new(),
     };
 
     /* first paint */
@@ -1945,6 +1975,7 @@ fn main() -> std::process::ExitCode {
             app.anim_tick();
         }
         app.maybe_send_page();
+        app.live.tick(app.nb.current);
         if app.indicator_until.is_some_and(|at| Instant::now() >= at) {
             app.clear_page_indicator();
         }
@@ -1997,6 +2028,10 @@ fn next_timeout(app: &App) -> i32 {
     }
     if let Some(at) = app.deghost_at {
         soonest(at.saturating_duration_since(Instant::now()));
+    }
+    if app.live.enabled {
+        /* batch flushes + reconnect checks while streaming */
+        soonest(Duration::from_millis(500));
     }
     match t {
         Some(d) => (d.as_millis() as i32).max(0),
