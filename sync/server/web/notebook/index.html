@@ -232,6 +232,9 @@ async function loadPages(initial) {
     let doc = null;
     try { doc = await jfile('pages/' + e.name); } catch (err) {}
     next.push({name: e.name, mtime: e.mtime, doc});
+    /* fresh doc already reflects on-device erasures; index-keyed erasure
+     * records would point at the wrong strokes now */
+    pageErased(next.length).mirror.clear();
     if (!initial) state.fresh.add(e.name);
     state.newestMtime = Math.max(state.newestMtime, mt(e));
   }
@@ -299,7 +302,7 @@ async function loadSessions() {
 
 /* ---------- page rendering ---------- */
 
-function drawDoc(canvas, doc, scale) {
+function drawDoc(canvas, doc, scale, skip) {
   canvas.width = Math.round(PAGE_W * scale);
   canvas.height = Math.round(PAGE_H * scale);
   const ctx = canvas.getContext('2d');
@@ -309,9 +312,11 @@ function drawDoc(canvas, doc, scale) {
   ctx.lineCap = ctx.lineJoin = 'round';
   ctx.scale(scale, scale);
   const strokes = [];
-  for (const s of (doc.strokes || [])) strokes.push([s, false]);
-  for (const p of (doc.patches || [])) for (const s of (p.strokes || [])) strokes.push([s, true]);
-  for (const [s, isAI] of strokes) {
+  (doc.strokes || []).forEach((s, i) => strokes.push([s, false, 's:' + i]));
+  (doc.patches || []).forEach((p, j) =>
+    (p.strokes || []).forEach((s, k) => strokes.push([s, true, 'p:' + j + ':' + k])));
+  for (const [s, isAI, key] of strokes) {
+    if (skip && skip.has(key)) continue;
     const f = s.p;
     if (!f || f.length < 3) continue;
     const ai = isAI || s.g > 0;
@@ -492,12 +497,12 @@ function renderPages() {
     d.appendChild(l);
     d.onclick = () => { state.cur = i; live.follow = (i === (live.page || 0) - 1); location.hash = '#pages/' + (i + 1); renderPages(); };
     rail.appendChild(d);
-    drawDoc(c, p.doc, 148 / PAGE_W);
+    drawDoc(c, p.doc, 148 / PAGE_W, pageErased(i + 1).mirror);
   }
   const active = rail.children[state.cur];
   if (active) active.scrollIntoView({block: 'nearest'});
   const big = document.querySelector('#stage canvas');
-  drawDoc(big, pageAt(state.cur).doc, 1.0);
+  drawDoc(big, pageAt(state.cur).doc, 1.0, pageErased(state.cur + 1).mirror);
   liveReplay(big);
   document.getElementById('counter').textContent =
     `page ${state.cur + 1} / ${pageTotal()}`;
@@ -585,8 +590,74 @@ const live = {
   follow: true,     /* auto-turn to the page being written */
   buf: new Map(),   /* page -> stroke events since connect (replayed on redraw) */
   last: new Map(),  /* "t:id" -> previous point, to join batches */
+  erased: new Map(),/* page -> {mirror:Set, live:Set} of erased stroke keys */
 };
-const RUB_W = 44;   /* matches the app's ERASER_R=22 */
+const ERASER_R = 22;  /* device rubber radius (main.rs ERASER_R) */
+
+function pageErased(pg) {
+  let e = live.erased.get(pg);
+  if (!e) live.erased.set(pg, e = {mirror: new Set(), live: new Set()});
+  return e;
+}
+
+/* the device's erase rule (ink.rs erase_at): a stroke goes when the rub
+ * point is within stroke_radius + ERASER_R of any of its segments. The
+ * viewer applies the identical test to its copy, so the web page erases
+ * whole strokes exactly like the e-ink page does. */
+function segHit(pts, rx, ry) {
+  const n = Math.floor(pts.length / 3);
+  if (!n) return false;
+  const X = i => pts[i * 3] / 10, Y = i => pts[i * 3 + 1] / 10;
+  const R = i => (pts[i * 3 + 2] || 14) / 10 + ERASER_R;
+  if (n === 1) {
+    const dx = X(0) - rx, dy = Y(0) - ry, rr = R(0);
+    return dx * dx + dy * dy <= rr * rr;
+  }
+  for (let i = 0; i + 1 < n; i++) {
+    const ax = X(i), ay = Y(i);
+    const vx = X(i + 1) - ax, vy = Y(i + 1) - ay;
+    const qx = rx - ax, qy = ry - ay;
+    const len2 = vx * vx + vy * vy;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, (qx * vx + qy * vy) / len2)) : 0;
+    const dx = qx - vx * t, dy = qy - vy * t, rr = R(i);
+    if (dx * dx + dy * dy <= rr * rr) return true;
+  }
+  return false;
+}
+
+/* a rub event: erase whole strokes from the mirror doc + live overlay */
+function applyRub(pg, ev) {
+  const er = pageErased(pg);
+  const doc = (state.pages[pg - 1] || {}).doc;
+  const p = ev.p || [];
+  let hit = false;
+  for (let i = 0; i + 1 < p.length; i += 2) {
+    const rx = p[i] / 10, ry = p[i + 1] / 10;
+    if (doc) {
+      (doc.strokes || []).forEach((s, si) => {
+        const k = 's:' + si;
+        if (!er.mirror.has(k) && segHit(s.p || [], rx, ry)) { er.mirror.add(k); hit = true; }
+      });
+      (doc.patches || []).forEach((pa, pj) => (pa.strokes || []).forEach((s, sk) => {
+        const k = 'p:' + pj + ':' + sk;
+        if (!er.mirror.has(k) && segHit(s.p || [], rx, ry)) { er.mirror.add(k); hit = true; }
+      }));
+    }
+    const buf = live.buf.get(pg) || [];
+    const byKey = new Map();
+    for (const e of buf) {
+      const k = e.t + ':' + (e.id || 0);
+      if (er.live.has(k)) continue;
+      let a = byKey.get(k);
+      if (!a) byKey.set(k, a = []);
+      a.push(...(e.p || []));
+    }
+    for (const [k, pts] of byKey) {
+      if (segHit(pts, rx, ry)) { er.live.add(k); hit = true; }
+    }
+  }
+  return hit;
+}
 
 function liveBadge() {
   const el = document.getElementById('livelbl');
@@ -600,18 +671,14 @@ function liveBadge() {
 function liveStroke(ctx, ev, last) {
   const p = ev.p;
   if (!p || !p.length) return;
-  const rub = ev.t === 'rub';
-  const step = rub ? 2 : 3;
   const key = ev.t + ':' + (ev.id || 0);
-  const paper = '#fbfaf8';
   ctx.lineCap = ctx.lineJoin = 'round';
-  const color = rub ? paper :
+  ctx.strokeStyle = ctx.fillStyle =
     ev.t === 'ai' ? (state.aiBlue ? '#2457c5' : '#1c1c1c') : '#1c1c1c';
-  ctx.strokeStyle = ctx.fillStyle = color;
   let prev = last.get(key);
-  for (let i = 0; i + step - 1 < p.length; i += step) {
+  for (let i = 0; i + 2 < p.length; i += 3) {
     const x = p[i] / 10, y = p[i + 1] / 10;
-    const w = rub ? RUB_W : Math.max((p[i + 2] / 10) * 2, 1.4);
+    const w = Math.max((p[i + 2] / 10) * 2, 1.4);
     if (prev) {
       ctx.beginPath();
       ctx.lineWidth = w;
@@ -628,14 +695,28 @@ function liveStroke(ctx, ev, last) {
   last.set(key, prev);
 }
 
-/* redraws wipe the canvas back to mirror state: replay live ink on top.
- * (duplicated strokes land on identical pixels — harmless) */
+/* redraws wipe the canvas back to mirror state: replay live ink on top,
+ * minus anything erased. (duplicated strokes land on identical pixels) */
 function liveReplay(canvas) {
   const buf = live.buf.get(state.cur + 1);
   if (!buf || !buf.length) return;
+  const er = pageErased(state.cur + 1);
   const ctx = canvas.getContext('2d');
   const last = new Map();
-  for (const ev of buf) liveStroke(ctx, ev, last);
+  for (const ev of buf) {
+    if (!er.live.has(ev.t + ':' + (ev.id || 0))) liveStroke(ctx, ev, last);
+  }
+}
+
+/* redraw the viewed page in place (mirror minus erasures, then live ink) */
+function liveRedraw(pg) {
+  if (state.tab !== 'pages' || state.cur !== pg - 1) return;
+  const big = document.querySelector('#stage canvas');
+  if (!big) return;
+  drawDoc(big, pageAt(state.cur).doc, 1.0, pageErased(pg).mirror);
+  liveReplay(big);
+  const thumb = document.querySelectorAll('#rail canvas')[pg - 1];
+  if (thumb) drawDoc(thumb, pageAt(pg - 1).doc, 148 / PAGE_W, pageErased(pg).mirror);
 }
 
 function liveFollow() {
@@ -679,12 +760,18 @@ function onLiveEvent(data) {
       live.status = ev.s;
       liveBadge();
       return;
-    case 's': case 'ai': case 'rub': {
+    case 'rub': {
+      const pg = live.page || state.cur + 1;
+      if (applyRub(pg, ev)) liveRedraw(pg);
+      return;
+    }
+    case 's': case 'ai': {
       const pg = live.page || state.cur + 1;
       let buf = live.buf.get(pg);
       if (!buf) live.buf.set(pg, buf = []);
       buf.push(ev);
       if (buf.length > 8000) buf.splice(0, buf.length - 8000);
+      if (pageErased(pg).live.has(ev.t + ':' + (ev.id || 0))) return;
       if (state.tab === 'pages' && state.cur === pg - 1) {
         const big = document.querySelector('#stage canvas');
         if (big) liveStroke(big.getContext('2d'), ev, live.last);
