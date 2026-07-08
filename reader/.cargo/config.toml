@@ -1,0 +1,11 @@
+# Cross-compile target: armv7 + musl = a fully static binary with zero
+# dependencies on the device's libraries. rust-lld ships with rustup, so
+# no external linker or docker image is needed.
+#
+# One-time setup:  rustup target add armv7-unknown-linux-musleabihf
+
+[target.armv7-unknown-linux-musleabihf]
+linker = "rust-lld"
+
+[build]
+target = "armv7-unknown-linux-musleabihf"
