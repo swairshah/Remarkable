@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Build a reader book bundle from a PDF — runs on the desk side, not the
+tablet (the device never parses PDFs).
+
+    uv run --with pymupdf --with numpy python3 tools/mkbook.py in.pdf \
+        -o build/books/my-paper [--title "My Paper"]
+
+Produces:
+    OUT/meta.json        { title, pages, w, h }
+    OUT/pages/0001.png   1404x1872 8-bit gray PNG, 1-BIT CONTENT (dithered)
+    OUT/text/0001.json   { text, words: [[x0,y0,x1,y1,"word"], ...] }
+
+Pages are scaled to fit 1404x1872 preserving aspect and centered on white;
+word boxes are transformed into the same device pixel space, so underlining
+on the tablet is pure geometry.
+
+Content is dithered to pure black/white (Bayer 8x8) because the tablet's
+pen path uses the 1-bit DU waveform: a binary screen keeps handwriting
+instant everywhere. Grays survive as dither patterns; text stays crisp
+(it is near-black already).
+"""
+import argparse
+import json
+import os
+import re
+import struct
+import sys
+import zlib
+
+import fitz  # pymupdf
+import numpy as np
+
+W, H = 1404, 1872
+
+BAYER8 = np.array([
+    [0, 32, 8, 40, 2, 34, 10, 42],
+    [48, 16, 56, 24, 50, 18, 58, 26],
+    [12, 44, 4, 36, 14, 46, 6, 38],
+    [60, 28, 52, 20, 62, 30, 54, 22],
+    [3, 35, 11, 43, 1, 33, 9, 41],
+    [51, 19, 59, 27, 49, 17, 57, 25],
+    [15, 47, 7, 39, 13, 45, 5, 37],
+    [63, 31, 55, 23, 61, 29, 53, 21],
+], dtype=np.float32)
+
+
+def dither_1bit(img: np.ndarray) -> np.ndarray:
+    """Bayer 8x8 ordered dither to {0, 255}. Near-black and near-white pass
+    through untouched at any matrix phase, so print stays sharp."""
+    h, w = img.shape
+    thresh = (np.tile(BAYER8, (h // 8 + 1, w // 8 + 1))[:h, :w] + 0.5) * (255.0 / 64.0)
+    return np.where(img.astype(np.float32) > thresh, 255, 0).astype(np.uint8)
+
+
+def write_png_gray(path: str, img: np.ndarray) -> None:
+    h, w = img.shape
+    raw = np.zeros((h, w + 1), dtype=np.uint8)
+    raw[:, 1:] = img  # filter byte 0 per row
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        c = tag + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0)
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(chunk(b"IHDR", ihdr))
+        f.write(chunk(b"IDAT", zlib.compress(raw.tobytes(), 6)))
+        f.write(chunk(b"IEND", b""))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("pdf")
+    ap.add_argument("-o", "--out", required=True, help="bundle directory to write")
+    ap.add_argument("--title", help="book title (default: PDF metadata, then filename)")
+    ap.add_argument("--no-dither", action="store_true",
+                    help="keep grayscale pages (NOT recommended: pen writing "
+                         "over grays looks rough on the DU waveform)")
+    args = ap.parse_args()
+
+    doc = fitz.open(args.pdf)
+    n = doc.page_count
+    if n == 0:
+        print("mkbook: empty PDF", file=sys.stderr)
+        return 1
+
+    title = args.title or (doc.metadata or {}).get("title") or ""
+    title = title.strip() or re.sub(r"[-_]+", " ", os.path.splitext(os.path.basename(args.pdf))[0]).strip()
+
+    os.makedirs(os.path.join(args.out, "pages"), exist_ok=True)
+    os.makedirs(os.path.join(args.out, "text"), exist_ok=True)
+
+    total_bytes = 0
+    for i in range(n):
+        page = doc[i]
+        rect = page.rect
+        k = min(W / rect.width, H / rect.height)
+        pix = page.get_pixmap(matrix=fitz.Matrix(k, k), colorspace=fitz.csGRAY, alpha=False)
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.stride)[:, :pix.width]
+        ox, oy = (W - pix.width) // 2, (H - pix.height) // 2
+        canvas = np.full((H, W), 255, dtype=np.uint8)
+        canvas[oy:oy + pix.height, ox:ox + pix.width] = img
+        if not args.no_dither:
+            canvas = dither_1bit(canvas)
+
+        png_path = os.path.join(args.out, "pages", f"{i + 1:04}.png")
+        write_png_gray(png_path, canvas)
+        total_bytes += os.path.getsize(png_path)
+
+        words = [
+            [int(x0 * k) + ox, int(y0 * k) + oy,
+             int(x1 * k + 0.5) + ox, int(y1 * k + 0.5) + oy, w]
+            for (x0, y0, x1, y1, w, *_rest) in page.get_text("words")
+        ]
+        text = page.get_text().strip()
+        with open(os.path.join(args.out, "text", f"{i + 1:04}.json"), "w") as f:
+            json.dump({"text": text, "words": words}, f, ensure_ascii=False)
+
+        if (i + 1) % 20 == 0 or i + 1 == n:
+            print(f"mkbook: {i + 1}/{n} pages", file=sys.stderr)
+
+    with open(os.path.join(args.out, "meta.json"), "w") as f:
+        json.dump({"title": title, "pages": n, "w": W, "h": H}, f, ensure_ascii=False)
+
+    print(f"mkbook: '{title}' — {n} pages, {total_bytes // 1024} KB of rasters -> {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

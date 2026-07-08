@@ -1,0 +1,11 @@
+{
+    "name": "reader",
+    "application": "/home/root/xovi/exthome/appload/reader/appload-launch.sh",
+    "workingDirectory": "/home/root",
+    "environment": {
+        "HOME": "/home/root",
+        "PATH": "/home/root/bin:/home/root/opt/node/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    },
+    "qtfb": false,
+    "aspectRatio": "original"
+}
