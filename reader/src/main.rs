@@ -32,6 +32,8 @@ mod display;
 mod draw;
 mod fb;
 mod font;
+mod import;
+mod xochitl;
 #[allow(dead_code)] /* small API surface; not every metric is used yet */
 mod hershey;
 mod hershey_data;
@@ -180,6 +182,18 @@ const HOME_LIST_Y0: i32 = 170;
 const HOME_ROW_H: i32 = 128;
 const HOME_ROWS: usize = ((FB_H - 40 - HOME_LIST_Y0) / HOME_ROW_H) as usize;
 
+/* the TABLET LIBRARY (import) view: header button + row grid */
+const IMP_BTN_X: i32 = FB_W - 300;
+const IMP_BTN_Y: i32 = 20;
+const IMP_BTN_W: i32 = 240;
+const IMP_BTN_H: i32 = 64;
+const IMP_ROW_H: i32 = 100;
+const IMP_ROWS: usize = ((FB_H - 40 - HOME_LIST_Y0) / IMP_ROW_H) as usize;
+
+/* the xochitl folder that auto-imports (checked at launch + periodically) */
+const WATCH_FOLDER: &str = "Reader";
+const WATCH_EVERY: Duration = Duration::from_secs(300);
+
 /* hold a finger on a book row this long -> the delete confirmation */
 const HOLD_MS: u128 = 650;
 const DEL_W: i32 = 960;
@@ -266,6 +280,13 @@ struct App {
     shelf: Vec<book::BookInfo>,
     shelf_top: usize, /* first visible shelf row (vertical swipes page it) */
     confirm_delete: Option<usize>, /* shelf index awaiting DELETE/CANCEL */
+
+    /* on-device import (mutool): the TABLET LIBRARY view + render queue */
+    lib_list: Option<(Vec<xochitl::XDoc>, usize)>, /* (docs, top row) */
+    importer: Option<import::Importer>,
+    import_queue: VecDeque<import::Job>,
+    import_shown: (usize, usize),   /* progress last painted */
+    last_watch: Option<Instant>,    /* watched-folder check */
 
     takeover: bool,
     ink_flush: Duration,
@@ -465,11 +486,13 @@ impl App {
         self.ink_settle = None;
         self.ink_settle_at = None;
         self.confirm_delete = None;
+        self.lib_list = None;
         save_settings(self.text_scale, "");
         self.shelf = book::scan();
         self.shelf_top = 0;
         self.render_home(true);
         println!("reader: home ({} books)", self.shelf.len());
+        self.check_watch_folder();
     }
 
     fn render_home(&mut self, flash: bool) {
@@ -487,6 +510,8 @@ impl App {
         };
         self.fb.text(72, 108, &sub, 2, draw::GRAY);
         self.fb.fill_rect(0, 140, FB_W, 2, BLACK);
+        self.draw_corner_button("IMPORT +");
+        self.draw_import_status();
         if self.shelf.is_empty() {
             text::draw_line(
                 &mut self.fb,
@@ -556,7 +581,11 @@ impl App {
     }
 
     /// A press on the home screen (pen press or finger tap).
-    fn home_press(&mut self, _x: i32, y: i32) {
+    fn home_press(&mut self, x: i32, y: i32) {
+        if in_rect(x, y, IMP_BTN_X, IMP_BTN_Y, IMP_BTN_W, IMP_BTN_H) {
+            self.open_lib_list();
+            return;
+        }
         if let Some(idx) = self.home_row_at(y) {
             let slug = self.shelf[idx].slug.clone();
             self.open_book(&slug);
@@ -670,6 +699,243 @@ impl App {
         if new_top != self.shelf_top {
             self.shelf_top = new_top;
             self.render_home(false);
+        }
+    }
+
+    /* -- the TABLET LIBRARY view: import from xochitl, on the device -- */
+
+    fn open_lib_list(&mut self) {
+        self.lib_list = Some((xochitl::scan_pdfs(), 0));
+        self.render_lib_list(false);
+    }
+
+    fn close_lib_list(&mut self) {
+        self.lib_list = None;
+        self.render_home(false);
+    }
+
+    /// Is this xochitl doc already a book / being imported / queued?
+    fn import_state_of(&self, name: &str) -> Option<&'static str> {
+        let slug = xochitl::slugify(name);
+        if self.shelf.iter().any(|b| b.slug == slug) {
+            return Some("on the shelf");
+        }
+        if self.importer.as_ref().is_some_and(|i| i.job.slug == slug) {
+            return Some("importing...");
+        }
+        if self.import_queue.iter().any(|j| j.slug == slug) {
+            return Some("queued");
+        }
+        None
+    }
+
+    fn render_lib_list(&mut self, flash: bool) {
+        let Some((docs, top)) = self.lib_list.as_ref() else { return };
+        let (top, total) = (*top, docs.len());
+        let rows: Vec<(String, String)> = docs
+            .iter()
+            .skip(top)
+            .take(IMP_ROWS)
+            .map(|d| {
+                let mark = self
+                    .import_state_of(&d.name)
+                    .map(|m| format!("  -  {m}"))
+                    .unwrap_or_default();
+                let mb = (d.kb as f32 / 1024.0).max(0.1);
+                (d.name.clone(), format!("{mb:.1} MB{mark}"))
+            })
+            .collect();
+        self.fb.fill_rect(0, 0, FB_W, FB_H, WHITE);
+        text::draw_line(&mut self.fb, 70, 40, text::Face::Heading, 52.0, "TABLET LIBRARY");
+        let sub = if import::available() {
+            format!(
+                "pdfs {}-{} of {} on this tablet - tap to import - swipe up/down",
+                top + 1,
+                (top + IMP_ROWS).min(total),
+                total
+            )
+        } else {
+            "mutool missing - run: make deploy-mutool from your computer".to_string()
+        };
+        self.fb.text(72, 108, &sub, 2, draw::GRAY);
+        self.fb.fill_rect(0, 140, FB_W, 2, BLACK);
+        self.draw_corner_button("< SHELF");
+        for (i, (name, meta)) in rows.iter().enumerate() {
+            let y = HOME_LIST_Y0 + i as i32 * IMP_ROW_H;
+            let mut t = name.clone();
+            while text::width(text::Face::Body, 36.0, &t) > FB_W - 140 && t.chars().count() > 4 {
+                t = t.chars().take(t.chars().count() - 4).collect();
+                t.push('.');
+                t.push('.');
+            }
+            text::draw_line(&mut self.fb, 70, y, text::Face::Body, 36.0, &t);
+            self.fb.text(70, y + 52, meta, 2, draw::GRAY);
+            self.fb.fill_rect(70, y + IMP_ROW_H - 14, FB_W - 140, 1, draw::LIGHT);
+        }
+        self.draw_import_status();
+        if flash {
+            self.disp.full_refresh();
+        } else {
+            self.disp.update(0, 0, FB_W, FB_H, Wave::Text);
+        }
+    }
+
+    fn lib_list_press(&mut self, x: i32, y: i32) {
+        if in_rect(x, y, IMP_BTN_X, IMP_BTN_Y, IMP_BTN_W, IMP_BTN_H) {
+            self.close_lib_list();
+            return;
+        }
+        let row = (y - HOME_LIST_Y0) / IMP_ROW_H;
+        if row < 0 || row as usize >= IMP_ROWS {
+            return;
+        }
+        let Some((docs, top)) = self.lib_list.as_ref() else { return };
+        let idx = *top + row as usize;
+        let Some(doc) = docs.get(idx) else { return };
+        if self.import_state_of(&doc.name).is_some() {
+            return; /* already there / in flight */
+        }
+        if !import::available() {
+            println!("reader: import refused — mutool not installed");
+            return;
+        }
+        let job = import::Job {
+            uuid: doc.uuid.clone(),
+            title: doc.name.trim_end_matches(".pdf").to_string(),
+            slug: xochitl::slugify(&doc.name),
+        };
+        self.enqueue_import(job);
+        self.render_lib_list(false); /* row now shows queued/importing */
+    }
+
+    fn lib_list_scroll(&mut self, up: bool) {
+        let Some((docs, top)) = self.lib_list.as_mut() else { return };
+        let max_top = docs.len().saturating_sub(IMP_ROWS);
+        let new_top = if up { (*top + IMP_ROWS).min(max_top) } else { top.saturating_sub(IMP_ROWS) };
+        if new_top != *top {
+            *top = new_top;
+            self.render_lib_list(false);
+        }
+    }
+
+    fn enqueue_import(&mut self, job: import::Job) {
+        println!("reader: import queued: '{}' -> {}", job.title, job.slug);
+        if self.importer.is_none() {
+            match import::Importer::start(job, &book::books_dir()) {
+                Ok(imp) => self.importer = Some(imp),
+                Err(e) => println!("reader: import start failed: {e}"),
+            }
+        } else {
+            self.import_queue.push_back(job);
+        }
+    }
+
+    /// Drive the active import forward; start the next queued one when it
+    /// finishes. Called every loop iteration (cheap when idle).
+    fn tick_import(&mut self) {
+        let Some(imp) = self.importer.as_mut() else { return };
+        match imp.poll() {
+            import::Tick::Working(done, total) => {
+                /* repaint the status line at most every ~2s of progress */
+                if (done != self.import_shown.0 || total != self.import_shown.1)
+                    && done % 5 == 0
+                    && self.sidebar.is_none()
+                    && self.agent_page.is_none()
+                {
+                    self.import_shown = (done, total);
+                    if self.on_home() {
+                        self.paint_import_status_band();
+                    }
+                }
+            }
+            import::Tick::Finished(slug) => {
+                println!("reader: import finished: {slug}");
+                self.importer = None;
+                self.import_shown = (0, 0);
+                self.shelf = book::scan();
+                if let Some(job) = self.import_queue.pop_front() {
+                    match import::Importer::start(job, &book::books_dir()) {
+                        Ok(imp) => self.importer = Some(imp),
+                        Err(e) => println!("reader: import start failed: {e}"),
+                    }
+                }
+                if self.on_home() && self.sidebar.is_none() && self.agent_page.is_none() {
+                    if self.lib_list.is_some() {
+                        self.render_lib_list(false);
+                    } else {
+                        self.render_home(false);
+                    }
+                }
+            }
+            import::Tick::Failed(msg) => {
+                println!("reader: {msg}");
+                self.importer = None;
+                self.import_shown = (0, 0);
+                if let Some(job) = self.import_queue.pop_front() {
+                    match import::Importer::start(job, &book::books_dir()) {
+                        Ok(imp) => self.importer = Some(imp),
+                        Err(e) => println!("reader: import start failed: {e}"),
+                    }
+                }
+            }
+        }
+    }
+
+    /// One line of import progress, drawn just under the header rule on
+    /// the home/library views.
+    fn draw_import_status(&mut self) {
+        let line = match (&self.importer, self.import_queue.len()) {
+            (Some(imp), q) => {
+                let (done, total) = self.import_shown;
+                let more = if q > 0 { format!(" (+{q} queued)") } else { String::new() };
+                let mut t = imp.job.title.clone();
+                t.truncate(40);
+                format!("importing '{}' - page {}/{}{}", t, done.max(1), total.max(1), more)
+            }
+            (None, 0) => return,
+            (None, q) => format!("{q} imports queued"),
+        };
+        self.fb.text(72, 146, &line, 2, BLACK);
+    }
+
+    fn paint_import_status_band(&mut self) {
+        self.fb.fill_rect(0, 144, FB_W, 24, WHITE);
+        self.draw_import_status();
+        self.disp.update(0, 144, FB_W, 24, Wave::Ink);
+    }
+
+    /// The corner button on home/library views (IMPORT + / < SHELF).
+    fn draw_corner_button(&mut self, label: &str) {
+        self.fb.rect_outline(IMP_BTN_X, IMP_BTN_Y, IMP_BTN_W, IMP_BTN_H, 3, BLACK);
+        self.fb.text(
+            IMP_BTN_X + (IMP_BTN_W - text_width(label, 3)) / 2,
+            IMP_BTN_Y + (IMP_BTN_H - 21) / 2,
+            label,
+            3,
+            BLACK,
+        );
+    }
+
+    /// Auto-import: anything in the xochitl folder WATCH_FOLDER that is
+    /// not already a book gets queued. Cheap; runs at launch, on go-home,
+    /// and every few minutes.
+    fn check_watch_folder(&mut self) {
+        self.last_watch = Some(Instant::now());
+        if !import::available() {
+            return;
+        }
+        let Some(folder) = xochitl::folder_uuid(WATCH_FOLDER) else { return };
+        for d in xochitl::scan_pdfs() {
+            if d.parent != folder || self.import_state_of(&d.name).is_some() {
+                continue;
+            }
+            println!("reader: '{}' appeared in {WATCH_FOLDER}/ — auto-importing", d.name);
+            let job = import::Job {
+                uuid: d.uuid.clone(),
+                title: d.name.trim_end_matches(".pdf").to_string(),
+                slug: xochitl::slugify(&d.name),
+            };
+            self.enqueue_import(job);
         }
     }
 
@@ -1162,6 +1428,8 @@ impl App {
             if phase == PenPhase::Press {
                 if self.confirm_delete.is_some() {
                     self.delete_confirm_press(x, y);
+                } else if self.lib_list.is_some() {
+                    self.lib_list_press(x, y);
                 } else {
                     self.home_press(x, y);
                 }
@@ -1360,7 +1628,16 @@ impl App {
                 self.swipe_from = None;
                 if let Some((sx, sy)) = self.touch_start.take() {
                     let (dx, dy) = (self.touch_last.0 - sx, self.touch_last.1 - sy);
-                    if dx.abs() >= FLIP_DX && dy.abs() <= FLIP_DY_MAX {
+                    if self.on_home() && self.lib_list.is_some() {
+                        /* the TABLET LIBRARY view: scroll or pick */
+                        if dy.abs() >= FLIP_DX && dx.abs() <= FLIP_DY_MAX {
+                            self.lib_list_scroll(dy < 0);
+                        } else if dx.abs() < 40 && dy.abs() < 40 {
+                            self.lib_list_press(sx, sy);
+                        } else if dx.abs() >= FLIP_DX {
+                            self.close_lib_list(); /* horizontal swipe = back */
+                        }
+                    } else if dx.abs() >= FLIP_DX && dy.abs() <= FLIP_DY_MAX {
                         /* swipe left = next page (turning forward) */
                         self.flip(if dx < 0 { 1 } else { -1 });
                     } else if self.on_home() && dy.abs() >= FLIP_DX && dx.abs() <= FLIP_DY_MAX {
@@ -2105,7 +2382,60 @@ fn sleep_cycle(
 
 /* ---- main ---------------------------------------------------------------- */
 
+/// Headless import (`reader --import-cli <name-fragment>`): run the same
+/// on-device pipeline synchronously, printing progress — for testing over
+/// ssh and for scripted imports, no takeover needed.
+fn import_cli(frag: &str) -> std::process::ExitCode {
+    let needle = frag.to_lowercase();
+    let Some(doc) = xochitl::scan_pdfs().into_iter().find(|d| d.name.to_lowercase().contains(&needle))
+    else {
+        eprintln!("reader: no xochitl pdf matching '{frag}'");
+        return std::process::ExitCode::FAILURE;
+    };
+    println!("reader: importing '{}' ({} KB)", doc.name, doc.kb);
+    let job = import::Job {
+        uuid: doc.uuid.clone(),
+        title: doc.name.trim_end_matches(".pdf").to_string(),
+        slug: xochitl::slugify(&doc.name),
+    };
+    let mut imp = match import::Importer::start(job, &book::books_dir()) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("reader: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let mut last = usize::MAX;
+    loop {
+        match imp.poll() {
+            import::Tick::Working(done, total) => {
+                if done != last && done % 10 == 0 {
+                    println!("reader: page {done}/{total}");
+                    last = done;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            import::Tick::Finished(slug) => {
+                println!("reader: done -> {slug}");
+                return std::process::ExitCode::SUCCESS;
+            }
+            import::Tick::Failed(msg) => {
+                eprintln!("reader: {msg}");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--import-cli") {
+        let Some(frag) = args.get(2) else {
+            eprintln!("usage: reader --import-cli <name fragment>");
+            return std::process::ExitCode::FAILURE;
+        };
+        return import_cli(frag);
+    }
     let (disp, fb) = match Display::open() {
         Ok(p) => p,
         Err(e) => {
@@ -2166,6 +2496,11 @@ fn main() -> std::process::ExitCode {
         shelf: book::scan(),
         shelf_top: 0,
         confirm_delete: None,
+        lib_list: None,
+        importer: None,
+        import_queue: VecDeque::new(),
+        import_shown: (0, 0),
+        last_watch: None,
         takeover,
         ink_flush: if takeover { INK_FLUSH_TAKEOVER } else { INK_FLUSH_QTFB },
         cur_stroke: None,
@@ -2205,6 +2540,7 @@ fn main() -> std::process::ExitCode {
     if app.book.is_none() {
         app.render_home(true);
     }
+    app.check_watch_folder();
 
     while RUNNING.load(Ordering::Relaxed) {
         let timeout = next_timeout(&app);
@@ -2328,6 +2664,13 @@ fn main() -> std::process::ExitCode {
         if !app.anim.is_empty() && app.last_anim.elapsed() >= ANIM_TICK {
             app.anim_tick();
         }
+        app.tick_import();
+        if app.last_watch.is_none_or(|t| t.elapsed() >= WATCH_EVERY)
+            && app.cur_stroke.is_none()
+            && app.last_contact.is_none_or(|t| t.elapsed() > Duration::from_secs(2))
+        {
+            app.check_watch_folder();
+        }
         app.maybe_send_page();
         if app.indicator_until.is_some_and(|at| Instant::now() >= at) {
             app.clear_page_indicator();
@@ -2405,6 +2748,14 @@ fn next_timeout(app: &App) -> i32 {
     }
     if let Some(at) = app.ink_settle_at {
         soonest(at.saturating_duration_since(Instant::now()));
+    }
+    if app.importer.is_some() {
+        /* mutool children finish without an fd to poll: wake regularly */
+        soonest(Duration::from_millis(120));
+    }
+    if let Some(t0) = app.last_watch {
+        /* periodic watched-folder check must fire even when idle */
+        soonest(WATCH_EVERY.saturating_sub(t0.elapsed()));
     }
     match t {
         Some(d) => (d.as_millis() as i32).max(0),

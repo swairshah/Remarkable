@@ -100,6 +100,7 @@ pub struct Book {
     pub current: usize, /* seq index */
     pub page: Page,     /* ink overlay of the current entry */
     raster: Option<Vec<u8>>, /* decoded gray8 SCREEN_W x SCREEN_H, None on notes */
+    offsets: Vec<(i32, i32)>, /* per-pdf-page paste offset for sub-screen rasters */
     state_dirty: bool,
 }
 
@@ -141,6 +142,19 @@ impl Book {
             None => (default_seq(pdf_pages), 1, 0),
         };
 
+        let offsets = meta["offsets"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|v| {
+                        (
+                            v.get(0).and_then(Value::as_i64).unwrap_or(0) as i32,
+                            v.get(1).and_then(Value::as_i64).unwrap_or(0) as i32,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut b = Book {
             dir,
             slug: slug.to_string(),
@@ -151,6 +165,7 @@ impl Book {
             current: 0,
             page: Page::default(),
             raster: None,
+            offsets,
             state_dirty: false,
         };
         b.goto(pos.min(b.seq.len().saturating_sub(1)));
@@ -190,14 +205,33 @@ impl Book {
         format!("{}/text/{:04}.json", self.dir, pdf_page + 1)
     }
 
-    /// Decode the full-screen raster for a pdf page (None for missing files
-    /// or decode errors — the page then renders as blank paper).
+    /// Decode the raster for a pdf page (None for missing files or decode
+    /// errors — the page then renders as blank paper). Desk-side bundles
+    /// store full-screen images; on-device imports store the page at its
+    /// rendered size and we paste it onto white here, at the offset
+    /// meta.json recorded (centered as a fallback).
     pub fn load_raster(&self, pdf_page: usize) -> Option<Vec<u8>> {
         let data = std::fs::read(self.raster_path(pdf_page)).ok()?;
         match png_dec::decode_png_gray(&data) {
             Ok((w, h, buf)) if w == SCREEN_W as u32 && h == SCREEN_H as u32 => Some(buf),
+            Ok((w, h, buf)) if w <= SCREEN_W as u32 && h <= SCREEN_H as u32 => {
+                let (w, h) = (w as i32, h as i32);
+                let (ox, oy) = self
+                    .offsets
+                    .get(pdf_page)
+                    .copied()
+                    .unwrap_or(((SCREEN_W - w) / 2, (SCREEN_H - h) / 2));
+                let (ox, oy) = (ox.clamp(0, SCREEN_W - w), oy.clamp(0, SCREEN_H - h));
+                let mut canvas = vec![255u8; (SCREEN_W * SCREEN_H) as usize];
+                for y in 0..h {
+                    let src = &buf[(y * w) as usize..((y + 1) * w) as usize];
+                    let d0 = ((oy + y) * SCREEN_W + ox) as usize;
+                    canvas[d0..d0 + w as usize].copy_from_slice(src);
+                }
+                Some(canvas)
+            }
             Ok((w, h, _)) => {
-                eprintln!("reader: page {} raster is {w}x{h}, want {SCREEN_W}x{SCREEN_H}", pdf_page + 1);
+                eprintln!("reader: page {} raster is {w}x{h}, larger than {SCREEN_W}x{SCREEN_H}", pdf_page + 1);
                 None
             }
             Err(e) => {

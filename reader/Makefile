@@ -55,7 +55,7 @@ KILL_APP := systemctl stop reader-takeover 2>/dev/null; \
             q=$$(pgrep -f 'appload/reader/[r]eader'); \
             if [ -n "$$q" ]; then kill $$q; sleep 1; kill -9 $$q 2>/dev/null; fi
 
-.PHONY: all build preview test-host testbook fetch-server deploy book books book-rm mirror mirror-list trace log log-server kill restore-ui restart-ui uninstall clean
+.PHONY: all build preview test-host testbook fetch-mutool deploy-mutool fetch-server deploy book books book-rm mirror mirror-list trace log log-server kill restore-ui restart-ui uninstall clean
 
 all: build
 
@@ -85,6 +85,28 @@ preview: build testbook
 	docker build --platform linux/amd64 -t reader-preview -f test/preview.Dockerfile test
 	docker run --rm --platform linux/amd64 -v "$(CURDIR):/src" -w /src \
 		reader-preview python3 test/fake-qtfb.py $(BUILT) build/preview.png
+
+# The on-device PDF engine: mutool (MuPDF — the SAME engine pymupdf wraps,
+# so device imports match desk imports exactly), pulled from Alpine's
+# armv7 packages with its musl loader + shared libs (~54 MB). One-time:
+# fetch here, deploy-mutool pushes it to /home/root/opt/mutool. The app
+# runs it via the bundled musl loader; without it, on-device import is
+# simply disabled (desk-side make book/mirror still work).
+fetch-mutool:
+	mkdir -p vendor/mutool
+	docker run --privileged --rm tonistiigi/binfmt --install arm >/dev/null
+	docker run --rm --platform linux/arm/v7 -v "$(CURDIR)/vendor/mutool:/out" alpine:3.20 sh -c '\
+		apk add -q mupdf-tools && \
+		cp /usr/bin/mutool /lib/ld-musl-armhf.so.1 /out/ && \
+		for l in $$(ldd /usr/bin/mutool | awk "{print $$3}" | grep ^/); do cp "$$l" /out/; done'
+	@ls vendor/mutool | wc -l
+
+deploy-mutool: vendor/mutool/mutool
+	tar -C vendor -cf - mutool | $(SSH) 'mkdir -p /home/root/opt && tar -C /home/root/opt -xf -'
+	$(SSH) '/home/root/opt/mutool/ld-musl-armhf.so.1 --library-path /home/root/opt/mutool /home/root/opt/mutool/mutool -v'
+
+vendor/mutool/mutool:
+	@echo 'vendor/mutool missing — run: make fetch-mutool' && exit 1
 
 # The takeover display host: timower/rM2-stuff's rm2fb server. Prefer the
 # copy a sibling app already fetched; else download the .ipk.
