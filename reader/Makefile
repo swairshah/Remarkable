@@ -11,6 +11,9 @@
 #   make book FILE=~/papers/x.pdf [TITLE="..."] [SLUG=x]   render + push a PDF
 #   make books        list the books on the device
 #   make book-rm SLUG=x                                    delete one (and its ink!)
+#   make mirror-list [ONLY=frag]     browse the tablet's OWN pdf library
+#   make mirror ONLY="name frag"     import matching xochitl pdfs as books
+#                [FORCE=1] [ALL=1]   (re-render / lift the 10-doc cap)
 #
 #   make trace        pull pi session traces + app log -> build/trace.html
 #   make log          tail the app log on the device (/tmp/reader.log)
@@ -43,7 +46,7 @@ KILL_APP := systemctl stop reader-takeover 2>/dev/null; \
             q=$$(pgrep -f 'appload/reader/[r]eader'); \
             if [ -n "$$q" ]; then kill $$q; sleep 1; kill -9 $$q 2>/dev/null; fi
 
-.PHONY: all build preview test-host testbook fetch-server deploy book books book-rm trace log log-server kill restore-ui restart-ui uninstall clean
+.PHONY: all build preview test-host testbook fetch-server deploy book books book-rm mirror mirror-list trace log log-server kill restore-ui restart-ui uninstall clean
 
 all: build
 
@@ -139,6 +142,15 @@ ifndef SLUG
 endif
 	$(SSH) 'rm -rf $(BOOKS_DIR)/$(SLUG)'
 	@echo "removed $(SLUG) (pages, text, ink and reading position)."
+
+# Mirror PDFs the tablet ALREADY holds (xochitl's library) into books:
+# pull over ssh, render with mkbook, push the bundle back. Selective on
+# purpose — mirror what you're reading, not all 300 PDFs.
+mirror-list:
+	$(UVPY) tools/mirror.py $(HOST) --list $(if $(ONLY),--only "$(ONLY)")
+
+mirror:
+	$(UVPY) tools/mirror.py $(HOST) $(if $(ONLY),--only "$(ONLY)") $(if $(FORCE),--force) $(if $(ALL),--all)
 
 # Pull pi's session traces + the app log off the device and render them
 # into one HTML (tools/trace-viewer.py): the device log up top, then every

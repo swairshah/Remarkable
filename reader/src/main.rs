@@ -178,6 +178,7 @@ struct Sb {
 /* the home screen (book list) */
 const HOME_LIST_Y0: i32 = 170;
 const HOME_ROW_H: i32 = 128;
+const HOME_ROWS: usize = ((FB_H - 40 - HOME_LIST_Y0) / HOME_ROW_H) as usize;
 
 /* the AGENT.md page (reachable from the sidebar) */
 const AGENT_TEXT_X: i32 = 70;
@@ -256,6 +257,7 @@ struct App {
     /* the open book, or None = the home screen (book shelf) */
     book: Option<Book>,
     shelf: Vec<book::BookInfo>,
+    shelf_top: usize, /* first visible shelf row (vertical swipes page it) */
 
     takeover: bool,
     ink_flush: Duration,
@@ -440,6 +442,7 @@ impl App {
         self.indicator_until = None;
         save_settings(self.text_scale, "");
         self.shelf = book::scan();
+        self.shelf_top = 0;
         self.render_home(true);
         println!("reader: home ({} books)", self.shelf.len());
     }
@@ -447,7 +450,17 @@ impl App {
     fn render_home(&mut self, flash: bool) {
         self.fb.fill_rect(0, 0, FB_W, FB_H, WHITE);
         text::draw_line(&mut self.fb, 70, 40, text::Face::Heading, 52.0, "READER");
-        self.fb.text(72, 108, "tap a book to open it - top-edge swipe to close the app", 2, draw::GRAY);
+        let sub = if self.shelf.len() > HOME_ROWS {
+            format!(
+                "books {}-{} of {} - swipe up/down - tap to open",
+                self.shelf_top + 1,
+                (self.shelf_top + HOME_ROWS).min(self.shelf.len()),
+                self.shelf.len()
+            )
+        } else {
+            "tap a book to open it - top-edge swipe to close the app".to_string()
+        };
+        self.fb.text(72, 108, &sub, 2, draw::GRAY);
         self.fb.fill_rect(0, 140, FB_W, 2, BLACK);
         if self.shelf.is_empty() {
             text::draw_line(
@@ -470,6 +483,8 @@ impl App {
         let shelf_rows: Vec<(String, String)> = self
             .shelf
             .iter()
+            .skip(self.shelf_top)
+            .take(HOME_ROWS)
             .map(|b| {
                 let meta = if b.pos > 0 {
                     format!("{} pages  -  at page {} of {}", b.pages, b.pos + 1, b.seq_len)
@@ -481,10 +496,6 @@ impl App {
             .collect();
         for (i, (title, meta)) in shelf_rows.iter().enumerate() {
             let y = HOME_LIST_Y0 + i as i32 * HOME_ROW_H;
-            if y + HOME_ROW_H > FB_H - 30 {
-                self.fb.text(70, y + 8, "[... more books]", 2, draw::GRAY);
-                break;
-            }
             let mut t = title.clone();
             while text::width(text::Face::Heading, 42.0, &t) > FB_W - 140 && t.chars().count() > 4 {
                 t = t.chars().take(t.chars().count() - 4).collect();
@@ -508,12 +519,30 @@ impl App {
 
     /// A press on the home screen (pen press or finger tap).
     fn home_press(&mut self, _x: i32, y: i32) {
-        let idx = (y - HOME_LIST_Y0) / HOME_ROW_H;
-        if idx < 0 || idx as usize >= self.shelf.len() {
+        let row = (y - HOME_LIST_Y0) / HOME_ROW_H;
+        if row < 0 {
             return;
         }
-        let slug = self.shelf[idx as usize].slug.clone();
+        let idx = self.shelf_top + row as usize;
+        if row as usize >= HOME_ROWS || idx >= self.shelf.len() {
+            return;
+        }
+        let slug = self.shelf[idx].slug.clone();
         self.open_book(&slug);
+    }
+
+    /// Vertical swipe on the shelf: page through the book list.
+    fn shelf_scroll(&mut self, up: bool) {
+        let max_top = self.shelf.len().saturating_sub(HOME_ROWS);
+        let new_top = if up {
+            (self.shelf_top + HOME_ROWS).min(max_top)
+        } else {
+            self.shelf_top.saturating_sub(HOME_ROWS)
+        };
+        if new_top != self.shelf_top {
+            self.shelf_top = new_top;
+            self.render_home(false);
+        }
     }
 
     fn open_book(&mut self, slug: &str) {
@@ -1178,6 +1207,9 @@ impl App {
                     if dx.abs() >= FLIP_DX && dy.abs() <= FLIP_DY_MAX {
                         /* swipe left = next page (turning forward) */
                         self.flip(if dx < 0 { 1 } else { -1 });
+                    } else if self.on_home() && dy.abs() >= FLIP_DX && dx.abs() <= FLIP_DY_MAX {
+                        /* vertical swipe on the shelf: page the book list */
+                        self.shelf_scroll(dy < 0);
                     } else if self.on_home() && dx.abs() < 40 && dy.abs() < 40 {
                         /* a finger tap picks a book */
                         self.home_press(sx, sy);
@@ -1967,6 +1999,7 @@ fn main() -> std::process::ExitCode {
         ipc,
         book: None,
         shelf: book::scan(),
+        shelf_top: 0,
         takeover,
         ink_flush: if takeover { INK_FLUSH_TAKEOVER } else { INK_FLUSH_QTFB },
         cur_stroke: None,

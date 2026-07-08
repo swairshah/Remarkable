@@ -69,27 +69,18 @@ def write_png_gray(path: str, img: np.ndarray) -> None:
         f.write(chunk(b"IEND", b""))
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("pdf")
-    ap.add_argument("-o", "--out", required=True, help="bundle directory to write")
-    ap.add_argument("--title", help="book title (default: PDF metadata, then filename)")
-    ap.add_argument("--no-dither", action="store_true",
-                    help="keep grayscale pages (NOT recommended: pen writing "
-                         "over grays looks rough on the DU waveform)")
-    args = ap.parse_args()
-
-    doc = fitz.open(args.pdf)
+def build_book(pdf: str, out: str, title: str | None = None, dither: bool = True) -> str:
+    """Render `pdf` into a bundle at `out`; returns the resolved title."""
+    doc = fitz.open(pdf)
     n = doc.page_count
     if n == 0:
-        print("mkbook: empty PDF", file=sys.stderr)
-        return 1
+        raise ValueError("empty PDF")
 
-    title = args.title or (doc.metadata or {}).get("title") or ""
-    title = title.strip() or re.sub(r"[-_]+", " ", os.path.splitext(os.path.basename(args.pdf))[0]).strip()
+    title = (title or "").strip() or ((doc.metadata or {}).get("title") or "").strip()
+    title = title or re.sub(r"[-_]+", " ", os.path.splitext(os.path.basename(pdf))[0]).strip()
 
-    os.makedirs(os.path.join(args.out, "pages"), exist_ok=True)
-    os.makedirs(os.path.join(args.out, "text"), exist_ok=True)
+    os.makedirs(os.path.join(out, "pages"), exist_ok=True)
+    os.makedirs(os.path.join(out, "text"), exist_ok=True)
 
     total_bytes = 0
     for i in range(n):
@@ -101,10 +92,10 @@ def main() -> int:
         ox, oy = (W - pix.width) // 2, (H - pix.height) // 2
         canvas = np.full((H, W), 255, dtype=np.uint8)
         canvas[oy:oy + pix.height, ox:ox + pix.width] = img
-        if not args.no_dither:
+        if dither:
             canvas = dither_1bit(canvas)
 
-        png_path = os.path.join(args.out, "pages", f"{i + 1:04}.png")
+        png_path = os.path.join(out, "pages", f"{i + 1:04}.png")
         write_png_gray(png_path, canvas)
         total_bytes += os.path.getsize(png_path)
 
@@ -114,16 +105,33 @@ def main() -> int:
             for (x0, y0, x1, y1, w, *_rest) in page.get_text("words")
         ]
         text = page.get_text().strip()
-        with open(os.path.join(args.out, "text", f"{i + 1:04}.json"), "w") as f:
+        with open(os.path.join(out, "text", f"{i + 1:04}.json"), "w") as f:
             json.dump({"text": text, "words": words}, f, ensure_ascii=False)
 
         if (i + 1) % 20 == 0 or i + 1 == n:
             print(f"mkbook: {i + 1}/{n} pages", file=sys.stderr)
 
-    with open(os.path.join(args.out, "meta.json"), "w") as f:
+    with open(os.path.join(out, "meta.json"), "w") as f:
         json.dump({"title": title, "pages": n, "w": W, "h": H}, f, ensure_ascii=False)
 
-    print(f"mkbook: '{title}' — {n} pages, {total_bytes // 1024} KB of rasters -> {args.out}")
+    print(f"mkbook: '{title}' — {n} pages, {total_bytes // 1024} KB of rasters -> {out}")
+    return title
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("pdf")
+    ap.add_argument("-o", "--out", required=True, help="bundle directory to write")
+    ap.add_argument("--title", help="book title (default: PDF metadata, then filename)")
+    ap.add_argument("--no-dither", action="store_true",
+                    help="keep grayscale pages (NOT recommended: pen writing "
+                         "over grays looks rough on the DU waveform)")
+    args = ap.parse_args()
+    try:
+        build_book(args.pdf, args.out, args.title, dither=not args.no_dither)
+    except ValueError as e:
+        print(f"mkbook: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
