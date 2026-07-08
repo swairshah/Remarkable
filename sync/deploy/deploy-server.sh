@@ -42,11 +42,11 @@ bun build "$HERE/server/bin/remarkable-activity-agent.ts" \
   --target=node --format=cjs \
   --outfile "$BUILD_DIR/remarkable-activity-agent.js" >/dev/null
 
-ssh "$HOST" 'mkdir -p ~/bin ~/notes-server/raw ~/notes/updates ~/remarkable-backup/xochitl ~/remarkable-exports'
+ssh "$HOST" 'mkdir -p ~/bin ~/notes-server/raw ~/notes-server/notebook ~/notes/updates ~/remarkable-backup/xochitl ~/remarkable-backup/notebook-app ~/remarkable-exports'
 
 echo "[deploy-server] scp server/bin scripts + agent bundle"
-scp -q "$HERE"/server/bin/*.sh "$BUILD_DIR/remarkable-activity-agent.js" "$HOST:bin/"
-ssh "$HOST" 'chmod +x ~/bin/remarkable-post-sync.sh ~/bin/remarkable-post-sync-by-name.sh ~/bin/remarkable-activity-agent-hook.sh 2>/dev/null || true'
+scp -q "$HERE"/server/bin/*.sh "$HERE"/server/bin/notebook-live-relay.js "$BUILD_DIR/remarkable-activity-agent.js" "$HOST:bin/"
+ssh "$HOST" 'chmod +x ~/bin/remarkable-post-sync.sh ~/bin/remarkable-post-sync-by-name.sh ~/bin/remarkable-activity-agent-hook.sh ~/bin/notebook-live-ingest.sh 2>/dev/null || true'
 
 echo "[deploy-server] ensure runtime deps (node, img2pdf, imagemagick)"
 ssh "$HOST" '
@@ -64,10 +64,21 @@ ssh "$HOST" '
 echo "[deploy-server] scp nginx config + viewer html"
 scp -q "$HERE"/server/nginx/default.conf "$HOST:notes-server/default.conf"
 scp -q "$HERE"/server/web/raw/index.html "$HOST:notes-server/raw/index.html"
+scp -q "$HERE"/server/web/notebook/index.html "$HOST:notes-server/notebook/index.html"
 
 echo "[deploy-server] scp shelley AGENTS.md"
 ssh "$HOST" 'mkdir -p ~/.config/shelley'
 scp -q "$HERE"/server/shelley/AGENTS.md "$HOST:.config/shelley/AGENTS.md"
+
+echo "[deploy-server] install live relay service"
+scp -q "$HERE"/server/systemd/notebook-live-relay.service "$HOST:notes-server/notebook-live-relay.service"
+ssh "$HOST" '
+  set -e
+  sudo install -m 644 ~/notes-server/notebook-live-relay.service /etc/systemd/system/notebook-live-relay.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now notebook-live-relay >/dev/null 2>&1
+  sudo systemctl restart notebook-live-relay
+'
 
 echo "[deploy-server] install nginx site + reload"
 ssh "$HOST" '
@@ -75,8 +86,10 @@ ssh "$HOST" '
   sudo install -m 644 ~/notes-server/default.conf /etc/nginx/sites-available/remarkable
   sudo ln -sf /etc/nginx/sites-available/remarkable /etc/nginx/sites-enabled/remarkable
   sudo rm -f /etc/nginx/sites-enabled/default
-  # nginx (www-data) must be able to traverse the home dir to reach content
-  chmod o+x "$HOME"
+  # nginx (www-data) must be able to traverse the home dir to reach content;
+  # the notebook-app mirror is served directly, so it needs read too
+  chmod o+x "$HOME" "$HOME/remarkable-backup"
+  chmod -R o+rX "$HOME/remarkable-backup/notebook-app"
   sudo nginx -t
   sudo systemctl enable --now nginx >/dev/null 2>&1
   sudo systemctl reload nginx

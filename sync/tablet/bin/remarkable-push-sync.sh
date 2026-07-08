@@ -5,6 +5,10 @@ SRC="/home/root/.local/share/remarkable/xochitl/"
 DEST_USER="exedev"
 DEST_HOST="remarkable.exe.xyz"
 DEST_DIR="/home/exedev/remarkable-backup/xochitl/"
+
+# notebook app data (pages, library, sessions, AGENT.md) -> /notebook/ viewer
+NB_SRC="/home/root/.local/share/notebook/"
+NB_DEST="/home/exedev/remarkable-backup/notebook-app/"
 KEY="/home/root/.ssh/id_sync_dropbear_ed25519"
 SSH_BIN="/usr/bin/ssh"
 RSYNC_BIN="/usr/bin/rsync"
@@ -16,17 +20,36 @@ HOOK_CMD="/home/exedev/bin/remarkable-post-sync.sh auto Notebook"
 
 mkdir -p "$LOG_DIR"
 
+# keep the log bounded (the timer fires every 5 minutes, forever)
+if [ -f "$LOG_FILE" ] && [ "$(wc -l < "$LOG_FILE")" -gt 2000 ]; then
+  tail -n 1000 "$LOG_FILE" > "$LOG_FILE.trim" && mv "$LOG_FILE.trim" "$LOG_FILE"
+fi
+
 echo "[$(date)] sync start" >> "$LOG_FILE"
 
-# Ensure destination exists
-"$SSH_BIN" -y -i "$KEY" "${DEST_USER}@${DEST_HOST}" "mkdir -p '$DEST_DIR'"
+# Ensure destinations exist
+"$SSH_BIN" -y -i "$KEY" "${DEST_USER}@${DEST_HOST}" "mkdir -p '$DEST_DIR' '$NB_DEST'"
 
 # Diff-based sync (after first baseline, only changed/new/deleted files transfer)
-"$RSYNC_BIN" -az --delete \
+RC=0
+OUT=$("$RSYNC_BIN" -az --delete --stats \
   --omit-dir-times --no-perms --no-owner --no-group \
   -e "$SSH_BIN -y -i $KEY" \
-  "$SRC" "${DEST_USER}@${DEST_HOST}:${DEST_DIR}" \
-  >> "$LOG_FILE" 2>&1
+  "$SRC" "${DEST_USER}@${DEST_HOST}:${DEST_DIR}" 2>&1) || RC=$?
+echo "$OUT" | grep -E "transferred:|Total bytes sent" >> "$LOG_FILE" || echo "$OUT" >> "$LOG_FILE"
+[ "$RC" -eq 0 ]
+
+# notebook app mirror (tolerated on failure — the xochitl sync still counts).
+# *.tmp excluded: the app writes page.json.tmp then renames, and a sweep
+# mid-save would ship a torn file.
+if [ -d "$NB_SRC" ]; then
+  NB_OUT=$("$RSYNC_BIN" -az --delete --stats \
+    --omit-dir-times --no-perms --no-owner --no-group \
+    --exclude '*.tmp' \
+    -e "$SSH_BIN -y -i $KEY" \
+    "$NB_SRC" "${DEST_USER}@${DEST_HOST}:${NB_DEST}" 2>&1) || true
+  echo "$NB_OUT" | grep -E "transferred:|Total bytes sent" >> "$LOG_FILE" || true
+fi
 
 # Run remote post-sync hook
 "$SSH_BIN" -y -i "$KEY" "${DEST_USER}@${DEST_HOST}" "$HOOK_CMD" >> "$LOG_FILE" 2>&1 || true

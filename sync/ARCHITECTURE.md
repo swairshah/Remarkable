@@ -207,7 +207,27 @@ stock `default` site removed).
 | other paths under `/` | `~/notes/` | Generic autoindex for ad-hoc files |
 | `/raw/` | viewer app (`~/notes-server/raw/`) | `server/web/raw/index.html` |
 | `/raw/pages/` | `~/remarkable-exports/Notebook/pages_jpg/` | `autoindex_format json` — this JSON listing **is** the viewer's API |
+| `/notebook/` | live viewer app (`~/notes-server/notebook/`) | `server/web/notebook/index.html` |
+| `/notebook/data/` | `~/remarkable-backup/notebook-app/` | JSON autoindex + `no-cache`; the viewer's API |
 | `/notes/` | `~/notes/notes/` | Shelley's exercises posts (served via the generic `/` root, no extra config) |
+
+### `/notebook/` — notebook-app live viewer
+
+The custom notebook app (`notebook/` in this repo — the "notebook that writes
+back") keeps its whole world in `/home/root/.local/share/notebook/` on the
+tablet: `pages/page-NNNN.json` (vector strokes, coords ×10, `g:0` = user ink,
+`g>0` = pi's ink), `library/*.md` (pi-curated articles with frontmatter),
+`AGENT.md` (pi's standing instructions), `sessions/*.jsonl` (raw pi
+transcripts), `settings.json`. The push script mirrors that directory to
+`~/remarkable-backup/notebook-app/` on every 5-minute sync (`*.tmp` excluded —
+the app writes-then-renames page saves).
+
+No server-side processing at all: the viewer SPA fetches the nginx JSON
+autoindex, renders page vectors itself on `<canvas>` (user ink black, pi ink
+blue — toggleable), renders library/AGENT.md markdown client-side (KaTeX for
+math, pinned by SRI), and lists sessions for download. It polls the autoindex
+every 20 s and re-fetches only files whose mtime changed, so an open browser
+tab live-updates within one sync cycle of writing on the tablet.
 
 `server/web/raw/index.html` is a single-file, dependency-free notebook viewer:
 it `fetch`es the `pages/` JSON autoindex, filters to image files, sorts by name

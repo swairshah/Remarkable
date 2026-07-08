@@ -51,6 +51,8 @@ For the full architecture walkthrough see [ARCHITECTURE.md](ARCHITECTURE.md).
  │     location /updates/    -> ~/notes/updates/  (activity digest)                  │
  │     location /raw/        -> viewer html                                          │
  │     location /raw/pages/  -> pages_jpg/  (autoindex_format json)                  │
+ │     location /notebook/       -> notebook-app live viewer html                    │
+ │     location /notebook/data/  -> ~/remarkable-backup/notebook-app/ (json index)   │
  │                                                                                   │
  └───────────────────────────────────┬───────────────────────────────────────────────┘
                                      │ exe.dev proxy: TLS termination,
@@ -83,8 +85,10 @@ sync/
     ├── nginx/
     │   └── default.conf                     nginx site (installed to sites-available)
     └── web/
-        └── raw/
-            └── index.html                   swipe/sidebar viewer
+        ├── raw/
+        │   └── index.html                   swipe/sidebar viewer
+        └── notebook/
+            └── index.html                   notebook-app live viewer (vector pages, library, AGENT.md)
 ```
 
 The agent's runtime `remarkable-activity-agent.js` is **not committed** — 
@@ -111,6 +115,7 @@ at https://remarkable.exe.xyz/notes/. See ARCHITECTURE.md for details.
 | Export format (JPG quality, PDF, etc.) | `server/bin/remarkable-post-sync-by-name.sh` | `deploy/deploy-server.sh` |
 | URL routing under `remarkable.exe.xyz` | `server/nginx/default.conf` | `deploy/deploy-server.sh` (auto-reloads nginx) |
 | Viewer look/feel, shortcuts, sidebar | `server/web/raw/index.html` | `deploy/deploy-server.sh` |
+| Notebook-app live viewer (`/notebook/`) | `server/web/notebook/index.html` | `deploy/deploy-server.sh` |
 | Digest page: UI, fonts, history, `--rerender` | `server/bin/remarkable-activity-agent.ts` | `deploy/deploy-server.sh` (builds the bundle) |
 | Activity summary prompt/model/output | `server/bin/remarkable-activity-agent-hook.sh` (`-p`, `MODEL`, `OUTPUT_HTML`) | `deploy/deploy-server.sh` |
 
@@ -180,6 +185,9 @@ ssh exedev@remarkable.exe.xyz 'echo "OPENROUTER_API_KEY=..." >> ~/.env && chmod 
 - Activity state dir: `/home/exedev/remarkable-exports/activity-agent/`
 - Digest URL: `https://remarkable.exe.xyz/updates/`
 - Viewer URL: `https://remarkable.exe.xyz/raw/`
+- Notebook-app live viewer: `https://remarkable.exe.xyz/notebook/`
+  (mirror of the tablet's `/home/root/.local/share/notebook/` at
+  `/home/exedev/remarkable-backup/notebook-app/`, same 5-min push)
 - Fonts: body `Iowan Old Style` (Apple system serif w/ Palatino→Georgia fallback),
   code/mono `Google Sans Code` (Google Fonts)
 
