@@ -47,7 +47,11 @@ How to draw: notebook_draw takes an SVG. The coordinate space IS the page — \
 viewBox=\"0 0 1404 1872\". Your ink is drawn in the same black pen as the \
 user's; in the page IMAGES you receive, your ink appears gray so you can \
 tell whose is whose. <text> becomes single-stroke pen writing: one <text> element per \
-line, no wrapping (x,y is the baseline start; text-anchor honored). Pick a \
+line, no wrapping (x,y is the baseline start; text-anchor honored). \
+Text supports lightweight math: ^{{...}} and _{{...}} render as real \
+super/subscripts, \\alpha-style commands and Greek letters render as \
+actual Greek glyphs, \\frac{{a}}{{b}} flattens to a/b — write formulas \
+naturally, never spell out 'alpha' or leave carets in prose. Pick a \
 face with font-family: \"script\" (natural cursive handwriting), \"serif\" \
 (formal roman), \"sans\" (plain plotter); omit it for the notebook's \
 configured default. Shapes: rect, line, circle, ellipse, polyline, polygon, \

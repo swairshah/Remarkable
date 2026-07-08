@@ -165,6 +165,7 @@ pub fn parse(src: &str, text_scale: f32) -> Result<(Vec<Stroke>, Vec<String>), S
         y: f32,
         max_w: f32,
         full_w: f32,
+        runs: Vec<Run>, /* content with LaTeX-lite resolved (sup/sub etc.) */
     }
     let measures: Vec<Option<Measured>> = texts
         .iter()
@@ -183,8 +184,9 @@ pub fn parse(src: &str, text_scale: f32) -> Result<(Vec<Stroke>, Vec<String>), S
                 }
             }
             .max(size);
-            let full_w = hershey::text_width(t.face, &t.content, size);
-            Some(Measured { size, x_anchor, y, max_w, full_w })
+            let runs = math_runs(&t.content);
+            let full_w = runs_width(t.face, &runs, size);
+            Some(Measured { size, x_anchor, y, max_w, full_w, runs })
         })
         .collect();
 
@@ -212,12 +214,27 @@ pub fn parse(src: &str, text_scale: f32) -> Result<(Vec<Stroke>, Vec<String>), S
     for (t, m) in texts.iter().zip(&measures) {
         let Some(m) = m else { continue };
         let sc = group_scale.get(&(m.size.round() as i32)).copied().unwrap_or(1.0);
-        let (size, lines) = if m.full_w * sc <= m.max_w {
-            (m.size * sc, vec![t.content.clone()])
+        let is_math = m.runs.len() > 1;
+        if m.full_w * sc <= m.max_w || is_math {
+            /* one line (formulas never word-wrap; worst case the group /
+             * floor scale already shrank them) */
+            let size = if m.full_w * sc <= m.max_w {
+                m.size * sc
+            } else {
+                let fit = (m.max_w / m.full_w).max(SHRINK_FLOOR);
+                let short: String = t.content.chars().take(28).collect();
+                notes.push(format!(
+                    "formula \"{short}\u{2026}\" was shrunk to font-size {} to fit its line",
+                    (m.size * fit).round(),
+                ));
+                m.size * fit
+            };
+            emit_runs(&mut out, t.face, &m.runs, m.x_anchor, m.y, size, &t.anchor);
         } else {
-            /* an extreme line the floor could not save: wrap it there */
+            /* an extreme plain-text line the floor could not save: wrap */
             let sz = (m.size * SHRINK_FLOOR).max(14.0).floor();
-            let ls = wrap_text(t.face, &t.content, sz, m.max_w.max(sz));
+            let content = &m.runs[0].text; /* commands already resolved */
+            let ls = wrap_text(t.face, content, sz, m.max_w.max(sz));
             let short: String = t.content.chars().take(28).collect();
             notes.push(format!(
                 "text \"{short}\u{2026}\" was far too wide ({}px for {}px of room): shrunk \
@@ -230,23 +247,10 @@ pub fn parse(src: &str, text_scale: f32) -> Result<(Vec<Stroke>, Vec<String>), S
                 hershey::line_height(sz).round(),
                 (m.y + hershey::line_height(sz) * (ls.len() - 1) as f32).round(),
             ));
-            (sz, ls)
-        };
-        let r = (size / 24.0).clamp(1.2, 3.0); /* heavier pen for bigger text */
-        for (i, line) in lines.iter().enumerate() {
-            let ly = m.y + hershey::line_height(size) * i as f32;
-            let w = hershey::text_width(t.face, line, size);
-            let lx = m.x_anchor
-                - match t.anchor {
-                    Anchor::Middle => w / 2.0,
-                    Anchor::End => w,
-                    Anchor::Start => 0.0,
-                };
-            for path in hershey::strokes(t.face, line, lx, ly, size) {
-                out.push(Stroke {
-                    pts: path.into_iter().map(|(px, py)| Pt { x: px, y: py, r }).collect(),
-                    gray: AI_GRAY,
-                });
+            for (i, line) in ls.iter().enumerate() {
+                let ly = m.y + hershey::line_height(sz) * i as f32;
+                let one = vec![Run { text: line.clone(), scale: 1.0, dy: 0.0 }];
+                emit_runs(&mut out, t.face, &one, m.x_anchor, ly, sz, &t.anchor);
             }
         }
     }
@@ -265,6 +269,230 @@ pub fn parse(src: &str, text_scale: f32) -> Result<(Vec<Stroke>, Vec<String>), S
         return Err("everything in the SVG lies outside the page".into());
     }
     Ok((out, notes))
+}
+
+/* ---- LaTeX-lite for page ink ---------------------------------------------- */
+
+/// One styled run of a text line: plain text at a scale/baseline offset.
+/// `scale` multiplies the font size; `dy` is in em of the base size
+/// (negative = raised superscript).
+struct Run {
+    text: String,
+    scale: f32,
+    dy: f32,
+}
+
+fn runs_width(face: hershey::Face, runs: &[Run], size: f32) -> f32 {
+    runs.iter().map(|r| hershey::text_width(face, &r.text, size * r.scale)).sum()
+}
+
+/// Stamp a line of runs as strokes, honoring the anchor over the TOTAL
+/// width, advancing x run by run, shifting baselines for super/subscripts.
+fn emit_runs(
+    out: &mut Vec<Stroke>,
+    face: hershey::Face,
+    runs: &[Run],
+    x_anchor: f32,
+    y: f32,
+    size: f32,
+    anchor: &Anchor,
+) {
+    let total = runs_width(face, runs, size);
+    let mut cx = x_anchor
+        - match anchor {
+            Anchor::Middle => total / 2.0,
+            Anchor::End => total,
+            Anchor::Start => 0.0,
+        };
+    for run in runs {
+        let rs = size * run.scale;
+        let r = (rs / 24.0).clamp(1.1, 3.0);
+        for path in hershey::strokes(face, &run.text, cx, y + size * run.dy, rs) {
+            out.push(Stroke {
+                pts: path.into_iter().map(|(px, py)| Pt { x: px, y: py, r }).collect(),
+                gray: AI_GRAY,
+            });
+        }
+        cx += hershey::text_width(face, &run.text, rs);
+    }
+}
+
+/// LaTeX command -> unicode (Greek renders natively via the Hershey Greek
+/// face; other symbols go through hershey::fold's ASCII fallbacks).
+fn tex_char(word: &str) -> Option<&'static str> {
+    Some(match word {
+        "alpha" => "\u{03B1}",
+        "beta" => "\u{03B2}",
+        "gamma" => "\u{03B3}",
+        "delta" => "\u{03B4}",
+        "epsilon" | "varepsilon" => "\u{03B5}",
+        "zeta" => "\u{03B6}",
+        "eta" => "\u{03B7}",
+        "theta" => "\u{03B8}",
+        "iota" => "\u{03B9}",
+        "kappa" => "\u{03BA}",
+        "lambda" => "\u{03BB}",
+        "mu" => "\u{03BC}",
+        "nu" => "\u{03BD}",
+        "xi" => "\u{03BE}",
+        "pi" => "\u{03C0}",
+        "rho" => "\u{03C1}",
+        "sigma" => "\u{03C3}",
+        "tau" => "\u{03C4}",
+        "upsilon" => "\u{03C5}",
+        "phi" | "varphi" => "\u{03C6}",
+        "chi" => "\u{03C7}",
+        "psi" => "\u{03C8}",
+        "omega" => "\u{03C9}",
+        "Gamma" => "\u{0393}",
+        "Delta" => "\u{0394}",
+        "Theta" => "\u{0398}",
+        "Lambda" => "\u{039B}",
+        "Xi" => "\u{039E}",
+        "Pi" => "\u{03A0}",
+        "Sigma" => "\u{03A3}",
+        "Phi" => "\u{03A6}",
+        "Psi" => "\u{03A8}",
+        "Omega" => "\u{03A9}",
+        "approx" => "\u{2248}",
+        "sim" => "~",
+        "cdot" => "\u{00B7}",
+        "times" => "\u{00D7}",
+        "pm" => "\u{00B1}",
+        "le" | "leq" => "\u{2264}",
+        "ge" | "geq" => "\u{2265}",
+        "ne" | "neq" => "\u{2260}",
+        "infty" => "inf",
+        "to" | "rightarrow" => "\u{2192}",
+        "propto" => "\u{221D}",
+        "partial" => "\u{2202}",
+        "sum" => "\u{03A3}",
+        "prod" => "\u{03A0}",
+        "int" => "S",
+        "left" | "right" | "displaystyle" | "limits" => "",
+        "quad" | "qquad" => "  ",
+        _ => return None,
+    })
+}
+
+/// `{...}` group at `i` (or a single char / single command); returns
+/// (content, index after).
+fn tex_group(b: &[char], i: usize) -> (String, usize) {
+    if b.get(i) == Some(&'{') {
+        let mut depth = 1;
+        let mut j = i + 1;
+        let mut g = String::new();
+        while j < b.len() && depth > 0 {
+            match b[j] {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+            if depth > 0 {
+                g.push(b[j]);
+            }
+            j += 1;
+        }
+        (g, j)
+    } else if b.get(i) == Some(&'\\') {
+        let mut j = i + 1;
+        let mut w = String::from("\\");
+        while j < b.len() && b[j].is_ascii_alphabetic() {
+            w.push(b[j]);
+            j += 1;
+        }
+        (w, j)
+    } else {
+        (b.get(i).map(|c| c.to_string()).unwrap_or_default(), i + 1)
+    }
+}
+
+/// Resolve a snippet to plain text (commands mapped, structure flattened) —
+/// used inside sup/sub groups and \frac parts.
+fn tex_flatten(s: &str) -> String {
+    math_runs(s).into_iter().map(|r| r.text).collect()
+}
+
+/// Split a text line into runs: `$` stripped, LaTeX commands resolved,
+/// `^`/`_` becoming true super/subscript runs. Plain lines come back as
+/// one untouched run.
+fn math_runs(s: &str) -> Vec<Run> {
+    if !s.contains(['^', '_', '\\', '$']) {
+        return vec![Run { text: s.to_string(), scale: 1.0, dy: 0.0 }];
+    }
+    let b: Vec<char> = s.chars().collect();
+    let mut out: Vec<Run> = Vec::new();
+    let mut buf = String::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            '$' => i += 1,
+            '\\' => {
+                let mut j = i + 1;
+                let mut word = String::new();
+                while j < b.len() && b[j].is_ascii_alphabetic() {
+                    word.push(b[j]);
+                    j += 1;
+                }
+                if word.is_empty() {
+                    if let Some(&e) = b.get(j) {
+                        buf.push(if ",;!".contains(e) { ' ' } else { e });
+                        j += 1;
+                    }
+                    i = j;
+                } else if word == "frac" {
+                    let (num, j2) = tex_group(&b, j);
+                    let (den, j3) = tex_group(&b, j2);
+                    let (num, den) = (tex_flatten(&num), tex_flatten(&den));
+                    let wrap_if = |p: &str| {
+                        if p.chars().count() > 1 { format!("({p})") } else { p.to_string() }
+                    };
+                    buf.push_str(&wrap_if(&num));
+                    buf.push('/');
+                    buf.push_str(&wrap_if(&den));
+                    i = j3;
+                } else if word == "sqrt" {
+                    let (arg, j2) = tex_group(&b, j);
+                    buf.push_str("sqrt(");
+                    buf.push_str(&tex_flatten(&arg));
+                    buf.push(')');
+                    i = j2;
+                } else if matches!(word.as_str(), "text" | "mathrm" | "mathbf" | "operatorname") {
+                    let (arg, j2) = tex_group(&b, j);
+                    buf.push_str(&arg);
+                    i = j2;
+                } else {
+                    buf.push_str(tex_char(&word).unwrap_or(&word));
+                    i = j;
+                }
+            }
+            '^' | '_' => {
+                let up = b[i] == '^';
+                let (grp, j2) = tex_group(&b, i + 1);
+                if !buf.is_empty() {
+                    out.push(Run { text: std::mem::take(&mut buf), scale: 1.0, dy: 0.0 });
+                }
+                out.push(Run {
+                    text: tex_flatten(&grp),
+                    scale: 0.6,
+                    dy: if up { -0.35 } else { 0.18 },
+                });
+                i = j2;
+            }
+            '{' | '}' => i += 1,
+            c => {
+                buf.push(c);
+                i += 1;
+            }
+        }
+    }
+    if !buf.is_empty() {
+        out.push(Run { text: buf, scale: 1.0, dy: 0.0 });
+    }
+    if out.is_empty() {
+        out.push(Run { text: String::new(), scale: 1.0, dy: 0.0 });
+    }
+    out
 }
 
 /// Word-wrap `s` so each line's stroke width fits `max_w` px. A single

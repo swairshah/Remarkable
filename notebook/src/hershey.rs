@@ -18,7 +18,7 @@
 //! Data: futural/scripts/timesr .jhf (public domain), converted offline
 //! into hershey_data.rs.
 
-use crate::hershey_data::{SANS, SCRIPT, SERIF};
+use crate::hershey_data::{GREEK, SANS, SCRIPT, SERIF};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Face {
@@ -72,7 +72,25 @@ fn table(f: Face) -> &'static [Glyph; 96] {
     }
 }
 
+/// Greek letters live in their own Hershey face, transliteration-ordered
+/// into the Latin slots (A..X, a..x). Any face gets Greek from it.
+fn greek_slot(c: char) -> Option<usize> {
+    let u = c as u32;
+    let (base, i) = match u {
+        0x0391..=0x03A1 => ('A', u - 0x0391),         /* Α..Ρ */
+        0x03A3..=0x03A9 => ('A', u - 0x0391 - 1),     /* Σ..Ω (03A2 unused) */
+        0x03B1..=0x03C1 => ('a', u - 0x03B1),         /* α..ρ */
+        0x03C2 => ('a', 17),                          /* ς -> σ */
+        0x03C3..=0x03C9 => ('a', u - 0x03B1 - 1),     /* σ..ω */
+        _ => return None,
+    };
+    Some(base as usize - 32 + i as usize)
+}
+
 fn glyph(f: Face, c: char) -> &'static Glyph {
+    if let Some(slot) = greek_slot(c) {
+        return &GREEK[slot];
+    }
     let i = c as usize;
     let t = table(f);
     if (32..128).contains(&i) {
@@ -95,7 +113,8 @@ pub fn fold(s: &str) -> String {
                 out.push('-')
             }
             '\u{2026}' => out.push_str("..."),
-            '\u{2022}' | '\u{00B7}' | '\u{25CF}' | '\u{25AA}' => out.push('-'),
+            '\u{2022}' | '\u{25CF}' | '\u{25AA}' => out.push('-'),
+            '\u{00B7}' | '\u{22C5}' => out.push('*'), /* cdot: '-' would read as minus */
             '\u{2192}' => out.push_str("->"),
             '\u{2190}' => out.push_str("<-"),
             '\u{2194}' => out.push_str("<->"),
@@ -105,8 +124,9 @@ pub fn fold(s: &str) -> String {
             '\u{2248}' => out.push('~'),
             '\u{2260}' => out.push_str("!="),
             '\u{2264}' => out.push_str("<="),
+            '\u{2202}' => out.push('d'),
+            '\u{221D}' => out.push('~'),
             '\u{2265}' => out.push_str(">="),
-            '\u{03C0}' => out.push_str("pi"),
             '\u{00B0}' => out.push('o'),
             _ => out.push(c), /* other non-ASCII still ends up as '?' */
         }

@@ -26,6 +26,7 @@ NOTE_SVG = """<svg viewBox="0 0 1404 1872">
   <text x="1060" y="1000" font-size="30" text-anchor="middle">f(x) = sin x</text>
   <text x="1060" y="1060" font-size="30" text-anchor="middle" font-family="sans">period 2 pi</text>
   <text x="700" y="1400" font-size="40">this long sentence would have sailed straight off the right edge of the panel without the auto-wrap</text>
+  <text x="150" y="1660" font-size="42">loss \\approx E + a\\cdot N^{-\\alpha} + b\\cdot D^{-\\beta}</text>
 </svg>"""
 
 
