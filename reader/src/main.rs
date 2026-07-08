@@ -180,6 +180,13 @@ const HOME_LIST_Y0: i32 = 170;
 const HOME_ROW_H: i32 = 128;
 const HOME_ROWS: usize = ((FB_H - 40 - HOME_LIST_Y0) / HOME_ROW_H) as usize;
 
+/* hold a finger on a book row this long -> the delete confirmation */
+const HOLD_MS: u128 = 650;
+const DEL_W: i32 = 960;
+const DEL_H: i32 = 400;
+const DEL_BTN_W: i32 = 380;
+const DEL_BTN_H: i32 = 96;
+
 /* the AGENT.md page (reachable from the sidebar) */
 const AGENT_TEXT_X: i32 = 70;
 const AGENT_TEXT_Y0: i32 = 120;
@@ -258,6 +265,7 @@ struct App {
     book: Option<Book>,
     shelf: Vec<book::BookInfo>,
     shelf_top: usize, /* first visible shelf row (vertical swipes page it) */
+    confirm_delete: Option<usize>, /* shelf index awaiting DELETE/CANCEL */
 
     takeover: bool,
     ink_flush: Duration,
@@ -286,6 +294,7 @@ struct App {
 
     /* touch gestures */
     touch_start: Option<(i32, i32)>,
+    touch_t0: Option<Instant>, /* when the current touch began (long-press) */
     touch_last: (i32, i32),
     swipe_from: Option<i32>,
     close_until: Option<Instant>,
@@ -455,6 +464,7 @@ impl App {
         self.indicator_until = None;
         self.ink_settle = None;
         self.ink_settle_at = None;
+        self.confirm_delete = None;
         save_settings(self.text_scale, "");
         self.shelf = book::scan();
         self.shelf_top = 0;
@@ -467,13 +477,13 @@ impl App {
         text::draw_line(&mut self.fb, 70, 40, text::Face::Heading, 52.0, "READER");
         let sub = if self.shelf.len() > HOME_ROWS {
             format!(
-                "books {}-{} of {} - swipe up/down - tap to open",
+                "books {}-{} of {} - swipe up/down - tap opens, hold deletes",
                 self.shelf_top + 1,
                 (self.shelf_top + HOME_ROWS).min(self.shelf.len()),
                 self.shelf.len()
             )
         } else {
-            "tap a book to open it - top-edge swipe to close the app".to_string()
+            "tap a book to open it - hold to delete - top-edge swipe closes".to_string()
         };
         self.fb.text(72, 108, &sub, 2, draw::GRAY);
         self.fb.fill_rect(0, 140, FB_W, 2, BLACK);
@@ -530,20 +540,123 @@ impl App {
         } else {
             self.disp.update(0, 0, FB_W, FB_H, Wave::Text);
         }
+        if self.confirm_delete.is_some() {
+            self.render_delete_confirm(); /* incidental repaints keep it up */
+        }
+    }
+
+    /// Which shelf row (absolute index) sits under a home-screen press.
+    fn home_row_at(&self, y: i32) -> Option<usize> {
+        let row = (y - HOME_LIST_Y0) / HOME_ROW_H;
+        if row < 0 || row as usize >= HOME_ROWS {
+            return None;
+        }
+        let idx = self.shelf_top + row as usize;
+        (idx < self.shelf.len()).then_some(idx)
     }
 
     /// A press on the home screen (pen press or finger tap).
     fn home_press(&mut self, _x: i32, y: i32) {
-        let row = (y - HOME_LIST_Y0) / HOME_ROW_H;
-        if row < 0 {
+        if let Some(idx) = self.home_row_at(y) {
+            let slug = self.shelf[idx].slug.clone();
+            self.open_book(&slug);
+        }
+    }
+
+    /// A long finger press on a book row: ask before deleting.
+    fn home_hold(&mut self, _x: i32, y: i32) {
+        if let Some(idx) = self.home_row_at(y) {
+            self.confirm_delete = Some(idx);
+            self.render_delete_confirm();
+        }
+    }
+
+    fn delete_rects(&self) -> (Rect, Rect, Rect) {
+        let x0 = (FB_W - DEL_W) / 2;
+        let y0 = (FB_H - DEL_H) / 2;
+        let boxr = Rect { x0, y0, x1: x0 + DEL_W - 1, y1: y0 + DEL_H - 1 };
+        let by = y0 + DEL_H - DEL_BTN_H - 40;
+        let cancel = Rect { x0: x0 + 60, y0: by, x1: x0 + 60 + DEL_BTN_W - 1, y1: by + DEL_BTN_H - 1 };
+        let del = Rect {
+            x0: x0 + DEL_W - 60 - DEL_BTN_W,
+            y0: by,
+            x1: x0 + DEL_W - 60 - 1,
+            y1: by + DEL_BTN_H - 1,
+        };
+        (boxr, cancel, del)
+    }
+
+    fn render_delete_confirm(&mut self) {
+        let Some(idx) = self.confirm_delete else { return };
+        let Some(info) = self.shelf.get(idx) else { return };
+        let mut title = info.title.clone();
+        let (boxr, cancel, del) = self.delete_rects();
+        self.fb.fill_rect(boxr.x0, boxr.y0, boxr.w(), boxr.h(), WHITE);
+        self.fb.rect_outline(boxr.x0, boxr.y0, boxr.w(), boxr.h(), 4, BLACK);
+        while text::width(text::Face::Heading, 40.0, &title) > DEL_W - 120 && title.chars().count() > 4 {
+            title = title.chars().take(title.chars().count() - 4).collect();
+            title.push('.');
+            title.push('.');
+        }
+        text::draw_line(&mut self.fb, boxr.x0 + 60, boxr.y0 + 44, text::Face::Heading, 40.0, &title);
+        self.fb.text(
+            boxr.x0 + 60,
+            boxr.y0 + 130,
+            "delete this book from the reader?",
+            3,
+            BLACK,
+        );
+        self.fb.text(
+            boxr.x0 + 60,
+            boxr.y0 + 176,
+            "removes its pages, your ink, pi's notes and the",
+            2,
+            draw::GRAY,
+        );
+        self.fb.text(boxr.x0 + 60, boxr.y0 + 206, "reading position - for good.", 2, draw::GRAY);
+        self.fb.rect_outline(cancel.x0, cancel.y0, cancel.w(), cancel.h(), 3, BLACK);
+        self.fb.text(
+            cancel.x0 + (cancel.w() - text_width("CANCEL", 3)) / 2,
+            cancel.y0 + (cancel.h() - 21) / 2,
+            "CANCEL",
+            3,
+            BLACK,
+        );
+        self.fb.fill_rect(del.x0, del.y0, del.w(), del.h(), BLACK);
+        self.fb.text(
+            del.x0 + (del.w() - text_width("DELETE", 3)) / 2,
+            del.y0 + (del.h() - 21) / 2,
+            "DELETE",
+            3,
+            WHITE,
+        );
+        self.disp.update(boxr.x0, boxr.y0, boxr.w(), boxr.h(), Wave::Ink);
+    }
+
+    /// A press while the delete confirmation is up. Always consumes it —
+    /// only a hit on DELETE deletes; CANCEL and everywhere else dismiss.
+    fn delete_confirm_press(&mut self, x: i32, y: i32) {
+        let (_boxr, _cancel, del) = self.delete_rects();
+        if in_rect(x, y, del.x0, del.y0, del.w(), del.h()) {
+            if let Some(idx) = self.confirm_delete.take() {
+                if let Some(info) = self.shelf.get(idx) {
+                    let slug = info.slug.clone();
+                    let dir = format!("{}/{}", book::books_dir(), slug);
+                    match std::fs::remove_dir_all(&dir) {
+                        Ok(()) => println!("reader: deleted book '{slug}'"),
+                        Err(e) => println!("reader: delete '{slug}': {e}"),
+                    }
+                }
+                self.shelf = book::scan();
+                let max_top = self.shelf.len().saturating_sub(HOME_ROWS);
+                self.shelf_top = self.shelf_top.min(max_top);
+            }
+            self.render_home(true); /* flash: the dialog + row must ghost away */
             return;
         }
-        let idx = self.shelf_top + row as usize;
-        if row as usize >= HOME_ROWS || idx >= self.shelf.len() {
-            return;
-        }
-        let slug = self.shelf[idx].slug.clone();
-        self.open_book(&slug);
+        /* CANCEL or anywhere else: dismiss */
+        self.confirm_delete = None;
+        self.render_home(false);
     }
 
     /// Vertical swipe on the shelf: page through the book list.
@@ -1047,7 +1160,11 @@ impl App {
         }
         if self.on_home() {
             if phase == PenPhase::Press {
-                self.home_press(x, y);
+                if self.confirm_delete.is_some() {
+                    self.delete_confirm_press(x, y);
+                } else {
+                    self.home_press(x, y);
+                }
             }
             return;
         }
@@ -1197,6 +1314,13 @@ impl App {
             }
             return; /* no drags/flips under the panel */
         }
+        /* the delete confirmation swallows every touch */
+        if self.on_home() && self.confirm_delete.is_some() {
+            if phase == Phase::Press {
+                self.delete_confirm_press(x, y);
+            }
+            return;
+        }
         match phase {
             Phase::Press => {
                 if self.close_until.is_some() {
@@ -1217,6 +1341,7 @@ impl App {
                     return;
                 }
                 self.touch_start = Some((x, y));
+                self.touch_t0 = Some(Instant::now());
                 self.touch_last = (x, y);
             }
             Phase::Move => {
@@ -1242,8 +1367,17 @@ impl App {
                         /* vertical swipe on the shelf: page the book list */
                         self.shelf_scroll(dy < 0);
                     } else if self.on_home() && dx.abs() < 40 && dy.abs() < 40 {
-                        /* a finger tap picks a book */
-                        self.home_press(sx, sy);
+                        /* a finger tap opens a book; a long hold offers to
+                         * delete it */
+                        let held = self
+                            .touch_t0
+                            .take()
+                            .is_some_and(|t| t.elapsed().as_millis() >= HOLD_MS);
+                        if held {
+                            self.home_hold(sx, sy);
+                        } else {
+                            self.home_press(sx, sy);
+                        }
                     }
                 }
             }
@@ -2031,6 +2165,7 @@ fn main() -> std::process::ExitCode {
         book: None,
         shelf: book::scan(),
         shelf_top: 0,
+        confirm_delete: None,
         takeover,
         ink_flush: if takeover { INK_FLUSH_TAKEOVER } else { INK_FLUSH_QTFB },
         cur_stroke: None,
@@ -2048,6 +2183,7 @@ fn main() -> std::process::ExitCode {
         anim_settle: None,
         last_anim: now,
         touch_start: None,
+        touch_t0: None,
         touch_last: (0, 0),
         swipe_from: None,
         close_until: None,
