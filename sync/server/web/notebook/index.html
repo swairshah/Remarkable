@@ -498,12 +498,13 @@ function renderPages() {
     d.onclick = () => { state.cur = i; live.follow = (i === (live.page || 0) - 1); location.hash = '#pages/' + (i + 1); renderPages(); };
     rail.appendChild(d);
     drawDoc(c, p.doc, 148 / PAGE_W, pageErased(i + 1).mirror);
+    liveReplay(c, i + 1, live.lastThumb);
   }
   const active = rail.children[state.cur];
   if (active) active.scrollIntoView({block: 'nearest'});
   const big = document.querySelector('#stage canvas');
   drawDoc(big, pageAt(state.cur).doc, 1.0, pageErased(state.cur + 1).mirror);
-  liveReplay(big);
+  liveReplay(big, state.cur + 1, live.last);
   document.getElementById('counter').textContent =
     `page ${state.cur + 1} / ${pageTotal()}`;
 }
@@ -589,7 +590,8 @@ const live = {
   status: 'idle',   /* pi: think | draw | idle */
   follow: true,     /* auto-turn to the page being written */
   buf: new Map(),   /* page -> stroke events since connect (replayed on redraw) */
-  last: new Map(),  /* "t:id" -> previous point, to join batches */
+  last: new Map(),  /* "t:id" -> previous point on the big canvas */
+  lastThumb: new Map(), /* same, for the rail thumbnail (separate pen position) */
   erased: new Map(),/* page -> {mirror:Set, live:Set} of erased stroke keys */
 };
 const ERASER_R = 22;  /* device rubber radius (main.rs ERASER_R) */
@@ -696,27 +698,38 @@ function liveStroke(ctx, ev, last) {
 }
 
 /* redraws wipe the canvas back to mirror state: replay live ink on top,
- * minus anything erased. (duplicated strokes land on identical pixels) */
-function liveReplay(canvas) {
-  const buf = live.buf.get(state.cur + 1);
+ * minus anything erased. (duplicated strokes land on identical pixels)
+ * `persist` carries each stroke's final point forward so later incremental
+ * batches connect instead of restarting with a dot. */
+function liveReplay(canvas, pg, persist) {
+  const buf = live.buf.get(pg);
   if (!buf || !buf.length) return;
-  const er = pageErased(state.cur + 1);
+  const er = pageErased(pg);
   const ctx = canvas.getContext('2d');
   const last = new Map();
   for (const ev of buf) {
     if (!er.live.has(ev.t + ':' + (ev.id || 0))) liveStroke(ctx, ev, last);
   }
+  if (persist) for (const [k, v] of last) persist.set(k, v);
 }
 
-/* redraw the viewed page in place (mirror minus erasures, then live ink) */
+function thumbCanvas(pg) {
+  return document.querySelectorAll('#rail canvas')[pg - 1];
+}
+
+/* redraw a page in place (mirror minus erasures, then live ink) */
 function liveRedraw(pg) {
-  if (state.tab !== 'pages' || state.cur !== pg - 1) return;
+  if (state.tab !== 'pages') return;
+  const thumb = thumbCanvas(pg);
+  if (thumb) {
+    drawDoc(thumb, pageAt(pg - 1).doc, 148 / PAGE_W, pageErased(pg).mirror);
+    liveReplay(thumb, pg, live.lastThumb);
+  }
+  if (state.cur !== pg - 1) return;
   const big = document.querySelector('#stage canvas');
   if (!big) return;
   drawDoc(big, pageAt(state.cur).doc, 1.0, pageErased(pg).mirror);
-  liveReplay(big);
-  const thumb = document.querySelectorAll('#rail canvas')[pg - 1];
-  if (thumb) drawDoc(thumb, pageAt(pg - 1).doc, 148 / PAGE_W, pageErased(pg).mirror);
+  liveReplay(big, pg, live.last);
 }
 
 function liveFollow() {
@@ -743,6 +756,7 @@ function onLiveEvent(data) {
       live.page = ev.page || live.page;
       live.follow = true;
       live.last.clear();
+      live.lastThumb.clear();
       liveBadge();
       liveFollow();
       return;
@@ -754,6 +768,7 @@ function onLiveEvent(data) {
     case 'page':
       live.page = ev.n;
       live.last.clear();
+      live.lastThumb.clear();
       liveFollow();
       return;
     case 'st':
@@ -772,9 +787,13 @@ function onLiveEvent(data) {
       buf.push(ev);
       if (buf.length > 8000) buf.splice(0, buf.length - 8000);
       if (pageErased(pg).live.has(ev.t + ':' + (ev.id || 0))) return;
-      if (state.tab === 'pages' && state.cur === pg - 1) {
-        const big = document.querySelector('#stage canvas');
-        if (big) liveStroke(big.getContext('2d'), ev, live.last);
+      if (state.tab === 'pages') {
+        const thumb = thumbCanvas(pg);
+        if (thumb) liveStroke(thumb.getContext('2d'), ev, live.lastThumb);
+        if (state.cur === pg - 1) {
+          const big = document.querySelector('#stage canvas');
+          if (big) liveStroke(big.getContext('2d'), ev, live.last);
+        }
       }
       return;
     }
