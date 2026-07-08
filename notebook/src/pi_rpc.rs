@@ -165,8 +165,12 @@ impl Pi {
              conversation and its compactions. One markdown file per item: \
              kebab-case filename ending in .md, first line `# Title` (titles \
              matter — the user browses the library on the tablet via the \
-             sidebar). Keep items DISTILLED: the useful content of a web \
-             find, a reference note, a summary — never raw page dumps. Save \
+             sidebar). One markdown file per item means: YAML frontmatter \
+             (title/source/date), a short `## Summary`, then the FULL piece \
+             under `## Full text` — when you save an article keep the \
+             complete cleaned text (fetch_content's markdown), NOT just a \
+             summary: the user reads these on the tablet like an e-book \
+             (paginated). Strip only true junk (nav, ads, comments). Save \
              proactively when you fetch something worth re-reading or the \
              user says to keep something; update items rather than \
              duplicating; delete items that turn out stale or that the user \
