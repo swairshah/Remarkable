@@ -343,11 +343,18 @@ impl Book {
         }
     }
 
+    /// Does the current entry sit on a (grayscale) page raster? Regions
+    /// repainted over one should prefer the 16-level waveform; only the
+    /// live pen path stays on DU (and heals with a settle pass).
+    pub fn has_raster(&self) -> bool {
+        self.raster.is_some()
+    }
+
     /// Re-render a region: raster (or white) + every stroke, darkest-wins.
     pub fn render_region(&self, fb: &mut Framebuffer, r: crate::ink::Rect) -> bool {
         self.paint_background(fb, r);
         self.page.stamp_region(fb, r);
-        false
+        self.raster.is_some()
     }
 
     pub fn render_full(&self, fb: &mut Framebuffer) {

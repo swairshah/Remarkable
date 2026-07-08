@@ -10,14 +10,15 @@ Produces:
     OUT/pages/0001.png   1404x1872 8-bit gray PNG, 1-BIT CONTENT (dithered)
     OUT/text/0001.json   { text, words: [[x0,y0,x1,y1,"word"], ...] }
 
-Pages are scaled to fit 1404x1872 preserving aspect and centered on white;
+Pages are scaled to fit 1404x1872 preserving aspect and centered on white
+(minus --margin px of guaranteed border on every side — margin-note room);
 word boxes are transformed into the same device pixel space, so underlining
 on the tablet is pure geometry.
 
-Content is dithered to pure black/white (Bayer 8x8) because the tablet's
-pen path uses the 1-bit DU waveform: a binary screen keeps handwriting
-instant everywhere. Grays survive as dither patterns; text stays crisp
-(it is near-black already).
+Pages stay GRAYSCALE (antialiased, like xochitl) — the app writes pen ink
+with the 1-bit DU waveform and heals the surrounding print with a GL16
+settle pass after the pen lifts. --dither forces 1-bit output (Bayer 8x8)
+if you ever want the old look.
 """
 import argparse
 import json
@@ -69,12 +70,14 @@ def write_png_gray(path: str, img: np.ndarray) -> None:
         f.write(chunk(b"IEND", b""))
 
 
-def build_book(pdf: str, out: str, title: str | None = None, dither: bool = True) -> str:
+def build_book(pdf: str, out: str, title: str | None = None,
+               dither: bool = False, margin: int = 40) -> str:
     """Render `pdf` into a bundle at `out`; returns the resolved title."""
     doc = fitz.open(pdf)
     n = doc.page_count
     if n == 0:
         raise ValueError("empty PDF")
+    margin = max(0, min(int(margin), 400))
 
     title = (title or "").strip() or ((doc.metadata or {}).get("title") or "").strip()
     title = title or re.sub(r"[-_]+", " ", os.path.splitext(os.path.basename(pdf))[0]).strip()
@@ -86,7 +89,7 @@ def build_book(pdf: str, out: str, title: str | None = None, dither: bool = True
     for i in range(n):
         page = doc[i]
         rect = page.rect
-        k = min(W / rect.width, H / rect.height)
+        k = min((W - 2 * margin) / rect.width, (H - 2 * margin) / rect.height)
         pix = page.get_pixmap(matrix=fitz.Matrix(k, k), colorspace=fitz.csGRAY, alpha=False)
         img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.stride)[:, :pix.width]
         ox, oy = (W - pix.width) // 2, (H - pix.height) // 2
@@ -123,12 +126,14 @@ def main() -> int:
     ap.add_argument("pdf")
     ap.add_argument("-o", "--out", required=True, help="bundle directory to write")
     ap.add_argument("--title", help="book title (default: PDF metadata, then filename)")
-    ap.add_argument("--no-dither", action="store_true",
-                    help="keep grayscale pages (NOT recommended: pen writing "
-                         "over grays looks rough on the DU waveform)")
+    ap.add_argument("--margin", type=int, default=40,
+                    help="guaranteed white border in device px (default 40; "
+                         "80-120 gives real margin-note room)")
+    ap.add_argument("--dither", action="store_true",
+                    help="force 1-bit pages (Bayer); default keeps grayscale")
     args = ap.parse_args()
     try:
-        build_book(args.pdf, args.out, args.title, dither=not args.no_dither)
+        build_book(args.pdf, args.out, args.title, dither=args.dither, margin=args.margin)
     except ValueError as e:
         print(f"mkbook: {e}", file=sys.stderr)
         return 1

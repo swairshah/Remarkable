@@ -308,6 +308,12 @@ struct App {
 
     /* pending deghost flash after rubber erasing (DU-erase leaves ghosts) */
     deghost_at: Option<Instant>,
+
+    /* pen ink lands via DU; on grayscale page rasters a GL16 pass over the
+     * fresh strokes ~0.8s after the pen settles heals the print around
+     * them (and smooths the strokes) */
+    ink_settle: Option<Rect>,
+    ink_settle_at: Option<Instant>,
 }
 
 impl App {
@@ -345,20 +351,27 @@ impl App {
     }
 
     /// Repaint a region of whatever "document" view is underneath the
-    /// chrome (book page or home list) and flush it with the ink waveform.
+    /// chrome (book page or home list). Over a grayscale page raster the
+    /// 16-level waveform keeps the print clean; plain ink pages take DU.
     fn render_page_region(&mut self, r: Rect) {
+        self.render_page_region_wave(r, None);
+    }
+
+    /// Same, with a forced waveform — the rubber path passes Wave::Ink
+    /// because GL16 is far too slow mid-scrub (the post-erase deghost
+    /// flash heals the print afterwards).
+    fn render_page_region_wave(&mut self, r: Rect, wave: Option<Wave>) {
         let r = r.clamp_screen();
-        match &self.book {
-            Some(b) => {
-                b.render_region(&mut self.fb, r);
-            }
+        let had_gray = match &self.book {
+            Some(b) => b.render_region(&mut self.fb, r),
             None => {
                 /* home: cheap and correct — repaint the whole list */
                 self.render_home(false);
                 return;
             }
-        }
-        self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
+        };
+        let w = wave.unwrap_or(if had_gray { Wave::Text } else { Wave::Ink });
+        self.disp.update(r.x0, r.y0, r.w(), r.h(), w);
     }
 
     fn draw_working_dot(&mut self) {
@@ -440,6 +453,8 @@ impl App {
         self.idle_at = None;
         self.page_changed = false;
         self.indicator_until = None;
+        self.ink_settle = None;
+        self.ink_settle_at = None;
         save_settings(self.text_scale, "");
         self.shelf = book::scan();
         self.shelf_top = 0;
@@ -564,6 +579,8 @@ impl App {
 
     /// Full repaint of the current book page + flash + chrome.
     fn render_book_full(&mut self) {
+        self.ink_settle = None; /* the flash below supersedes any settle */
+        self.ink_settle_at = None;
         if let Some(b) = &self.book {
             b.render_full(&mut self.fb);
         }
@@ -1110,6 +1127,20 @@ impl App {
         };
         ink::stamp_segment(&mut self.fb, prev, p, ink::USER_GRAY);
         self.mark_ink_dirty(prev, p);
+        /* writing over print: remember where, heal with GL16 once settled */
+        if self.agent_page.is_none() && self.book.as_ref().is_some_and(|b| b.has_raster()) {
+            let r = Rect {
+                x0: (prev.x.min(p.x) - 6.0) as i32,
+                y0: (prev.y.min(p.y) - 6.0) as i32,
+                x1: (prev.x.max(p.x) + 6.0).ceil() as i32,
+                y1: (prev.y.max(p.y) + 6.0).ceil() as i32,
+            };
+            self.ink_settle = Some(match self.ink_settle {
+                None => r,
+                Some(s) => s.union(r),
+            });
+            self.ink_settle_at = Some(Instant::now() + Duration::from_millis(800));
+        }
     }
 
     fn mark_ink_dirty(&mut self, a: Pt, b: Pt) {
@@ -1149,7 +1180,7 @@ impl App {
                 !hit
             });
             let r = region.pad(4).clamp_screen();
-            self.render_page_region(r);
+            self.render_page_region_wave(r, Some(Wave::Ink));
             self.restore_chrome_over(r);
         }
     }
@@ -2027,6 +2058,8 @@ fn main() -> std::process::ExitCode {
         last_activity_page: 0,
         text_scale,
         deghost_at: None,
+        ink_settle: None,
+        ink_settle_at: None,
     };
 
     /* first paint: resume the last book, else the shelf */
@@ -2163,6 +2196,25 @@ fn main() -> std::process::ExitCode {
         if app.indicator_until.is_some_and(|at| Instant::now() >= at) {
             app.clear_page_indicator();
         }
+        /* pen-ink settle: GL16 over fresh strokes on a page raster, once
+         * the pen has been quiet a beat — heals DU-crunched print */
+        if let Some(at) = app.ink_settle_at {
+            if Instant::now() >= at {
+                if app.cur_stroke.is_some()
+                    || app.last_contact.is_some_and(|t| t.elapsed() < Duration::from_millis(500))
+                {
+                    app.ink_settle_at = Some(Instant::now() + Duration::from_millis(400));
+                } else {
+                    app.ink_settle_at = None;
+                    if let Some(r) = app.ink_settle.take() {
+                        if app.sidebar.is_none() && app.agent_page.is_none() && !app.on_home() {
+                            let r = r.pad(4).clamp_screen();
+                            app.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Text);
+                        }
+                    }
+                }
+            }
+        }
         /* post-erase deghost: only once the pen has settled, and never
          * under a menu/text view (their close repaints anyway) */
         if let Some(at) = app.deghost_at {
@@ -2213,6 +2265,9 @@ fn next_timeout(app: &App) -> i32 {
         soonest(at.saturating_duration_since(Instant::now()));
     }
     if let Some(at) = app.deghost_at {
+        soonest(at.saturating_duration_since(Instant::now()));
+    }
+    if let Some(at) = app.ink_settle_at {
         soonest(at.saturating_duration_since(Instant::now()));
     }
     match t {

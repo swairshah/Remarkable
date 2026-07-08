@@ -99,6 +99,8 @@ def main():
     ap.add_argument("--list", action="store_true", help="just show what is on the tablet")
     ap.add_argument("--force", action="store_true", help="re-import even if the slug exists")
     ap.add_argument("--all", action="store_true", help="lift the 10-document safety cap")
+    ap.add_argument("--margin", type=int, default=40,
+                    help="white border in device px (see mkbook; default 40)")
     args = ap.parse_args()
 
     docs = fetch_docs(args.host)
@@ -140,7 +142,7 @@ def main():
             f.write(pdf)
         out = f"build/mirror/books/{d['slug']}"
         try:
-            mkbook.build_book(local, out, d["name"].removesuffix(".pdf"))
+            mkbook.build_book(local, out, d["name"].removesuffix(".pdf"), margin=args.margin)
         except Exception as e:
             print(f"mirror: SKIPPING '{d['name']}': {e}", file=sys.stderr)
             continue

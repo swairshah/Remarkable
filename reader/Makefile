@@ -8,12 +8,17 @@
 #   make fetch-server download rm2fb_server (timower/rM2-stuff) into vendor/
 #   make deploy       build + push binary/scripts/manifest/server/extension
 #
-#   make book FILE=~/papers/x.pdf [TITLE="..."] [SLUG=x]   render + push a PDF
+#   make book FILE=~/papers/x.pdf [TITLE="..."] [SLUG=x] [MARGIN=90]  render + push
 #   make books        list the books on the device
 #   make book-rm SLUG=x                                    delete one (and its ink!)
 #   make mirror-list [ONLY=frag]     browse the tablet's OWN pdf library
 #   make mirror ONLY="name frag"     import matching xochitl pdfs as books
-#                [FORCE=1] [ALL=1]   (re-render / lift the 10-doc cap)
+#     [FORCE=1] [ALL=1] [MARGIN=90]  (re-render / lift the 10-doc cap / border px)
+#
+# MARGIN = guaranteed white border in px (default 40) — margin-note room,
+# like the page-size adjustment in the stock reMarkable app. Baked at
+# render time and persistent for the whole book; pick it BEFORE annotating
+# heavily (a re-render does not move existing ink).
 #
 #   make trace        pull pi session traces + app log -> build/trace.html
 #   make log          tail the app log on the device (/tmp/reader.log)
@@ -122,7 +127,7 @@ ifndef FILE
 	@echo 'usage: make book FILE=~/papers/x.pdf [TITLE="Nice Title"] [SLUG=x] HOST=root@<ip>' && exit 1
 endif
 	$(eval SLUG ?= $(shell basename "$(FILE)" .pdf | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$$//'))
-	$(UVPY) tools/mkbook.py "$(FILE)" -o "build/books/$(SLUG)" $(if $(TITLE),--title "$(TITLE)")
+	$(UVPY) tools/mkbook.py "$(FILE)" -o "build/books/$(SLUG)" $(if $(TITLE),--title "$(TITLE)") $(if $(MARGIN),--margin $(MARGIN))
 	$(SSH) 'mkdir -p $(BOOKS_DIR)'
 	tar -C build/books -cf - "$(SLUG)" | $(SSH) 'tar -C $(BOOKS_DIR) -xf -'
 	@echo "book '$(SLUG)' pushed — it appears on the reader home screen (ALL BOOKS)."
@@ -150,7 +155,7 @@ mirror-list:
 	$(UVPY) tools/mirror.py $(HOST) --list $(if $(ONLY),--only "$(ONLY)")
 
 mirror:
-	$(UVPY) tools/mirror.py $(HOST) $(if $(ONLY),--only "$(ONLY)") $(if $(FORCE),--force) $(if $(ALL),--all)
+	$(UVPY) tools/mirror.py $(HOST) $(if $(ONLY),--only "$(ONLY)") $(if $(FORCE),--force) $(if $(ALL),--all) $(if $(MARGIN),--margin $(MARGIN))
 
 # Pull pi's session traces + the app log off the device and render them
 # into one HTML (tools/trace-viewer.py): the device log up top, then every
