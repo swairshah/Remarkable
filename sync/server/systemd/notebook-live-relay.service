@@ -1,0 +1,12 @@
+[Unit]
+Description=notebook live stroke relay (SSE fan-out for /notebook/live/events)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/node /home/exedev/bin/notebook-live-relay.js
+Restart=always
+RestartSec=2
+User=exedev
+
+[Install]
+WantedBy=multi-user.target
