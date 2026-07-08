@@ -79,6 +79,17 @@ const SNAP_DIV: i32 = 2;
 
 const ERASER_R: f32 = 22.0;
 
+/* pi watchdog: total silence (no stdout, no tool calls) this long while a
+ * turn is in flight means the run is wedged — restart pi (--continue keeps
+ * the session) and re-arm the pause so the page gets re-sent.
+ * NOTEBOOK_PI_STALL (seconds) overrides, mainly for the preview harness. */
+fn pi_stall() -> Duration {
+    Duration::from_secs(
+        std::env::var("NOTEBOOK_PI_STALL").ok().and_then(|v| v.parse().ok()).unwrap_or(180),
+    )
+}
+const PI_RESPAWN_DELAY: Duration = Duration::from_secs(5);
+
 /* takeover exit, xochitl-style: top-edge swipe reveals CLOSE */
 const EDGE_Y: i32 = 16;
 const SWIPE_DIST: i32 = 90;
@@ -269,6 +280,13 @@ struct App {
     /* pi */
     streaming: bool,
     reply_buf: String,
+    sock: String,
+    /* liveness: watchdog while a turn is in flight, respawn after death.
+     * a wedged run (hung API call, stuck tool) used to leave the app in
+     * "thinking" forever — every new pause queued as followUp behind it */
+    pi_alive_at: Option<Instant>,
+    pi_respawn_at: Option<Instant>,
+    pi_stall: Duration,
 
     /* AI ink animation */
     anim: VecDeque<AnimStroke>,
@@ -988,6 +1006,7 @@ impl App {
                 }
                 self.streaming = true;
                 self.set_working(true);
+                self.pi_alive_at = Some(Instant::now());
                 println!("notebook: AGENT.md annotations sent to pi");
             }
             Err(e) => println!("notebook: agent feedback send failed: {e}"),
@@ -1297,6 +1316,7 @@ impl App {
                 self.streaming = true;
                 self.set_working(true);
                 self.live.status("think");
+                self.pi_alive_at = Some(Instant::now());
                 println!("notebook: page {} sent to pi", self.nb.current + 1);
             }
             Err(e) => println!("notebook: send failed: {e}"),
@@ -1318,6 +1338,7 @@ impl App {
                 self.streaming = false;
                 self.set_working(false);
                 self.live.status("idle");
+                self.pi_alive_at = None;
                 let t: String = self.reply_buf.trim().chars().take(300).collect();
                 if !t.is_empty() {
                     println!("notebook: pi said: {t}");
@@ -1340,7 +1361,10 @@ impl App {
                 self.streaming = false;
                 self.pi = None;
                 self.set_working(false);
-                println!("notebook: pi exited: {reason}");
+                self.live.status("idle");
+                self.pi_alive_at = None;
+                self.pi_respawn_at = Some(Instant::now() + PI_RESPAWN_DELAY);
+                println!("notebook: pi exited: {reason}; respawning in {}s", PI_RESPAWN_DELAY.as_secs());
             }
         }
     }
@@ -1348,6 +1372,9 @@ impl App {
     /* -- the tool socket -- */
 
     fn handle_ipc_request(&mut self, req: &Value) -> Value {
+        if self.streaming {
+            self.pi_alive_at = Some(Instant::now()); /* tool call = alive */
+        }
         match req["cmd"].as_str().unwrap_or("") {
             "view" => self.ipc_view(req),
             "draw" => self.ipc_draw(req),
@@ -1535,6 +1562,62 @@ impl App {
             "ok": true, "page": idx + 1, "page_count": self.nb.count,
             "layout": layout_hints(&self.nb.page, self.text_scale),
         })
+    }
+
+    /* -- pi liveness -- */
+
+    /// Watchdog + resurrection: restart a wedged run (process alive but
+    /// silent mid-turn for PI_STALL) and respawn a dead process. Both paths
+    /// keep the session (`--continue`) and re-arm the pause trigger so the
+    /// page that got swallowed is re-sent instead of lost.
+    fn check_pi_health(&mut self) {
+        /* wedged: a turn is in flight but pi has gone completely silent */
+        if self.streaming && self.pi.is_some() {
+            if let Some(at) = self.pi_alive_at {
+                if at.elapsed() >= self.pi_stall {
+                    println!(
+                        "notebook: pi silent for {}s mid-turn; restarting it",
+                        at.elapsed().as_secs()
+                    );
+                    self.pi = None; /* Drop kills the child */
+                    self.streaming = false;
+                    self.reply_buf.clear();
+                    self.set_working(false);
+                    self.live.status("idle");
+                    self.pi_alive_at = None;
+                    self.pi_respawn_at = Some(Instant::now());
+                    /* let the agent page recover too: stop waiting for a
+                     * rewrite that will never finish */
+                    if let Some(ap) = self.agent_page.as_mut() {
+                        ap.waiting = false;
+                    }
+                }
+            }
+        }
+        /* gone: bring it back (crash earlier, or the restart above) */
+        if self.pi.is_none() {
+            if let Some(at) = self.pi_respawn_at {
+                if Instant::now() >= at {
+                    match Pi::spawn(&self.sock) {
+                        Ok(p) => {
+                            self.pi = Some(p);
+                            self.pi_respawn_at = None;
+                            println!("notebook: pi respawned (session continued)");
+                            /* re-send the current page if it has unanswered
+                             * ink — the wedged turn swallowed that pause */
+                            if !self.nb.page.is_empty() && self.agent_page.is_none() {
+                                self.page_changed = true;
+                                self.idle_at = Some(Instant::now() + Duration::from_secs(2));
+                            }
+                        }
+                        Err(e) => {
+                            println!("notebook: pi respawn failed: {e}; retrying in 30s");
+                            self.pi_respawn_at = Some(Instant::now() + Duration::from_secs(30));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /* -- AI ink animation -- */
@@ -1827,6 +1910,10 @@ fn main() -> std::process::ExitCode {
         idle_at: None,
         streaming: false,
         reply_buf: String::new(),
+        sock: sock.clone(),
+        pi_alive_at: None,
+        pi_respawn_at: None,
+        pi_stall: pi_stall(),
         anim: VecDeque::new(),
         anim_dirty: None,
         anim_settle: None,
@@ -1940,6 +2027,9 @@ fn main() -> std::process::ExitCode {
 
         /* -- pi stdout -- */
         if pfds[2].revents & libc::POLLIN != 0 {
+            /* any stdout traffic counts as liveness, even event types the
+             * translator ignores (reasoning deltas, housekeeping) */
+            app.pi_alive_at = Some(Instant::now());
             let events = app.pi.as_mut().map(|p| p.drain()).unwrap_or_default();
             for ev in events {
                 app.handle_pi(ev);
@@ -1976,6 +2066,7 @@ fn main() -> std::process::ExitCode {
         }
         app.maybe_send_page();
         app.live.tick(app.nb.current);
+        app.check_pi_health();
         if app.indicator_until.is_some_and(|at| Instant::now() >= at) {
             app.clear_page_indicator();
         }
@@ -2032,6 +2123,14 @@ fn next_timeout(app: &App) -> i32 {
     if app.live.enabled {
         /* batch flushes + reconnect checks while streaming */
         soonest(Duration::from_millis(500));
+    }
+    if app.streaming {
+        if let Some(at) = app.pi_alive_at {
+            soonest((at + app.pi_stall).saturating_duration_since(Instant::now()));
+        }
+    }
+    if let Some(at) = app.pi_respawn_at {
+        soonest(at.saturating_duration_since(Instant::now()));
     }
     match t {
         Some(d) => (d.as_millis() as i32).max(0),

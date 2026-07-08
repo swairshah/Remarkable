@@ -64,6 +64,16 @@ for line in sys.stdin:
 
     emit({"type": "response", "command": "prompt", "success": True})
     emit({"type": "agent_start"})
+
+    # FAKE_PI_WEDGE=1: the first prompt hangs forever mid-turn (no agent_end),
+    # exercising the app's stall watchdog; the respawned process (flag file
+    # exists) behaves normally.
+    if os.environ.get("FAKE_PI_WEDGE") and not os.path.exists("/tmp/fake-pi-wedged-once"):
+        open("/tmp/fake-pi-wedged-once", "w").close()
+        print("fake-pi: wedging mid-turn (no agent_end, ever)", file=sys.stderr)
+        while True:
+            time.sleep(60)
+
     time.sleep(1.0)  # "thinking" window: the harness can catch the dot
 
     if not responded:
