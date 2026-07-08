@@ -16,8 +16,12 @@
 #     [FORCE=1] [ALL=1] [MARGIN=90]  (re-render / lift the 10-doc cap / border px)
 #
 # MARGIN = guaranteed white border in px (default 40) — margin-note room,
-# like the page-size adjustment in the stock reMarkable app. Baked at
-# render time and persistent for the whole book; pick it BEFORE annotating
+# like the page-size adjustment in the stock reMarkable app. Per-side
+# overrides MARGIN_LEFT/TOP/RIGHT/BOTTOM shift the page, e.g.
+#   MARGIN=24 MARGIN_RIGHT=220 MARGIN_BOTTOM=110
+# anchors the page top-left and leaves fat right/bottom gutters (what
+# full-bleed "reformatted for reMarkable" PDFs need). Baked at render
+# time and persistent for the whole book; pick it BEFORE annotating
 # heavily (a re-render does not move existing ink).
 #
 #   make trace        pull pi session traces + app log -> build/trace.html
@@ -127,7 +131,7 @@ ifndef FILE
 	@echo 'usage: make book FILE=~/papers/x.pdf [TITLE="Nice Title"] [SLUG=x] HOST=root@<ip>' && exit 1
 endif
 	$(eval SLUG ?= $(shell basename "$(FILE)" .pdf | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$$//'))
-	$(UVPY) tools/mkbook.py "$(FILE)" -o "build/books/$(SLUG)" $(if $(TITLE),--title "$(TITLE)") $(if $(MARGIN),--margin $(MARGIN))
+	$(UVPY) tools/mkbook.py "$(FILE)" -o "build/books/$(SLUG)" $(if $(TITLE),--title "$(TITLE)") $(if $(MARGIN),--margin $(MARGIN)) $(if $(MARGIN_LEFT),--margin-left $(MARGIN_LEFT)) $(if $(MARGIN_TOP),--margin-top $(MARGIN_TOP)) $(if $(MARGIN_RIGHT),--margin-right $(MARGIN_RIGHT)) $(if $(MARGIN_BOTTOM),--margin-bottom $(MARGIN_BOTTOM))
 	$(SSH) 'mkdir -p $(BOOKS_DIR)'
 	tar -C build/books -cf - "$(SLUG)" | $(SSH) 'tar -C $(BOOKS_DIR) -xf -'
 	@echo "book '$(SLUG)' pushed — it appears on the reader home screen (ALL BOOKS)."
@@ -155,7 +159,7 @@ mirror-list:
 	$(UVPY) tools/mirror.py $(HOST) --list $(if $(ONLY),--only "$(ONLY)")
 
 mirror:
-	$(UVPY) tools/mirror.py $(HOST) $(if $(ONLY),--only "$(ONLY)") $(if $(FORCE),--force) $(if $(ALL),--all) $(if $(MARGIN),--margin $(MARGIN))
+	$(UVPY) tools/mirror.py $(HOST) $(if $(ONLY),--only "$(ONLY)") $(if $(FORCE),--force) $(if $(ALL),--all) $(if $(MARGIN),--margin $(MARGIN)) $(if $(MARGIN_LEFT),--margin-left $(MARGIN_LEFT)) $(if $(MARGIN_TOP),--margin-top $(MARGIN_TOP)) $(if $(MARGIN_RIGHT),--margin-right $(MARGIN_RIGHT)) $(if $(MARGIN_BOTTOM),--margin-bottom $(MARGIN_BOTTOM))
 
 # Pull pi's session traces + the app log off the device and render them
 # into one HTML (tools/trace-viewer.py): the device log up top, then every

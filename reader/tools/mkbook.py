@@ -71,13 +71,24 @@ def write_png_gray(path: str, img: np.ndarray) -> None:
 
 
 def build_book(pdf: str, out: str, title: str | None = None,
-               dither: bool = False, margin: int = 40) -> str:
-    """Render `pdf` into a bundle at `out`; returns the resolved title."""
+               dither: bool = False, margin: int = 40,
+               margins: tuple | None = None) -> str:
+    """Render `pdf` into a bundle at `out`; returns the resolved title.
+
+    `margins` = (left, top, right, bottom) white border in device px;
+    any None falls back to `margin`. Asymmetric margins shift the page
+    like the stock app's page adjustment: e.g. right=220 anchors the
+    content left and leaves a fat right gutter for margin notes."""
     doc = fitz.open(pdf)
     n = doc.page_count
     if n == 0:
         raise ValueError("empty PDF")
-    margin = max(0, min(int(margin), 400))
+    ml, mt, mr, mb = ((margin, margin, margin, margin) if margins is None else
+                      tuple(margin if v is None else v for v in margins))
+    ml, mt, mr, mb = (max(0, min(int(v), 500)) for v in (ml, mt, mr, mb))
+    box_w, box_h = W - ml - mr, H - mt - mb
+    if box_w < 400 or box_h < 500:
+        raise ValueError(f"margins leave a {box_w}x{box_h} page box — too small")
 
     title = (title or "").strip() or ((doc.metadata or {}).get("title") or "").strip()
     title = title or re.sub(r"[-_]+", " ", os.path.splitext(os.path.basename(pdf))[0]).strip()
@@ -89,10 +100,13 @@ def build_book(pdf: str, out: str, title: str | None = None,
     for i in range(n):
         page = doc[i]
         rect = page.rect
-        k = min((W - 2 * margin) / rect.width, (H - 2 * margin) / rect.height)
+        k = min(box_w / rect.width, box_h / rect.height)
         pix = page.get_pixmap(matrix=fitz.Matrix(k, k), colorspace=fitz.csGRAY, alpha=False)
         img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.stride)[:, :pix.width]
-        ox, oy = (W - pix.width) // 2, (H - pix.height) // 2
+        # center only the residual slack WITHIN the margin box, so
+        # asymmetric margins really do shift the page
+        ox = ml + (box_w - pix.width) // 2
+        oy = mt + (box_h - pix.height) // 2
         canvas = np.full((H, W), 255, dtype=np.uint8)
         canvas[oy:oy + pix.height, ox:ox + pix.width] = img
         if dither:
@@ -129,11 +143,20 @@ def main() -> int:
     ap.add_argument("--margin", type=int, default=40,
                     help="guaranteed white border in device px (default 40; "
                          "80-120 gives real margin-note room)")
+    ap.add_argument("--margin-left", type=int)
+    ap.add_argument("--margin-top", type=int)
+    ap.add_argument("--margin-right", type=int,
+                    help="per-side overrides; a big --margin-right shifts the "
+                         "page left and leaves a writing gutter (like moving "
+                         "the page in the stock app)")
+    ap.add_argument("--margin-bottom", type=int)
     ap.add_argument("--dither", action="store_true",
                     help="force 1-bit pages (Bayer); default keeps grayscale")
     args = ap.parse_args()
     try:
-        build_book(args.pdf, args.out, args.title, dither=args.dither, margin=args.margin)
+        build_book(args.pdf, args.out, args.title, dither=args.dither, margin=args.margin,
+                   margins=(args.margin_left, args.margin_top,
+                            args.margin_right, args.margin_bottom))
     except ValueError as e:
         print(f"mkbook: {e}", file=sys.stderr)
         return 1

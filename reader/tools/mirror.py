@@ -101,6 +101,10 @@ def main():
     ap.add_argument("--all", action="store_true", help="lift the 10-document safety cap")
     ap.add_argument("--margin", type=int, default=40,
                     help="white border in device px (see mkbook; default 40)")
+    ap.add_argument("--margin-left", type=int)
+    ap.add_argument("--margin-top", type=int)
+    ap.add_argument("--margin-right", type=int)
+    ap.add_argument("--margin-bottom", type=int)
     args = ap.parse_args()
 
     docs = fetch_docs(args.host)
@@ -142,7 +146,9 @@ def main():
             f.write(pdf)
         out = f"build/mirror/books/{d['slug']}"
         try:
-            mkbook.build_book(local, out, d["name"].removesuffix(".pdf"), margin=args.margin)
+            mkbook.build_book(local, out, d["name"].removesuffix(".pdf"), margin=args.margin,
+                              margins=(args.margin_left, args.margin_top,
+                                       args.margin_right, args.margin_bottom))
         except Exception as e:
             print(f"mirror: SKIPPING '{d['name']}': {e}", file=sys.stderr)
             continue
