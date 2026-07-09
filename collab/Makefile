@@ -6,6 +6,7 @@
 #   make preview      run under qemu with a FAKE pi -> build/preview.png
 #   make fetch-server download rm2fb_server (timower/rM2-stuff) into vendor/
 #   make deploy       build + push binary/scripts/manifest/server to the device
+#   make trace        pull pi sessions + app log -> build/trace.html
 #   make log          tail the app log on the device (/tmp/collab.log)
 #   make log-server   tail the rm2fb server log (/tmp/rm2fb.log)
 #   make kill         stop a running takeover session (restores xochitl)
@@ -32,7 +33,7 @@ KILL_APP := systemctl stop collab-takeover 2>/dev/null; \
             q=$$(pgrep -f 'appload/collab/[c]ollab'); \
             if [ -n "$$q" ]; then kill $$q; sleep 1; kill -9 $$q 2>/dev/null; fi
 
-.PHONY: all build preview fetch-server deploy log log-server kill restore-ui uninstall clean
+.PHONY: all build preview fetch-server deploy trace log log-server kill restore-ui uninstall clean
 
 all: build
 
@@ -79,6 +80,17 @@ deploy: build vendor/rm2fb_server
 
 vendor/rm2fb_server:
 	@echo 'vendor/rm2fb_server missing — run: make fetch-server' && exit 1
+
+# Pull pi's session traces + the app log off the device and render them
+# into one HTML (tools/trace-viewer.py): the device log up top, then every
+# exchange — the handwriting image pi saw, its thinking, the reply it
+# streamed (```svg diagrams rendered), per-turn cost.
+trace:
+	mkdir -p build/sessions
+	$(SSH) 'tar -C /home/root/.local/share/collab/sessions -cf - .' | tar -C build/sessions -xf -
+	$(SSH) 'cat /tmp/collab.log 2>/dev/null' > build/collab.log || true
+	python3 tools/trace-viewer.py build/sessions --log build/collab.log -o build/trace.html
+	open build/trace.html 2>/dev/null || true
 
 log:
 	$(SSH) 'touch /tmp/collab.log; tail -f /tmp/collab.log'
