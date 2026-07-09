@@ -317,8 +317,8 @@ fn emit_runs(
     }
 }
 
-/// LaTeX command -> unicode (Greek renders natively via the Hershey Greek
-/// face; other symbols go through hershey::fold's ASCII fallbacks).
+/// LaTeX command -> unicode (Greek renders via the Hershey Greek face,
+/// math symbols via the MATH table; leftovers hit hershey::fold).
 fn tex_char(word: &str) -> Option<&'static str> {
     Some(match word {
         "alpha" => "\u{03B1}",
@@ -355,20 +355,39 @@ fn tex_char(word: &str) -> Option<&'static str> {
         "Psi" => "\u{03A8}",
         "Omega" => "\u{03A9}",
         "approx" => "\u{2248}",
-        "sim" => "~",
+        "sim" => "\u{223C}",
         "cdot" => "\u{00B7}",
         "times" => "\u{00D7}",
+        "div" => "\u{00F7}",
         "pm" => "\u{00B1}",
+        "mp" => "\u{2213}",
         "le" | "leq" => "\u{2264}",
         "ge" | "geq" => "\u{2265}",
         "ne" | "neq" => "\u{2260}",
-        "infty" => "inf",
-        "to" | "rightarrow" => "\u{2192}",
+        "equiv" => "\u{2261}",
+        "infty" => "\u{221E}",
+        "to" | "rightarrow" | "mapsto" => "\u{2192}",
+        "gets" | "leftarrow" => "\u{2190}",
+        "uparrow" => "\u{2191}",
+        "downarrow" => "\u{2193}",
         "propto" => "\u{221D}",
         "partial" => "\u{2202}",
-        "sum" => "\u{03A3}",
-        "prod" => "\u{03A0}",
-        "int" => "S",
+        "nabla" => "\u{2207}",
+        "sum" => "\u{2211}",
+        "prod" => "\u{220F}",
+        "int" => "\u{222B}",
+        "in" => "\u{2208}",
+        "cup" => "\u{222A}",
+        "cap" => "\u{2229}",
+        "subset" | "subseteq" => "\u{2282}",
+        "supset" | "supseteq" => "\u{2283}",
+        "forall" => "\u{2200}",
+        "exists" => "\u{2203}",
+        "emptyset" | "varnothing" => "\u{2205}",
+        "perp" => "\u{22A5}",
+        "angle" => "\u{2220}",
+        "therefore" => "\u{2234}",
+        "deg" => "\u{00B0}",
         "left" | "right" | "displaystyle" | "limits" => "",
         "quad" | "qquad" => "  ",
         _ => return None,
@@ -413,10 +432,49 @@ fn tex_flatten(s: &str) -> String {
     math_runs(s).into_iter().map(|r| r.text).collect()
 }
 
+/// Literal Unicode super/subscripts (mc², x₀, 10⁻³) rewritten as `^`/`_`
+/// so they become true raised/lowered runs instead of flat digits.
+fn fold_supsub(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let u = c as u32;
+        match u {
+            0x00B9 => out.push_str("^1"),
+            0x00B2 => out.push_str("^2"),
+            0x00B3 => out.push_str("^3"),
+            0x2070 => out.push_str("^0"),
+            0x2074..=0x2079 => {
+                out.push('^');
+                out.push((b'0' + (u - 0x2070) as u8) as char);
+            }
+            0x207A => out.push_str("^+"),
+            0x207B => out.push_str("^-"),
+            0x207F => out.push_str("^n"),
+            0x2080..=0x2089 => {
+                out.push('_');
+                out.push((b'0' + (u - 0x2080) as u8) as char);
+            }
+            0x208A => out.push_str("_+"),
+            0x208B => out.push_str("_-"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Split a text line into runs: `$` stripped, LaTeX commands resolved,
 /// `^`/`_` becoming true super/subscript runs. Plain lines come back as
 /// one untouched run.
 fn math_runs(s: &str) -> Vec<Run> {
+    let folded;
+    let s = if s.chars().any(|c| matches!(c as u32,
+        0x00B9 | 0x00B2 | 0x00B3 | 0x2070 | 0x2074..=0x207F | 0x2080..=0x208B))
+    {
+        folded = fold_supsub(s);
+        &folded
+    } else {
+        s
+    };
     if !s.contains(['^', '_', '\\', '$']) {
         return vec![Run { text: s.to_string(), scale: 1.0, dy: 0.0 }];
     }
@@ -453,7 +511,7 @@ fn math_runs(s: &str) -> Vec<Run> {
                     i = j3;
                 } else if word == "sqrt" {
                     let (arg, j2) = tex_group(&b, j);
-                    buf.push_str("sqrt(");
+                    buf.push_str("\u{221A}(");
                     buf.push_str(&tex_flatten(&arg));
                     buf.push(')');
                     i = j2;
