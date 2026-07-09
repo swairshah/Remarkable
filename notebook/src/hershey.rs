@@ -18,7 +18,7 @@
 //! Data: futural/scripts/timesr .jhf (public domain), converted offline
 //! into hershey_data.rs.
 
-use crate::hershey_data::{GREEK, SANS, SCRIPT, SERIF};
+use crate::hershey_data::{math_glyph, GREEK, SANS, SCRIPT, SERIF};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Face {
@@ -91,6 +91,9 @@ fn glyph(f: Face, c: char) -> &'static Glyph {
     if let Some(slot) = greek_slot(c) {
         return &GREEK[slot];
     }
+    if let Some(g) = math_glyph(c) {
+        return g;
+    }
     let i = c as usize;
     let t = table(f);
     if (32..128).contains(&i) {
@@ -100,9 +103,10 @@ fn glyph(f: Face, c: char) -> &'static Glyph {
     }
 }
 
-/// The fonts are ASCII-only: fold the Unicode the models love (curly
-/// quotes, dashes, ellipses, arrows) to drawable equivalents instead of
-/// letting it all collapse into '?'.
+/// Fold Unicode with no glyph of its own (curly quotes, dashes, ellipses)
+/// to drawable equivalents instead of letting it collapse into '?'.
+/// Math symbols (±, ×, ≤, ∫, ∑, √, ∞, arrows, ...) render natively via
+/// the MATH table; Greek via the GREEK face — don't fold those.
 pub fn fold(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -114,20 +118,32 @@ pub fn fold(s: &str) -> String {
             }
             '\u{2026}' => out.push_str("..."),
             '\u{2022}' | '\u{25CF}' | '\u{25AA}' => out.push('-'),
-            '\u{00B7}' | '\u{22C5}' => out.push('*'), /* cdot: '-' would read as minus */
-            '\u{2192}' => out.push_str("->"),
-            '\u{2190}' => out.push_str("<-"),
             '\u{2194}' => out.push_str("<->"),
-            '\u{00D7}' => out.push('x'),
-            '\u{00F7}' => out.push('/'),
+            '\u{21D2}' | '\u{27F9}' | '\u{21A6}' => out.push('\u{2192}'), /* => real arrow */
+            '\u{21D0}' | '\u{27F8}' => out.push('\u{2190}'),
             '\u{00A0}' | '\u{2009}' | '\u{200A}' | '\u{2002}' | '\u{2003}' => out.push(' '),
-            '\u{2248}' => out.push('~'),
-            '\u{2260}' => out.push_str("!="),
-            '\u{2264}' => out.push_str("<="),
-            '\u{2202}' => out.push('d'),
-            '\u{221D}' => out.push('~'),
-            '\u{2265}' => out.push_str(">="),
-            '\u{00B0}' => out.push('o'),
+            '\u{00B5}' => out.push('\u{03BC}'),   /* micro -> Greek mu */
+            '\u{03F5}' => out.push('\u{03B5}'),   /* lunate epsilon */
+            '\u{03D5}' => out.push('\u{03C6}'),   /* phi variants */
+            '\u{03D1}' => out.push('\u{03B8}'),   /* theta variant */
+            '\u{211D}' => out.push('R'),          /* double-struck sets */
+            '\u{2115}' => out.push('N'),
+            '\u{2124}' => out.push('Z'),
+            '\u{211A}' => out.push('Q'),
+            '\u{2102}' => out.push('C'),
+            '\u{210F}' => out.push('h'),          /* hbar */
+            '\u{2113}' => out.push('l'),          /* script ell */
+            '\u{2217}' => out.push('*'),
+            '\u{2223}' => out.push('|'),
+            '\u{2225}' => out.push_str("||"),
+            '\u{27E8}' | '\u{2329}' => out.push('<'),
+            '\u{27E9}' | '\u{232A}' => out.push('>'),
+            '\u{00B9}' => out.push('1'),          /* super/subscript digits: */
+            '\u{00B2}' => out.push('2'),          /* better flat than '?'    */
+            '\u{00B3}' => out.push('3'),
+            '\u{2070}' => out.push('0'),
+            c @ '\u{2074}'..='\u{2079}' => out.push((b'0' + (c as u32 - 0x2070) as u8) as char),
+            c @ '\u{2080}'..='\u{2089}' => out.push((b'0' + (c as u32 - 0x2080) as u8) as char),
             _ => out.push(c), /* other non-ASCII still ends up as '?' */
         }
     }
@@ -150,6 +166,28 @@ pub fn line_height(size: f32) -> f32 {
 
 pub fn text_width(f: Face, s: &str, size: f32) -> f32 {
     width_units(f, s) * scale_for(size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn math_symbols_have_real_glyphs() {
+        let question = strokes(Face::Serif, "?", 0.0, 0.0, 30.0);
+        for c in [
+            '\u{222B}', '\u{2211}', '\u{220F}', '\u{221A}', '\u{221E}', '\u{00B1}',
+            '\u{00D7}', '\u{00F7}', '\u{2264}', '\u{2265}', '\u{2260}', '\u{2248}',
+            '\u{2202}', '\u{2207}', '\u{2208}', '\u{2192}', '\u{00B7}', '\u{00B0}',
+            '\u{2200}', '\u{2203}', '\u{2205}', '\u{03C0}',
+        ] {
+            let s = c.to_string();
+            assert!(width_units(Face::Serif, &s) > 0.0, "{c} has no advance");
+            let st = strokes(Face::Serif, &s, 0.0, 0.0, 30.0);
+            assert!(!st.is_empty(), "{c} drew nothing");
+            assert_ne!(st, question, "{c} fell back to '?'");
+        }
+    }
 }
 
 /// Lay `s` out with its baseline at (x, y), returning one polyline per pen
