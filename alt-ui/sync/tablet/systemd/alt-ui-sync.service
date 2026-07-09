@@ -1,0 +1,11 @@
+[Unit]
+Description=alt-ui two-way web sync (pull inbound + push mirror)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/root/bin/alt-ui-sync.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
