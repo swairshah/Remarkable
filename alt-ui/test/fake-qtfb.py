@@ -47,7 +47,7 @@ PEN_PRESS, PEN_RELEASE, PEN_UPDATE = 0x20, 0x21, 0x22
 TOUCH_PRESS, TOUCH_RELEASE, TOUCH_UPDATE = 0x10, 0x11, 0x12
 MESSAGE_USERINPUT = 4
 
-CLOSE_TAP_X, CLOSE_TAP_Y = 100, 44  # inside the CLOSE button
+CLOSE_TAP_X, CLOSE_TAP_Y = 1318, 44  # inside the CLOSE button (now top-RIGHT)
 
 
 def write_png(path):
@@ -370,7 +370,7 @@ def scenario_m2(h, out_png):
     s.swipe_down_from_top()
     s.drain(1.0)
     shot("topbar")
-    s.tap(226 + 130, 44)  # MY FILES
+    s.tap(16 + 130, 44)  # MY FILES (now at the left edge, FILES_X0=16)
     s.drain(3.0)
     shot("home2")  # new notebook first, with its ink thumbnail
 

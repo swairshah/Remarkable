@@ -117,11 +117,11 @@ const DOT_RECT: Rect =
 const EDGE_Y: i32 = 16;
 const SWIPE_DIST: i32 = 90;
 const BAR_H: i32 = 90;
-const CLOSE_X0: i32 = 16;
-const CLOSE_Y0: i32 = 12;
-const CLOSE_BTN_W: i32 = 190;
-const CLOSE_BTN_H: i32 = 64;
-const FILES_X0: i32 = 226;
+const CLOSE_BTN_W: i32 = 132; /* smaller than before (was 190) */
+const CLOSE_BTN_H: i32 = 56;
+const CLOSE_X0: i32 = FB_W - CLOSE_BTN_W - 20; /* top-RIGHT corner (was left) */
+const CLOSE_Y0: i32 = 16;
+const FILES_X0: i32 = 16; /* MY FILES moves to the left edge now CLOSE is right */
 const FILES_BTN_W: i32 = 260;
 const BAR_TTL: Duration = Duration::from_secs(4);
 
@@ -132,8 +132,12 @@ const FLIP_DY_MAX: i32 = 240;
 /* long-press on a home cell */
 const HOLD_MS: u128 = 650;
 
-/* transient page-number indicator after a flip */
+/* transient page-number indicator after a flip: a subtle grey number in the
+ * bottom-right (no box), sitting clear of the right-edge toolbar strip */
 const INDICATOR_TTL: Duration = Duration::from_millis(1400);
+const IND_PX: f32 = 30.0;
+const IND_GREY: u8 = 105; /* readout grey — subtle, not full black */
+const IND_RIGHT: i32 = FB_W - 120; /* right edge of the number (104 strip + 16 gap) */
 
 /* status bar refresh cadence while visible */
 const STATUS_POLL: Duration = Duration::from_secs(20);
@@ -359,6 +363,13 @@ struct App {
 
     /* cross-cutting input state */
     last_pen: Option<Instant>,
+    /// Set when a pen PRESS is consumed by chrome or navigation (a toolbar
+    /// button, a dialog, the top bar, or opening a doc from the home grid).
+    /// The rest of that physical contact (its Move/Release) is then ignored,
+    /// so a tap on the UI — or the tap that opened a document — can't fall
+    /// through and land a stray ink dot on the page underneath. Cleared on
+    /// the contact's Release.
+    pen_swallow: bool,
     touch_start: Option<(i32, i32)>,
     touch_t0: Option<Instant>,
     touch_last: (i32, i32),
@@ -623,7 +634,8 @@ impl App {
     /* -- page indicator -- */
 
     fn indicator_rect(&self) -> Rect {
-        Rect { x0: FB_W / 2 - 160, y0: FB_H - 56, x1: FB_W / 2 + 160, y1: FB_H - 10 }
+        /* bottom-right band, wide enough to clear the longest label */
+        Rect { x0: IND_RIGHT - 360, y0: FB_H - 56, x1: IND_RIGHT + 2, y1: FB_H - 6 }
     }
 
     fn show_page_indicator(&mut self) {
@@ -632,20 +644,25 @@ impl App {
         let label = if label.is_empty() {
             format!("{} / {}", dv.doc.current + 1, dv.doc.count())
         } else {
-            format!("{} / {}  -  {}", dv.doc.current + 1, dv.doc.count(), label)
+            format!("{} / {}   {}", dv.doc.current + 1, dv.doc.count(), label)
         };
         dv.indicator_until = Some(Instant::now() + INDICATOR_TTL);
         let r = self.indicator_rect();
-        self.fb.fill_rect(r.x0, r.y0, r.w(), r.h(), WHITE);
-        self.fb.rect_outline(r.x0, r.y0, r.w(), r.h(), 2, BLACK);
-        self.fb.text(
-            FB_W / 2 - text_width(&label, 3) / 2,
-            r.y0 + (r.h() - 21) / 2,
+        /* no box: the page was just repainted, so lay the subtle grey number
+         * straight over its bottom-right margin, right-aligned. A full 16-level
+         * push over the little rect keeps the grey smooth (a partial pass would
+         * speckle it) and stays flash-free. */
+        let w = text::width(text::Face::Body, IND_PX, &label);
+        text::draw_line_level(
+            &mut self.fb,
+            IND_RIGHT - w,
+            FB_H - 48,
+            text::Face::Body,
+            IND_PX,
             &label,
-            3,
-            BLACK,
+            IND_GREY,
         );
-        self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
+        self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Print);
     }
 
     fn clear_page_indicator(&mut self) {
@@ -721,19 +738,34 @@ impl App {
 
     fn route_pen(&mut self, phase: PenPhase, x: i32, y: i32, pressure: i32, rubber: bool) {
         self.last_pen = Some(Instant::now());
+        /* A chrome/nav press consumed this contact — ignore the rest of it
+         * (Move/Release) so it can't fall through and ink the page. Every
+         * fresh Press starts a clean contact (so a missed Release can't wedge
+         * the flag on); Move/Release of a consumed contact are dropped. */
+        if phase == PenPhase::Press {
+            self.pen_swallow = false;
+        } else if self.pen_swallow {
+            if phase == PenPhase::Release {
+                self.pen_swallow = false;
+            }
+            return;
+        }
         if self.dialog.is_some() {
             if phase == PenPhase::Press {
+                self.pen_swallow = true;
                 self.dialog_press(x, y);
             }
             return;
         }
         if self.bar_until.is_some() && phase == PenPhase::Press && y < BAR_H {
+            self.pen_swallow = true;
             self.top_bar_press(x, y);
             return;
         }
         match &self.screen {
             Screen::Home(_) => {
                 if phase == PenPhase::Press {
+                    self.pen_swallow = true; /* the opening tap must not ink the doc */
                     self.home_tap(x, y);
                 }
             }
@@ -748,6 +780,7 @@ impl App {
             let Screen::Doc(dv) = &self.screen else { return };
             if dv.cur_stroke.is_none() {
                 if let Some(a) = toolbar::hit(x, y, dv.tb_open) {
+                    self.pen_swallow = true; /* swallow this tap's Move/Release */
                     self.toolbar_action(a);
                     return;
                 }
@@ -1432,9 +1465,9 @@ impl App {
     fn paint_top_bar(&mut self) {
         self.fb.fill_rect(0, 0, FB_W, BAR_H, WHITE);
         self.fb.fill_rect(0, BAR_H - 2, FB_W, 2, BLACK);
-        /* CLOSE */
+        /* CLOSE — small, top-right */
         self.fb.fill_rect(CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H, BLACK);
-        let label = "X CLOSE";
+        let label = "CLOSE";
         self.fb.text(
             CLOSE_X0 + (CLOSE_BTN_W - text_width(label, 3)) / 2,
             CLOSE_Y0 + (CLOSE_BTN_H - 21) / 2,
@@ -1469,7 +1502,8 @@ impl App {
         };
         let s = format!("{clock}   {pct}");
         let w = text::width(text::Face::Body, 30.0, &s);
-        text::draw_line(&mut self.fb, FB_W - 32 - w, 28, text::Face::Body, 30.0, &s);
+        /* sit the clock/battery just left of the (now right-aligned) close btn */
+        text::draw_line(&mut self.fb, CLOSE_X0 - 28 - w, 28, text::Face::Body, 30.0, &s);
         self.disp.update(0, 0, FB_W, BAR_H, Wave::Ink);
     }
 
@@ -2760,6 +2794,7 @@ fn main() -> std::process::ExitCode {
         last_ink_flush: now,
         clipboard: None,
         last_pen: None,
+        pen_swallow: false,
         touch_start: None,
         touch_t0: None,
         touch_last: (0, 0),

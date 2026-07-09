@@ -99,6 +99,14 @@ impl Framebuffer {
     /// untouched; partial coverage darkens whatever background is there, so
     /// text over the white page and over gray code boxes both look right.
     pub fn blend_black(&mut self, x: i32, y: i32, w: i32, h: i32, cov: &[u8]) {
+        self.blend_toward(x, y, w, h, cov, 0);
+    }
+
+    /// Blend a coverage mask toward `target` luminance (0=black, 255=white)
+    /// over the current background — the general form of `blend_black`
+    /// (which is `target = 0`). Used for subtle grey chrome like the
+    /// page-number readout.
+    pub fn blend_toward(&mut self, x: i32, y: i32, w: i32, h: i32, cov: &[u8], target: u8) {
         let (cy0, cy1) = (self.clip_y0, self.clip_y1);
         let px = self.pixels();
         for row in 0..h {
@@ -116,9 +124,10 @@ impl Framebuffer {
                     continue;
                 }
                 let idx = (py * SCREEN_W + sx) as usize;
-                /* background luminance from the green channel, then darken */
+                /* background luminance from the green channel, then blend it
+                 * toward `target` by the coverage */
                 let bg = (((px[idx] >> 5) & 0x3F) as u32) * 255 / 63;
-                let g = (bg * (255 - a) / 255) as u16;
+                let g = ((bg * (255 - a) + target as u32 * a) / 255) as u16;
                 px[idx] = ((g >> 3) << 11) | ((g >> 2) << 5) | (g >> 3);
             }
         }

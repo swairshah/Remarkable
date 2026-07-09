@@ -152,6 +152,14 @@ pub fn draw_gray_level(buf: &mut [u8], bw: i32, bh: i32, x: i32, y_top: i32, f: 
 /// Draw a single (already-wrapped) line at top-left (x, y_top). Returns the
 /// advance width in pixels.
 pub fn draw_line(fb: &mut Framebuffer, x: i32, y_top: i32, f: Face, px: f32, s: &str) -> i32 {
+    draw_line_level(fb, x, y_top, f, px, s, 0)
+}
+
+/// Like `draw_line`, but glyphs blend toward `level` (0=black, 255=white)
+/// instead of full black — for subtle grey chrome (e.g. the page-number
+/// readout). Push the region with a full 16-level waveform so the grey
+/// renders smooth rather than speckled.
+pub fn draw_line_level(fb: &mut Framebuffer, x: i32, y_top: i32, f: Face, px: f32, s: &str, level: u8) -> i32 {
     let ascent = font(f).horizontal_line_metrics(px).map(|m| m.ascent).unwrap_or(px);
     let baseline = y_top as f32 + ascent;
     let mut pen = x as f32;
@@ -160,7 +168,7 @@ pub fn draw_line(fb: &mut Framebuffer, x: i32, y_top: i32, f: Face, px: f32, s: 
             if m.width > 0 && m.height > 0 {
                 let gx = (pen + m.xmin as f32).round() as i32;
                 let gy = (baseline - m.ymin as f32 - m.height as f32).round() as i32;
-                fb.blend_black(gx, gy, m.width as i32, m.height as i32, cov);
+                fb.blend_toward(gx, gy, m.width as i32, m.height as i32, cov, level);
             }
             pen += m.advance_width;
         });
