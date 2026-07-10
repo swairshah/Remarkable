@@ -6,6 +6,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- Opt out of dark-mode browser extensions (Dark Reader): they invert the
+     document page images/canvas unpredictably. This viewer already ships its
+     own light/dark theme, so we render in true colours. -->
+<meta name="darkreader-lock">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Paper</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -118,7 +122,9 @@
 const DATA = '/paper/data/';
 const INBOUND = '/paper/inbound/';   // web-dropped docs pending tablet sync
 const UPLOAD = '/paper/upload';
-const API = '/paper/api/';           // margin editor: source-status, preview, render, attach
+const API = '/paper/api/';           // crop editor: source-status, preview, render, attach
+const bust = {};                     // docId -> cache-bust token, bumped after a re-render
+const bustq = (id) => bust[id] ? ('?v=' + bust[id]) : '';   // so new pages load, not the cached ones
 const PAGE_W = 1404, PAGE_H = 1872, POLL_MS = 20000;
 const $ = (id) => document.getElementById(id);
 const $view = $('view');
@@ -219,7 +225,7 @@ async function thumbCanvas(d) {
   const e0 = st && st.seq && st.seq[0];
   if (d.meta.kind === 'book') {
     const pnum = e0 && e0.p != null ? e0.p : 0;
-    await drawImage(ctx, d.base, 'docs/' + d.id + '/pages/' + pad4(pnum + 1) + '.png', scale).catch(()=>{});
+    await drawImage(ctx, d.base, 'docs/' + d.id + '/pages/' + pad4(pnum + 1) + '.png' + bustq(d.id), scale).catch(()=>{});
     const ink = await jfileB(d.base, 'docs/' + d.id + '/ink/pdf-' + pad4(pnum + 1) + '.json');
     drawInk(ctx, ink, scale);
   } else {
@@ -324,7 +330,7 @@ async function renderPage(cv, base, id, e) {
   const ctx = cv.getContext('2d');
   ctx.fillStyle = '#fbfbf9'; ctx.fillRect(0, 0, PAGE_W, PAGE_H);
   if (e.p != null) {
-    await drawImage(ctx, base, 'docs/' + id + '/pages/' + pad4(e.p + 1) + '.png', 1).catch(()=>{});
+    await drawImage(ctx, base, 'docs/' + id + '/pages/' + pad4(e.p + 1) + '.png' + bustq(id), 1).catch(()=>{});
     const ink = await jfileB(base, 'docs/' + id + '/ink/pdf-' + pad4(e.p + 1) + '.json');
     drawInk(ctx, ink, 1);
   } else if (e.n != null) {
@@ -373,7 +379,7 @@ async function openMarginEditor(d) {
   }
   if (!st || !st.ok) { el.querySelector('.mattach').textContent = 'Could not reach the editor service — try again in a moment.'; return; }
   if (!st.hasSource) return renderAttach(d);
-  med.id = d.id; med.pages = st.pages || 1; med.page = 0; med.pageImg = null;
+  med.id = d.id; med.doc = d; med.pages = st.pages || 1; med.page = 0; med.pageImg = null;
   med.orig = st.orig || [0, 0, 1, 1];
   med.crop = boxFromCrop(st.crop || [0, 0, 1, 1]);
   renderEditor(d);
@@ -511,13 +517,15 @@ function setupBoxDrag() {
 
 async function saveCrop() {
   const c = cropArray(med.crop);
+  const d = med.doc, id = med.id;
   const btn = $('med-save'); btn.disabled = true; btn.textContent = 'Rendering…';
   try {
-    const r = await fetch(API + 'render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: med.id, crop: c }) });
+    const r = await fetch(API + 'render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, crop: c }) });
     const j = await r.json(); if (!j.ok) throw new Error(j.error || 'render failed');
+    bust[id] = Date.now();          // force the viewer to load the NEW pages, not the cached ones
     closeEditor();
-    toast('Re-rendered — it reaches your tablet on the next sync (~90s).', 6000);
-    setTimeout(refresh, 2000);
+    toast('Cropped & re-rendered — reaches your tablet on the next sync (~90s).', 6000);
+    if (d) openDoc(d); else setTimeout(refresh, 1000);   // re-open so you see the new pages now
   } catch (err) { toast('Render failed: ' + err.message, 5000); btn.disabled = false; btn.innerHTML = 'Save &amp; push'; }
 }
 
