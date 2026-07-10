@@ -63,6 +63,21 @@ On-disk under `~/.local/share/alt-ui/`: `docs/<id>/` per document (byte-
 compatible with reader bundles), `folders.json`, `settings.json`. Folders
 are a `meta.json` field, not subdirectories.
 
+## Web viewer
+
+`https://remarkable.exe.xyz/paper/` reads the tablet mirror and pending web
+uploads through one server-local `/paper/api/library` manifest. The manifest
+includes document metadata, sequence state, content versions, cover URLs and
+the existing ink-file set, so the high-latency browser path does not fan out
+into per-document metadata/state requests or missing-ink 404s.
+
+Home covers are cached 280×373 WebP derivatives of each document's existing
+`thumb.png` (or first raster page before the tablet has generated a thumb).
+Versioned covers, page PNGs and ink JSON are immutable in the browser. The
+visible home view checks the ETagged manifest every 60 seconds; polling stops
+while a document is open or the tab is hidden. Full-book crop renders run as
+background jobs and report page progress to the editor.
+
 ## Module map (`src/`)
 
 Shared display/input core (from collab, verbatim): `fb draw display qtfb

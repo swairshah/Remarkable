@@ -58,17 +58,22 @@ Reuses the existing `id_sync_dropbear_ed25519` key. `--exclude '*.tmp'`
 because alt-ui saves tmp-then-rename. Runs on a 3-min timer (its own unit,
 independent of notebook's).
 
-### 2. Web viewer at the root  *(fork notebook's viewer)*
-`remarkable.exe.xyz/` serves the alt-ui SPA:
-- **Home:** doc grid from nginx's JSON autoindex of `.../alt-ui/docs/`,
-  showing folders + notebooks + books (reads each `meta.json`; folders
-  from the `folder` field, matching the tablet).
+### 2. Web viewer at `/paper/`  *(fork notebook's viewer)*
+`remarkable.exe.xyz/paper/` serves the alt-ui SPA:
+- **Home:** one server-local `/paper/api/library` request merges the mirror +
+  inbound trees and returns metadata, state sequence, versions, covers and
+  existing ink paths. Stale/half-consumed directories are ignored locally on
+  the VM instead of becoming long-distance 404s.
+- **Covers:** the service caches a compact WebP derivative of the tablet's
+  existing `thumb.png` (first raster page fallback for a fresh web upload).
 - **Open a doc:** notebook pages render as vector canvas (user black, pi
   blue — same renderer/format as notebook's viewer); book pages render
   the pre-rendered `pages/NNNN.png` raster with the ink overlay on top.
-- Polls 20s, refetches only mtime-changed files. Read-only for now; a
-  hidden write path is stubbed for later editing.
-- `/notebook/` and `/updates/` are untouched; only root's `302` changes.
+- The visible home view conditionally checks the ETagged manifest every 60s;
+  polling stops while reading or while the tab is hidden. Page raster + ink
+  load concurrently, nonexistent ink is never requested, and versioned assets
+  are immutable in the browser.
+- `/notes/`, `/notebook/` and `/updates/` are untouched.
 
 ### 3. Inbound drop + VM PDF render  *(net-new)*
 - A drop-zone on the page POSTs the file to `POST /alt-ui/upload`.
@@ -78,8 +83,9 @@ independent of notebook's).
     on the VM) → a book bundle in `.../alt-ui-inbound/docs/<slug>/`.
   - a `.tar`/`.zip` of a `docs/<id>/` tree → unpacked into inbound docs/.
   - (later: image → single-page book.)
-- nginx adds `location = /` (viewer), `location /alt-ui/data/`
-  (JSON autoindex — the viewer's API), `location /alt-ui/upload`
+- nginx adds `location /paper/` (viewer), `/paper/data/` + `/paper/inbound/`
+  (static document assets), `/paper/api/` (manifest/covers/crop jobs), and
+  `location /paper/upload`
   (proxy to the node service).
 
 ### 4. Tablet pull  *(net-new)*
