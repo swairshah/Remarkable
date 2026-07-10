@@ -16,7 +16,6 @@ pub fn dir() -> String {
 pub struct XDoc {
     pub uuid: String,
     pub name: String,
-    pub parent: String, /* folder uuid, "" root, "trash" */
     pub kb: u64,
     pub mtime: u64, /* xochitl lastModified, ms */
 }
@@ -53,32 +52,12 @@ pub fn scan_pdfs() -> Vec<XDoc> {
         out.push(XDoc {
             uuid: uuid.to_string(),
             name: meta["visibleName"].as_str().unwrap_or(uuid).trim().to_string(),
-            parent,
             kb: pdf.len() / 1024,
             mtime,
         });
     }
     out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
     out
-}
-
-/// The uuid of the folder named `name` (case-insensitive), if it exists.
-pub fn folder_uuid(name: &str) -> Option<String> {
-    let base = dir();
-    let want = name.to_lowercase();
-    for e in std::fs::read_dir(&base).ok()?.flatten() {
-        let fname = e.file_name().to_string_lossy().to_string();
-        let Some(uuid) = fname.strip_suffix(".metadata") else { continue };
-        let Some(meta) = read_meta(&base, uuid) else { continue };
-        if meta["type"].as_str() == Some("CollectionType")
-            && !meta["deleted"].as_bool().unwrap_or(false)
-            && meta["parent"].as_str().unwrap_or("") != "trash"
-            && meta["visibleName"].as_str().unwrap_or("").trim().to_lowercase() == want
-        {
-            return Some(uuid.to_string());
-        }
-    }
-    None
 }
 
 pub fn pdf_path(uuid: &str) -> String {

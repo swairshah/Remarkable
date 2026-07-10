@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly notes-PDF import attempt (self-gated to one network pull/day)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+AccuracySec=5min
+Unit=remarkable-notes-pull.service
+
+[Install]
+WantedBy=timers.target

@@ -87,19 +87,60 @@ pub fn suspend_count() -> u64 {
 /// After resume, Wi-Fi is often stranded: wpa_supplicant fails a few attempts
 /// while the radio settles and marks the network TEMP-DISABLED, and with
 /// xochitl stopped nobody clears it. pi needs the network, so nudge it back —
-/// detached, best-effort.
+/// detached, best-effort. Once the link is up, pull inbound work from the VM
+/// (web-dropped docs, rendered notes) — sync is event-driven now, and wake
+/// is the "pull" event.
 pub fn wifi_heal() {
     let script = "for i in 1 2 3 4 5 6 7 8 9 10; do \
         state=$(wpa_cli -i wlan0 status 2>/dev/null | grep ^wpa_state | cut -d= -f2); \
-        [ \"$state\" = COMPLETED ] && exit 0; \
+        [ \"$state\" = COMPLETED ] && break; \
         wpa_cli -i wlan0 enable_network all >/dev/null 2>&1; \
         wpa_cli -i wlan0 reassociate >/dev/null 2>&1; \
         sleep 3; \
-        done";
+        done; \
+        [ \"$state\" = COMPLETED ] || exit 1; \
+        systemctl start rm-sync-wake.service 2>/dev/null && exit 0; \
+        [ -x /home/root/bin/rm-sync-wake.sh ] && exec /home/root/bin/rm-sync-wake.sh; \
+        exit 0";
     let _ = std::process::Command::new("sh")
         .arg("-c")
         .arg(script)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+/// Push local changes to the VM right before suspend (the sleep page is
+/// already on the panel, so this is invisible time). Bounded: the script
+/// runs in its own process group and the whole group is killed at the
+/// deadline — a dead network must never stall sleep.
+pub fn sync_flush(deadline: std::time::Duration) {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new("/home/root/bin/rm-sync-flush.sh");
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    let Ok(mut child) = cmd.spawn() else { return };
+    let t0 = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => {}
+        }
+        if t0.elapsed() >= deadline {
+            let pid = child.id() as i32;
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+            let _ = child.wait();
+            println!("collab: sync flush timed out; sleeping anyway");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }

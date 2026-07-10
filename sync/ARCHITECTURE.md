@@ -13,7 +13,7 @@ pipeline (`server/`), and the device-side files (`tablet/`).
 
 ```
 ┌─ reMarkable tablet ────────────────────────────────────────────────┐
-│  systemd timer (every 5 min)                                       │
+│  event-driven: sleep-flush + wake-pull (30-min timer backstop)     │
 │    └─ remarkable-push-sync.sh                                      │
 │         rsync -az --delete  ~/.local/share/remarkable/xochitl/     │
 │              │                                                     │
@@ -66,8 +66,12 @@ points at the tablet's LAN IP (changes occasionally — update `Hostname` there)
 
 | File | Installed to | Role |
 |---|---|---|
-| `tablet/bin/remarkable-push-sync.sh` | `/home/root/bin/` | The push itself |
-| `tablet/systemd/remarkable-push-sync.timer` | `/etc/systemd/system/` | Fires 3 min after boot, then every 5 min |
+| `tablet/bin/remarkable-push-sync.sh` | `/home/root/bin/` | The push itself (exits network-free when nothing changed since the last stamp) |
+| `tablet/bin/remarkable-notes-pull.sh` | `/home/root/bin/` | Pulls notes PDFs back, imports into stock xochitl (wake path + hourly backstop timer, one network pull/day) |
+| `tablet/systemd/remarkable-notes-pull.{service,timer}` | `/etc/systemd/system/` | Hourly import backstop — covers stock-app-only days when the wake path never fires |
+| `tablet/bin/rm-sync-flush.sh` | `/home/root/bin/` | Pre-suspend push — the takeover apps run it (bounded) before `systemctl suspend` |
+| `tablet/bin/rm-sync-wake.sh` | `/home/root/bin/` | Post-resume pull — the apps' wifi-heal chains it once wlan0 is up |
+| `tablet/systemd/remarkable-push-sync.timer` | `/etc/systemd/system/` | Backstop only: 3 min after boot, then every 30 min (real triggers: edit/sleep/wake) |
 | `tablet/systemd/remarkable-push-sync.service` | `/etc/systemd/system/` | Oneshot, low priority (`Nice=10`, best-effort IO) |
 
 `remarkable-push-sync.sh` does three things:
@@ -190,6 +194,52 @@ publishing run: `diffs.jsonl` (per-run JSON with per-page detail) and
 `changed-pages/<runstamp>/` (PNGs of exactly the pages that changed, newest
 15 runs kept).
 
+### Notes round-trip — Shelley's posts back to the device
+
+The only data that flows *toward* the tablet, and it still rides the
+tablet's own timer (the server never initiates anything):
+
+1. **Markdown twin.** Shelley writes each daily post twice:
+   `index.html` for the web and `index.md` (pandoc markdown: YAML `title:`,
+   TeX math, `::: aside` divs, answers as a plain `## Answers` section —
+   no `<details>`).
+2. **Render.** `notes-pdf-export.sh` (called at the end of every
+   `remarkable-post-sync.sh` run) sha256-diffs each `index.md` against
+   `.rendered.state` and renders changed ones with `notes-md2pdf.sh` — a
+   server port of the local Clippings `md2pdf.sh --rm2` preset: 157×210mm
+   pages, 13pt Reader/EB Garamond body, Google Sans Code mono, pandoc
+   `--mathml` (native Chrome math, immune to MathJax's shrink-to-fit
+   problem), and a post-layout JS pass that scales down any display
+   equation/table/pre that would overflow the page. Output:
+   `~/remarkable-exports/notes-pdf/YYYY-MM-DD.pdf` + `manifest.sha256`.
+   Fonts ship from the dev machine at deploy time to `~/.local/share/fonts`;
+   chrome comes from Google's .deb (the VM has no snapd), math fallback
+   glyphs from `fonts-stix`/`fonts-lmodern`.
+3. **Pull + import.** `remarkable-notes-pull.sh` has two triggers: the
+   apps' wake heal (`rm-sync-wake.sh`) and its own hourly backstop timer
+   (`remarkable-notes-pull.timer` — needed because the wake path only fires
+   from the takeover apps, so a stock-xochitl-only day would otherwise
+   never import). Both are cheap: after one successful pull per day the
+   script exits network-free (`.notes-pull-day` marker; `NOTES_PULL_FORCE=1`
+   bypasses). A run rsync-pulls the PDF dir, then imports **finalized posts
+   only**
+   (dated strictly before today — Shelley keeps editing today's, and a
+   changing PDF would shift pages under any annotations). Import = write
+   `<uuid>.pdf` + minimal `.content` + `.metadata` (parent = the `notes`
+   folder, found by name or created once) straight into the xochitl store,
+   tracked in `notes-import.state` so re-imports update in place instead of
+   duplicating. xochitl only scans its store at startup, so the script
+   restarts it — but only when something was actually imported, and never
+   before 5 AM (`IMPORT_AFTER_HOUR`) so a late-night writing session is
+   never interrupted. Net cadence: one restart on the first pull after
+   5 AM whenever yesterday's post exists — the imported docs then flow
+   back into the server mirror on the next push like any other document.
+
+   Both oneshot services carry `TimeoutStartSec=180`: dropbear ssh has no
+   connect timeout, and a hung oneshot blocks its timer forever (observed
+   once: a sync straddling the hotspot outage wedged for 16 h and silently
+   stopped all syncing).
+
 ## Stage 3 — Web serving (`server/nginx/`, `server/web/`)
 
 nginx runs natively on the VM (no docker), listening on **port 8000**; the
@@ -219,7 +269,7 @@ tablet: `pages/page-NNNN.json` (vector strokes, coords ×10, `g:0` = user ink,
 `g>0` = pi's ink), `library/*.md` (pi-curated articles with frontmatter),
 `AGENT.md` (pi's standing instructions), `sessions/*.jsonl` (raw pi
 transcripts), `settings.json`. The push script mirrors that directory to
-`~/remarkable-backup/notebook-app/` on every 5-minute sync (`*.tmp` excluded —
+`~/remarkable-backup/notebook-app/` on every push (`*.tmp` excluded —
 the app writes-then-renames page saves).
 
 No server-side processing at all: the viewer SPA fetches the nginx JSON
@@ -269,6 +319,7 @@ content dirs. Flags/env:
 | `~/remarkable-backup/xochitl/` | rsync mirror of the tablet's document store |
 | `~/remarkable-exports/Notebook/` | `pages_png/`, `pages_jpg/`, `Notebook.pdf`, copied `.content`/`.metadata`, `export.log` |
 | `~/remarkable-exports/activity-agent/` | agent state: `last-state.json`, `latest.md`, `history.jsonl`, `run.log` |
+| `~/remarkable-exports/notes-pdf/` | rendered notes PDFs, `manifest.sha256`, `.rendered.state`, `export.log` |
 | `~/notes/updates/index.html` | published activity digest (`/updates/`) |
 | `~/notes-server/` | nginx config + viewer html |
 | `~/.env` | `OPENROUTER_API_KEY` for the activity agent |

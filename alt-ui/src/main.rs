@@ -2659,13 +2659,17 @@ fn sleep_cycle(
     pen: &mut Option<Pen>,
     touchdev: &mut Option<touch::TouchDevice>,
 ) {
-    println!("paper: sleeping (power button)");
+    println!("paper: sleeping");
     if let Screen::Doc(dv) = &mut app.screen {
         dv.doc.save_all();
     }
     let saved = app.show_sleep_page();
     app.disp.full_refresh();
     std::thread::sleep(Duration::from_millis(800));
+    /* flush local changes to the VM while the sleep page settles — sync is
+     * event-driven (edit / sleep / wake), not timer-driven, to keep the
+     * radio quiet; bounded so a dead network can't stall sleep */
+    power::sync_flush(Duration::from_secs(45));
     let count0 = power::suspend_count();
     let mut attempts = 0;
     'sleeping: loop {
@@ -2748,6 +2752,18 @@ fn main() -> std::process::ExitCode {
     };
     let mut power_grace = Instant::now();
 
+    /* Idle auto-suspend (takeover only — windowed mode leaves it to
+     * xochitl). Stock xochitl sleeps after ~10 min idle; we took the power
+     * button, so we owe the battery the same courtesy. Tunable via
+     * PAPER_AUTO_SLEEP_MIN (minutes), 0 disables. */
+    let auto_sleep_min: u64 = std::env::var("PAPER_AUTO_SLEEP_MIN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+    let auto_sleep = (powerdev.is_some() && auto_sleep_min > 0)
+        .then(|| Duration::from_secs(auto_sleep_min * 60));
+    let mut last_activity = Instant::now();
+
     let sock = sock_path();
     let ipc = IpcServer::open(&sock)
         .map_err(|e| eprintln!("paper: tool socket: {e} — pi gets no tools"))
@@ -2810,7 +2826,12 @@ fn main() -> std::process::ExitCode {
     }
 
     while RUNNING.load(Ordering::Relaxed) {
-        let timeout = next_timeout(&app);
+        let mut timeout = next_timeout(&app);
+        if let Some(limit) = auto_sleep {
+            /* wake the poll for the idle deadline — it blocks forever otherwise */
+            let ms = limit.saturating_sub(last_activity.elapsed()).as_millis() as i32;
+            timeout = if timeout < 0 { ms.max(0) } else { timeout.min(ms.max(0)) };
+        }
         let mut pfds: Vec<libc::pollfd> = vec![
             libc::pollfd { fd: app.disp.raw_fd(), events: libc::POLLIN, revents: 0 },
             libc::pollfd { fd: pen.as_ref().map_or(-1, |p| p.raw_fd()), events: libc::POLLIN, revents: 0 },
@@ -2836,6 +2857,7 @@ fn main() -> std::process::ExitCode {
                     sleep_cycle(&mut app, p, &mut pen, &mut touchdev);
                     power_grace = Instant::now() + Duration::from_secs(3);
                 }
+                last_activity = Instant::now();
             }
         }
 
@@ -2846,6 +2868,9 @@ fn main() -> std::process::ExitCode {
                 p.drain(|p, phase| {
                     frames.push((phase, p.sx, p.sy, p.pressure, p.rubber));
                 });
+                if !frames.is_empty() {
+                    last_activity = Instant::now();
+                }
                 if direct_pen {
                     for (phase, x, y, pr, rub) in frames {
                         app.route_pen(phase, x, y, pr, rub);
@@ -2860,6 +2885,9 @@ fn main() -> std::process::ExitCode {
                 /* no 5-finger quit (a writing palm reads as 5+ contacts) —
                  * the top-edge swipe -> CLOSE is the exit */
                 let (evs, _quit) = t.drain();
+                if !evs.is_empty() {
+                    last_activity = Instant::now();
+                }
                 for e in evs {
                     app.route_touch(e.phase, e.x, e.y);
                 }
@@ -2991,6 +3019,23 @@ fn main() -> std::process::ExitCode {
         app.maybe_send_page();
         app.check_pi_health();
         app.thumb_tick();
+
+        /* -- idle auto-suspend -- */
+        if let (Some(limit), Some(p)) = (auto_sleep, powerdev.as_mut()) {
+            /* deferred while pi is mid-turn (streaming/working clear on End,
+             * and the stall watchdog kills a wedged turn, so this can't
+             * hold the device awake forever) */
+            if !app.streaming
+                && !app.working
+                && last_activity.elapsed() >= limit
+                && Instant::now() >= power_grace
+            {
+                println!("paper: idle {auto_sleep_min}min -> auto-sleep");
+                sleep_cycle(&mut app, p, &mut pen, &mut touchdev);
+                power_grace = Instant::now() + Duration::from_secs(3);
+                last_activity = Instant::now();
+            }
+        }
     }
 
     println!("paper: exiting");

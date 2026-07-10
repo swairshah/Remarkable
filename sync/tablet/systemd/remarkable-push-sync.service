@@ -6,6 +6,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/home/root/bin/remarkable-push-sync.sh
+# dropbear ssh has no connect timeout: a sync that straddles a suspend can
+# hang on a dead TCP link forever, wedging the oneshot and stopping all
+# future timer runs (observed: 16h hang). systemd reaps the whole cgroup.
+TimeoutStartSec=180
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7

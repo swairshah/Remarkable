@@ -1,0 +1,14 @@
+[Unit]
+Description=Pull rendered daily-notes PDFs into stock xochitl
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/root/bin/remarkable-notes-pull.sh
+# Same rationale as remarkable-push-sync.service: dropbear ssh has no
+# connect timeout, and a wedged oneshot blocks its timer forever.
+TimeoutStartSec=180
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

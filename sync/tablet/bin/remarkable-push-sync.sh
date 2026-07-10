@@ -20,7 +20,16 @@ HOOK_CMD="/home/exedev/bin/remarkable-post-sync.sh auto Notebook"
 
 mkdir -p "$LOG_DIR"
 
-# keep the log bounded (the timer fires every 5 minutes, forever)
+# Short-circuit: if nothing changed since the last successful push, don't
+# touch the network at all (the timer is only a backstop now — the real
+# triggers are edit/sleep/wake, and a clean backstop run must be free).
+STAMP="$LOG_DIR/.last-push"
+if [ -f "$STAMP" ] && \
+   [ -z "$(find "$SRC" "$NB_SRC" -newer "$STAMP" -print 2>/dev/null | head -n 1)" ]; then
+  exit 0
+fi
+
+# keep the log bounded
 if [ -f "$LOG_FILE" ] && [ "$(wc -l < "$LOG_FILE")" -gt 2000 ]; then
   tail -n 1000 "$LOG_FILE" > "$LOG_FILE.trim" && mv "$LOG_FILE.trim" "$LOG_FILE"
 fi
@@ -51,7 +60,13 @@ if [ -d "$NB_SRC" ]; then
   echo "$NB_OUT" | grep -E "transferred:|Total bytes sent" >> "$LOG_FILE" || true
 fi
 
+# both trees pushed (xochitl strictly, notebook best-effort) — mark the round
+touch "$STAMP"
+
 # Run remote post-sync hook
 "$SSH_BIN" -y -i "$KEY" "${DEST_USER}@${DEST_HOST}" "$HOOK_CMD" >> "$LOG_FILE" 2>&1 || true
+
+# (remarkable-notes-pull.sh moved to the wake path — rm-sync-wake.sh —
+# so a pure push stays a pure push)
 
 echo "[$(date)] sync done" >> "$LOG_FILE"

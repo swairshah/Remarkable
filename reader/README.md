@@ -24,13 +24,13 @@ Most pauses it replies `pass` — the default is silence.
 button lists every PDF in the stock app's library — tap one and the
 tablet renders it in the background (~0.5 s/page) with a bundled `mutool`
 (MuPDF, the same engine the desk pipeline uses; one-time
-`make fetch-mutool deploy-mutool`). Better yet, make a folder called
-**`Reader`** in the stock app: anything you drop there — from the phone
-app, the browser extension, the desktop app — auto-imports the next time
-the reader checks (at launch and every few minutes). That's the sync
-story: reMarkable's own cloud carries the file to the tablet, the tablet
-does the rest. `reader --import-cli <name>` runs the same pipeline
-headless over ssh.
+`make fetch-mutool deploy-mutool`). reMarkable's own cloud is still the
+transport: drop a PDF into the stock app from the phone app, the browser
+extension, or the desktop app, then tap it in `IMPORT +` once it lands.
+Importing is always explicit — there is deliberately no folder watcher
+(an earlier auto-importer re-imported in a loop and shredded bundles
+whenever it was interrupted mid-build). `reader --import-cli <name>` runs
+the same pipeline headless over ssh.
 
 **From your computer** (faster for bulk, and the only way to get custom
 margins today):

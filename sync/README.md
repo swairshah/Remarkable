@@ -14,15 +14,17 @@ For the full architecture walkthrough see [ARCHITECTURE.md](ARCHITECTURE.md).
  │                                                                                   │
  │   /home/root/.local/share/remarkable/xochitl/      (raw notebook state)           │
  │                         │                                                         │
- │                         │  every 5 min via systemd timer                          │
+ │                         │  on sleep-flush / wake, 30-min timer backstop           │
  │                         ▼                                                         │
  │   tablet/bin/remarkable-push-sync.sh                                              │
  │     · rsync --delete to exedev@remarkable.exe.xyz:~/remarkable-backup/xochitl/    │
  │     · ssh exedev@remarkable.exe.xyz ~/bin/remarkable-post-sync.sh auto Notebook   │
  │                                                                                   │
- │   Scheduled by:                                                                   │
- │     tablet/systemd/remarkable-push-sync.timer   (OnUnitActiveSec=5min)            │
- │     tablet/systemd/remarkable-push-sync.service (ExecStart=.../push-sync.sh)      │
+ │   Triggered by (battery-first, event-driven):                                     │
+ │     apps' sleep flush        tablet/bin/rm-sync-flush.sh  (push before suspend)   │
+ │     apps' wake heal          tablet/bin/rm-sync-wake.sh   (pull after resume)     │
+ │     backstop timer           remarkable-push-sync.timer   (OnUnitActiveSec=30min, │
+ │                              exits network-free when nothing changed)             │
  │                                                                                   │
  └───────────────────────────────────┬───────────────────────────────────────────────┘
                                      │  rsync + ssh trigger
@@ -72,7 +74,8 @@ sync/
 │   └── deploy-server.sh                     build agent bundle, push server files, reload nginx
 ├── tablet/                                  ── runs on the reMarkable ──
 │   ├── bin/
-│   │   └── remarkable-push-sync.sh          rsync + remote export trigger
+│   │   ├── remarkable-push-sync.sh          rsync + remote export trigger
+│   │   └── remarkable-notes-pull.sh         pull notes PDFs, import into stock app
 │   └── systemd/
 │       ├── remarkable-push-sync.service
 │       └── remarkable-push-sync.timer       cadence (OnUnitActiveSec=)
@@ -81,7 +84,9 @@ sync/
     │   ├── remarkable-post-sync-by-name.sh    pick latest doc by visibleName, export
     │   ├── remarkable-post-sync.sh            export + activity agent hook (active)
     │   ├── remarkable-activity-agent.ts       LLM digest agent (bundled to .js at deploy)
-    │   └── remarkable-activity-agent-hook.sh  hook entrypoint (supports -p prompt)
+    │   ├── remarkable-activity-agent-hook.sh  hook entrypoint (supports -p prompt)
+    │   ├── notes-md2pdf.sh                    markdown → reMarkable-ready PDF (pandoc+chrome)
+    │   └── notes-pdf-export.sh                render changed notes posts + manifest
     ├── nginx/
     │   └── default.conf                     nginx site (installed to sites-available)
     └── web/
@@ -105,6 +110,29 @@ feed (`diffs.jsonl` + `changed-pages/` images), keep a journal at
 `~/remarkable-journal.md`, and maintain a daily post with practice exercises
 at https://remarkable.exe.xyz/notes/. See ARCHITECTURE.md for details.
 
+## Notes → PDF → back to the tablet
+
+Shelley's daily posts round-trip to the device as typeset PDFs:
+
+1. Shelley writes each post twice: `index.html` (web) and `index.md`
+   (pandoc markdown twin, per `server/shelley/AGENTS.md`).
+2. `notes-pdf-export.sh` (end of every post-sync) renders changed
+   `index.md` files with `notes-md2pdf.sh` — a port of the local Clippings
+   `md2pdf.sh --rm2` preset (157×210mm, Reader/EB Garamond + Google Sans
+   Code, native MathML, overflow auto-shrink) — into
+   `~/remarkable-exports/notes-pdf/YYYY-MM-DD.pdf` + `manifest.sha256`.
+3. On the tablet, `remarkable-notes-pull.sh` (wake path via
+   `rm-sync-wake.sh`, plus an hourly `remarkable-notes-pull.timer`
+   backstop for stock-app-only days; self-gated to one network pull per
+   day) rsync-pulls that directory and imports **finalized posts only**
+   (dated before today) into the stock app under a `notes` folder,
+   as "Notes YYYY-MM-DD". xochitl is restarted only when something new
+   was imported, and never before 5 AM (`IMPORT_AFTER_HOUR`).
+
+Net effect: each morning, yesterday's exercises appear in `notes/` on the
+device; the document never changes afterward, so on-tablet annotations
+stay aligned.
+
 ## Where to make a change
 
 | I want to change... | Edit | Deploy |
@@ -118,6 +146,9 @@ at https://remarkable.exe.xyz/notes/. See ARCHITECTURE.md for details.
 | Notebook-app live viewer (`/notebook/`) | `server/web/notebook/index.html` | `deploy/deploy-server.sh` |
 | Digest page: UI, fonts, history, `--rerender` | `server/bin/remarkable-activity-agent.ts` | `deploy/deploy-server.sh` (builds the bundle) |
 | Activity summary prompt/model/output | `server/bin/remarkable-activity-agent-hook.sh` (`-p`, `MODEL`, `OUTPUT_HTML`) | `deploy/deploy-server.sh` |
+| Notes-PDF typography (page size, fonts, margins) | `server/bin/notes-md2pdf.sh` (`RM_*` env knobs) | `deploy/deploy-server.sh` |
+| Notes-PDF import policy (folder name, quiet hours) | `tablet/bin/remarkable-notes-pull.sh` | `deploy/deploy-tablet.sh` |
+| What Shelley puts in the markdown twin | `server/shelley/AGENTS.md` | `deploy/deploy-server.sh` |
 
 ## Deploy
 
@@ -202,6 +233,12 @@ ssh exedev@remarkable.exe.xyz '~/bin/remarkable-post-sync-by-name.sh Notebook'
 
 # Re-render the digest page after design changes (no LLM call)
 ssh exedev@remarkable.exe.xyz 'node ~/bin/remarkable-activity-agent.js --rerender'
+
+# Render notes posts → PDFs on the server (only changed ones re-render)
+ssh exedev@remarkable.exe.xyz '~/bin/notes-pdf-export.sh'
+
+# Force the tablet to pull + import finalized notes PDFs now
+ssh remarkable /home/root/bin/remarkable-notes-pull.sh
 
 # Verify the digest + viewer
 curl -sI https://remarkable.exe.xyz/updates/

@@ -1,7 +1,10 @@
 # alt-ui bidirectional web sync — plan
 
-Status: **awaiting go-ahead to build.** Nothing here touches the VM or
-tablet until explicitly deployed.
+Status: **built and deployed.** One later revision (2026-07-10): the
+periodic timer described below was retired for battery life — sync is now
+event-driven (Paper's debounced on-edit sync, push via `rm-sync-flush.sh`
+before suspend, pull via `rm-sync-wake.sh` after resume), and
+`alt-ui-sync.sh` grew `pull|push|both` modes.
 
 ## Model: mirror out, drop-to-add in
 

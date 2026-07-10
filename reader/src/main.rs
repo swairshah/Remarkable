@@ -190,10 +190,6 @@ const IMP_BTN_H: i32 = 64;
 const IMP_ROW_H: i32 = 100;
 const IMP_ROWS: usize = ((FB_H - 40 - HOME_LIST_Y0) / IMP_ROW_H) as usize;
 
-/* the xochitl folder that auto-imports (checked at launch + periodically) */
-const WATCH_FOLDER: &str = "Reader";
-const WATCH_EVERY: Duration = Duration::from_secs(300);
-
 /* hold a finger on a book row this long -> the delete confirmation */
 const HOLD_MS: u128 = 650;
 const DEL_W: i32 = 960;
@@ -286,7 +282,6 @@ struct App {
     importer: Option<import::Importer>,
     import_queue: VecDeque<import::Job>,
     import_shown: (usize, usize),   /* progress last painted */
-    last_watch: Option<Instant>,    /* watched-folder check */
 
     takeover: bool,
     ink_flush: Duration,
@@ -492,7 +487,6 @@ impl App {
         self.shelf_top = 0;
         self.render_home(true);
         println!("reader: home ({} books)", self.shelf.len());
-        self.check_watch_folder();
     }
 
     fn render_home(&mut self, flash: bool) {
@@ -914,29 +908,6 @@ impl App {
             3,
             BLACK,
         );
-    }
-
-    /// Auto-import: anything in the xochitl folder WATCH_FOLDER that is
-    /// not already a book gets queued. Cheap; runs at launch, on go-home,
-    /// and every few minutes.
-    fn check_watch_folder(&mut self) {
-        self.last_watch = Some(Instant::now());
-        if !import::available() {
-            return;
-        }
-        let Some(folder) = xochitl::folder_uuid(WATCH_FOLDER) else { return };
-        for d in xochitl::scan_pdfs() {
-            if d.parent != folder || self.import_state_of(&d.name).is_some() {
-                continue;
-            }
-            println!("reader: '{}' appeared in {WATCH_FOLDER}/ — auto-importing", d.name);
-            let job = import::Job {
-                uuid: d.uuid.clone(),
-                title: d.name.trim_end_matches(".pdf").to_string(),
-                slug: xochitl::slugify(&d.name),
-            };
-            self.enqueue_import(job);
-        }
     }
 
     fn open_book(&mut self, slug: &str) {
@@ -2340,13 +2311,17 @@ fn sleep_cycle(
     pen: &mut Option<Pen>,
     touchdev: &mut Option<touch::TouchDevice>,
 ) {
-    println!("reader: sleeping (power button)");
+    println!("reader: sleeping");
     if let Some(b) = app.book.as_mut() {
         b.save_all();
     }
     let saved = app.show_sleep_page();
     app.disp.full_refresh();
     std::thread::sleep(Duration::from_millis(800));
+    /* flush local changes to the VM while the sleep page settles — sync is
+     * event-driven (edit / sleep / wake), not timer-driven, to keep the
+     * radio quiet; bounded so a dead network can't stall sleep */
+    power::sync_flush(Duration::from_secs(45));
     let count0 = power::suspend_count();
     let mut attempts = 0;
     'sleeping: loop {
@@ -2485,6 +2460,18 @@ fn main() -> std::process::ExitCode {
     };
     let mut power_grace = Instant::now();
 
+    /* Idle auto-suspend (takeover only — windowed mode leaves it to
+     * xochitl). Stock xochitl sleeps after ~10 min idle; we took the power
+     * button, so we owe the battery the same courtesy. Tunable via
+     * READER_AUTO_SLEEP_MIN (minutes), 0 disables. */
+    let auto_sleep_min: u64 = std::env::var("READER_AUTO_SLEEP_MIN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+    let auto_sleep = (powerdev.is_some() && auto_sleep_min > 0)
+        .then(|| Duration::from_secs(auto_sleep_min * 60));
+    let mut last_activity = Instant::now();
+
     let (text_scale, last_book) = load_settings();
     let now = Instant::now();
     let mut app = App {
@@ -2500,7 +2487,6 @@ fn main() -> std::process::ExitCode {
         importer: None,
         import_queue: VecDeque::new(),
         import_shown: (0, 0),
-        last_watch: None,
         takeover,
         ink_flush: if takeover { INK_FLUSH_TAKEOVER } else { INK_FLUSH_QTFB },
         cur_stroke: None,
@@ -2540,10 +2526,14 @@ fn main() -> std::process::ExitCode {
     if app.book.is_none() {
         app.render_home(true);
     }
-    app.check_watch_folder();
 
     while RUNNING.load(Ordering::Relaxed) {
-        let timeout = next_timeout(&app);
+        let mut timeout = next_timeout(&app);
+        if let Some(limit) = auto_sleep {
+            /* wake the poll for the idle deadline — it blocks forever otherwise */
+            let ms = limit.saturating_sub(last_activity.elapsed()).as_millis() as i32;
+            timeout = if timeout < 0 { ms.max(0) } else { timeout.min(ms.max(0)) };
+        }
         let mut pfds: Vec<libc::pollfd> = vec![
             libc::pollfd { fd: app.disp.raw_fd(), events: libc::POLLIN, revents: 0 },
             libc::pollfd { fd: pen.as_ref().map_or(-1, |p| p.raw_fd()), events: libc::POLLIN, revents: 0 },
@@ -2569,6 +2559,7 @@ fn main() -> std::process::ExitCode {
                     sleep_cycle(&mut app, p, &mut pen, &mut touchdev);
                     power_grace = Instant::now() + Duration::from_secs(3);
                 }
+                last_activity = Instant::now();
             }
         }
 
@@ -2581,6 +2572,7 @@ fn main() -> std::process::ExitCode {
                 });
                 if seen {
                     app.last_pen = Some(Instant::now());
+                    last_activity = Instant::now();
                 }
                 if direct_pen {
                     for (phase, x, y, pr, rub) in frames {
@@ -2596,6 +2588,9 @@ fn main() -> std::process::ExitCode {
                 /* no 5-finger quit (a writing palm reads as 5+ contacts) —
                  * the top-edge swipe -> CLOSE is the exit */
                 let (evs, _quit) = t.drain();
+                if !evs.is_empty() {
+                    last_activity = Instant::now();
+                }
                 for e in evs {
                     app.touch(e.phase, e.x, e.y);
                 }
@@ -2665,12 +2660,6 @@ fn main() -> std::process::ExitCode {
             app.anim_tick();
         }
         app.tick_import();
-        if app.last_watch.is_none_or(|t| t.elapsed() >= WATCH_EVERY)
-            && app.cur_stroke.is_none()
-            && app.last_contact.is_none_or(|t| t.elapsed() > Duration::from_secs(2))
-        {
-            app.check_watch_folder();
-        }
         app.maybe_send_page();
         if app.indicator_until.is_some_and(|at| Instant::now() >= at) {
             app.clear_page_indicator();
@@ -2713,6 +2702,23 @@ fn main() -> std::process::ExitCode {
         if app.close_until.is_some_and(|at| Instant::now() >= at) {
             app.dismiss_close_button();
         }
+
+        /* -- idle auto-suspend -- */
+        if let (Some(limit), Some(p)) = (auto_sleep, powerdev.as_mut()) {
+            /* deferred while pi is mid-turn (streaming/working clear on End,
+             * and the stall watchdog kills a wedged turn, so this can't
+             * hold the device awake forever) */
+            if !app.streaming
+                && !app.working
+                && last_activity.elapsed() >= limit
+                && Instant::now() >= power_grace
+            {
+                println!("reader: idle {auto_sleep_min}min -> auto-sleep");
+                sleep_cycle(&mut app, p, &mut pen, &mut touchdev);
+                power_grace = Instant::now() + Duration::from_secs(3);
+                last_activity = Instant::now();
+            }
+        }
     }
 
     println!("reader: exiting");
@@ -2752,10 +2758,6 @@ fn next_timeout(app: &App) -> i32 {
     if app.importer.is_some() {
         /* mutool children finish without an fd to poll: wake regularly */
         soonest(Duration::from_millis(120));
-    }
-    if let Some(t0) = app.last_watch {
-        /* periodic watched-folder check must fire even when idle */
-        soonest(WATCH_EVERY.saturating_sub(t0.elapsed()));
     }
     match t {
         Some(d) => (d.as_millis() as i32).max(0),

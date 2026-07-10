@@ -708,11 +708,15 @@ fn sleep_cycle(
     pen: &mut Option<Pen>,
     touchdev: &mut Option<touch::TouchDevice>,
 ) {
-    println!("collab: sleeping (power button)");
+    println!("collab: sleeping");
     let saved = app.show_sleep_page();
     app.disp.full_refresh();
     /* let the flashing refresh finish before the panel loses power */
     std::thread::sleep(Duration::from_millis(800));
+    /* flush local changes to the VM while the sleep page settles — sync is
+     * event-driven (edit / sleep / wake), not timer-driven, to keep the
+     * radio quiet; bounded so a dead network can't stall sleep */
+    power::sync_flush(Duration::from_secs(45));
     /* Suspend, and confirm via the kernel's success counter: the EPD can
      * refuse to sleep while its post-update discharge timer runs (the whole
      * suspend aborts), so retry until it sticks. */
@@ -803,6 +807,18 @@ fn main() -> std::process::ExitCode {
      * (and key bounce) arrives on our grabbed fd and must not re-suspend */
     let mut power_grace = Instant::now();
 
+    /* Idle auto-suspend (takeover only — windowed mode leaves it to
+     * xochitl). Stock xochitl sleeps after ~10 min idle; we took the power
+     * button, so we owe the battery the same courtesy. Tunable via
+     * COLLAB_AUTO_SLEEP_MIN (minutes), 0 disables. */
+    let auto_sleep_min: u64 = std::env::var("COLLAB_AUTO_SLEEP_MIN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+    let auto_sleep = (powerdev.is_some() && auto_sleep_min > 0)
+        .then(|| Duration::from_secs(auto_sleep_min * 60));
+    let mut last_activity = Instant::now();
+
     /* reload the past conversation so scrolling up shows history */
     let mut entries = history::load();
     if entries.is_empty() {
@@ -862,7 +878,12 @@ fn main() -> std::process::ExitCode {
         /* poll the display socket (windowed), the pen hardware, pi's stdout,
          * and (takeover) the touch panel + power button; the timeout is
          * whichever pending flush comes due first. poll() ignores fd -1. */
-        let timeout = next_timeout(&app);
+        let mut timeout = next_timeout(&app);
+        if let Some(limit) = auto_sleep {
+            /* wake the poll for the idle deadline — it blocks forever otherwise */
+            let ms = limit.saturating_sub(last_activity.elapsed()).as_millis() as i32;
+            timeout = if timeout < 0 { ms.max(0) } else { timeout.min(ms.max(0)) };
+        }
         let mut pfds = [
             libc::pollfd { fd: app.disp.raw_fd(), events: libc::POLLIN, revents: 0 },
             libc::pollfd {
@@ -897,6 +918,7 @@ fn main() -> std::process::ExitCode {
                     sleep_cycle(&mut app, p, &mut pen, &mut touchdev);
                     power_grace = Instant::now() + Duration::from_secs(3);
                 }
+                last_activity = Instant::now();
             }
         }
 
@@ -909,6 +931,7 @@ fn main() -> std::process::ExitCode {
                 });
                 if seen {
                     app.last_pen = Some(Instant::now());
+                    last_activity = Instant::now();
                 }
                 if direct_pen {
                     for (phase, x, y, pr, rub) in frames {
@@ -925,6 +948,9 @@ fn main() -> std::process::ExitCode {
                 if quit {
                     println!("collab: 5-finger quit");
                     RUNNING.store(false, Ordering::Relaxed);
+                }
+                if !evs.is_empty() {
+                    last_activity = Instant::now();
                 }
                 for e in evs {
                     app.touch(e.phase, e.x, e.y);
@@ -998,6 +1024,21 @@ fn main() -> std::process::ExitCode {
         /* auto-hide an untapped CLOSE button */
         if app.close_until.is_some_and(|at| Instant::now() >= at) {
             app.dismiss_close_button();
+        }
+
+        /* -- idle auto-suspend -- */
+        if let (Some(limit), Some(p)) = (auto_sleep, powerdev.as_mut()) {
+            /* deferred while pi is mid-turn (streaming clears on End, so
+             * this can't hold the device awake forever) */
+            if !app.streaming
+                && last_activity.elapsed() >= limit
+                && Instant::now() >= power_grace
+            {
+                println!("collab: idle {auto_sleep_min}min -> auto-sleep");
+                sleep_cycle(&mut app, p, &mut pen, &mut touchdev);
+                power_grace = Instant::now() + Duration::from_secs(3);
+                last_activity = Instant::now();
+            }
         }
     }
 

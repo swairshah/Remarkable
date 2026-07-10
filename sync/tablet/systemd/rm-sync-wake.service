@@ -1,0 +1,15 @@
+[Unit]
+Description=Post-resume pull (web-dropped docs + rendered notes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/root/bin/rm-sync-wake.sh
+# same rationale as the push service: never let a dead link hang a pull;
+# also dedupes — a start while already running is a no-op, so repeated
+# wakes can't pile up stuck processes
+TimeoutStartSec=180
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

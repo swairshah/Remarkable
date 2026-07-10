@@ -1,10 +1,10 @@
 [Unit]
-Description=Run reMarkable push sync every 5 minutes
+Description=reMarkable push sync backstop (real triggers: edit/sleep/wake)
 
 [Timer]
 OnBootSec=3min
-OnUnitActiveSec=5min
-AccuracySec=1min
+OnUnitActiveSec=30min
+AccuracySec=5min
 Unit=remarkable-push-sync.service
 
 [Install]
