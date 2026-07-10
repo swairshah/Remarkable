@@ -57,7 +57,7 @@
 
   /* doc reader */
   .pages { display: flex; flex-direction: column; align-items: center; gap: 22px; }
-  .page { position: relative; width: 100%; max-width: 900px; background: var(--paper); box-shadow: 0 2px 14px rgba(0,0,0,.12); border-radius: 4px; overflow: hidden; }
+  .page { position: relative; width: 100%; max-width: 900px; aspect-ratio: 1404 / 1872; background: var(--paper); box-shadow: 0 2px 14px rgba(0,0,0,.12); border-radius: 4px; overflow: hidden; }
   .page canvas, .page img { display: block; width: 100%; height: auto; }
   .page .plabel { position: absolute; top: 8px; right: 12px; font-size: 11px; color: var(--muted); background: rgba(255,255,255,.7); padding: 1px 7px; border-radius: 9px; }
   .empty { color: var(--muted); text-align: center; padding: 80px 20px; }
@@ -73,6 +73,22 @@
   .addbtn:hover { border-color: var(--muted); }
   .ai-toggle { cursor: pointer; user-select: none; }
   .docbar { display:flex; align-items:center; gap:10px; margin: 0 auto 14px; max-width:900px; }
+
+  /* doc-view sidebar; shifts content right so it never overlaps. Below the
+     breakpoint the sidebar hides and the docbar button is the fallback. */
+  .docside { position:fixed; left:18px; top:116px; z-index:6; display:none; flex-direction:column; gap:7px; width:196px; }
+  @media (min-width:1000px) {
+    body.reading .docbar { display:none; }               /* sidebar is the control */
+    body.reading.sidebar .docside { display:flex; }       /* Cmd+B toggles the .sidebar class */
+    body.reading.sidebar main { margin-left:230px; }
+  }
+  .docside .sect { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.07em; margin:14px 6px 3px; }
+  .docside .sbtn { display:flex; align-items:center; gap:10px; padding:9px 12px; border:1px solid var(--line); background:var(--card); color:var(--accent); border-radius:9px; cursor:pointer; font:inherit; font-size:13px; text-align:left; width:100%; }
+  .docside .sbtn:hover { border-color:var(--muted); }
+  .docside .sbtn.active { background:var(--accent); color:var(--card); border-color:var(--accent); }
+  .docside .sbtn .ico { width:16px; text-align:center; opacity:.85; font-size:14px; }
+  .docside .sbtn .k { margin-left:auto; font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:1px 5px; }
+  .docside .sbtn.active .k { color:inherit; border-color:currentColor; opacity:.7; }
 
   /* ---- margin editor ---- */
   #med { position: fixed; inset: 0; z-index: 40; background: rgba(15,15,17,.86); display:none; }
@@ -250,6 +266,9 @@ function folderGlyph() {
 }
 async function renderHome() {
   state.open = null;
+  if (openDoc._io) { openDoc._io.disconnect(); openDoc._io = null; }
+  $('docside') && $('docside').remove();
+  document.body.classList.remove('reading', 'sidebar');
   $('crumb').textContent = state.folder ? '  ›  ' + state.folder : '';
   $('crumb').className = state.folder ? 'crumb' : '';
   const inFolder = state.folder;
@@ -294,10 +313,46 @@ async function renderHome() {
 }
 
 /* ---------- doc reader ---------- */
+// Esc from a book -> back to My files
+function goFiles() {
+  if (state.open) state.folder = state.open.meta.folder || null;
+  state.open = null;
+  $('docside') && $('docside').remove();
+  document.body.classList.remove('reading', 'sidebar');
+  renderHome();
+}
+// the sidebar's "Adjust margins" -> open the crop editor for the current book
+function openEditor() {
+  if (state.open && state.open.meta.kind === 'book') openMarginEditor(state.open);
+}
+// Cmd/Ctrl+B -> show/hide the doc-view sidebar
+function toggleSidebar() {
+  if (state.open) document.body.classList.toggle('sidebar');
+}
+// the doc-view sidebar (wide screens): navigation + per-doc actions
+function buildSidebar(d) {
+  $('docside') && $('docside').remove();
+  document.body.classList.remove('reading', 'sidebar');
+  const side = document.createElement('div'); side.id = 'docside'; side.className = 'docside';
+  const mk = (ico, label, key, on, active) => {
+    const b = document.createElement('button'); b.className = 'sbtn' + (active ? ' active' : '');
+    b.innerHTML = '<span class="ico">' + ico + '</span><span>' + esc(label) + '</span>' + (key ? '<span class="k">' + key + '</span>' : '');
+    b.onclick = on; return b;
+  };
+  side.appendChild(mk('‹', 'My files', 'esc', goFiles));
+  if (d.meta.kind === 'book') side.appendChild(mk('▦', 'Adjust margins', '', openEditor));
+  const ai = mk('✦', 'AI ink', '', null, state.aiBlue);
+  ai.onclick = () => { state.aiBlue = !state.aiBlue; ai.classList.toggle('active', state.aiBlue); if (state.open) openDoc(state.open); };
+  side.appendChild(ai);
+  document.body.appendChild(side);
+  document.body.classList.add('reading', 'sidebar');   // sidebar on by default (CSS makes room)
+}
+
 async function openDoc(d) {
   const st = await jfileB(d.base, 'docs/' + d.id + '/state.json');
   const seq = (st && st.seq) || [];
   state.open = { id: d.id, base: d.base, meta: d.meta, seq };
+  buildSidebar(d);
   $('crumb').innerHTML = '  ›  <span class="crumb" id="home-crumb">My files</span>  ›  ' + esc(d.meta.title || d.id);
   const hc = $('home-crumb'); if (hc) hc.onclick = () => { state.folder = d.meta.folder || null; renderHome(); };
 
@@ -312,17 +367,32 @@ async function openDoc(d) {
   }
   const wrap = document.createElement('div'); wrap.className = 'pages';
   $view.appendChild(wrap);
+  /* Lazy render: a big book has hundreds of pages — allocating a full-size
+   * canvas for each up front (~10 MB each) freezes the browser. Instead each
+   * page is just a sized div; a canvas is created + drawn only when the page
+   * nears the viewport, and freed again when it scrolls far away. */
+  if (openDoc._io) openDoc._io.disconnect();
+  const io = new IntersectionObserver((entries) => {
+    for (const en of entries) {
+      const p = en.target;
+      if (en.isIntersecting) {
+        if (!p._cv) {
+          const cv = document.createElement('canvas'); cv.width = PAGE_W; cv.height = PAGE_H;
+          p.insertBefore(cv, p.firstChild); p._cv = cv;
+          renderPage(cv, d.base, d.id, p._entry);
+        }
+      } else if (p._cv) { p._cv.remove(); p._cv = null; }
+    }
+  }, { rootMargin: '1200px 0px' });
+  openDoc._io = io;
   for (let i = 0; i < seq.length; i++) {
     const e = seq[i];
-    const page = document.createElement('div'); page.className = 'page';
-    const cv = document.createElement('canvas');
-    cv.width = PAGE_W; cv.height = PAGE_H;
-    page.appendChild(cv);
+    const page = document.createElement('div'); page.className = 'page'; page._entry = e;
     const lbl = document.createElement('div'); lbl.className = 'plabel';
     lbl.textContent = (i + 1) + ' / ' + seq.length + (e.p != null ? '  ·  p.' + (e.p + 1) : '');
     page.appendChild(lbl);
     wrap.appendChild(page);
-    renderPage(cv, d.base, d.id, e);
+    io.observe(page);
   }
 }
 
@@ -532,7 +602,16 @@ async function saveCrop() {
 function closeEditor() { const el = $('med'); el.className = ''; el.innerHTML = ''; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 window.addEventListener('resize', () => { if ($('med').classList.contains('show') && med.pageImg && $('med-stage')) { sizeStage(med.pageImg.naturalWidth, med.pageImg.naturalHeight); layoutBox(); } });
-window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('med').classList.contains('show')) closeEditor(); });
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if ($('med').classList.contains('show')) closeEditor();   // 1st Esc: close the crop editor
+    else if (state.open) goFiles();                           // 2nd (or in reader): back to My files
+    return;
+  }
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B')) {   // Cmd/Ctrl+B: toggle the sidebar
+    if (state.open) { e.preventDefault(); toggleSidebar(); }
+  }
+});
 
 /* ---------- poll / boot ---------- */
 async function refresh() {
