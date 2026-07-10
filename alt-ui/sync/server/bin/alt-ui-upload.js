@@ -40,7 +40,7 @@ const PY = '/home/exedev/alt-ui-venv/bin/python3';
 [INCOMING, DOCS, SOURCES, PREVIEWS].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
 const MAX_BYTES = 200 * 1024 * 1024;
-const DEFAULT_MARGINS = [40, 40, 40, 40];
+const DEFAULT_CROP = [0, 0, 1, 1];   // whole page (fractions 0..1)
 
 /* ---- helpers ---------------------------------------------------------- */
 function slugify(name) {
@@ -77,13 +77,13 @@ function readBody(req, res, cb) {
   });
   req.on('end', () => { if (!aborted) cb(Buffer.concat(chunks)); });
 }
-// stamp orig_margins (once) from the freshly-rendered margins in a bundle dir
-function setOrigMargins(docDir) {
+// stamp orig_crop (once) so "reset to original" always knows the starting crop
+function setOrigCrop(docDir) {
   try {
     const mp = path.join(docDir, 'meta.json');
     const meta = JSON.parse(fs.readFileSync(mp));
-    if (!meta.orig_margins && meta.margins) {
-      meta.orig_margins = meta.margins;
+    if (!meta.orig_crop) {
+      meta.orig_crop = meta.crop || DEFAULT_CROP;
       fs.writeFileSync(mp, JSON.stringify(meta));
     }
   } catch (_) {}
@@ -99,11 +99,11 @@ function handleUpload(req, res) {
     const out = freeDir(slugify(name));
     const id = path.basename(out);
     const title = name.replace(/\.pdf$/i, '');
-    execFile(RENDER, [tmp, out, title], { timeout: 180000 }, (err, so, se) => {
+    execFile(RENDER, [tmp, out, title, '0', '0', '1', '1'], { timeout: 180000 }, (err, so, se) => {
       if (err) { fs.unlink(tmp, () => {}); console.error('render failed:', se || err.message); res.writeHead(500); res.end('render failed: ' + (se || err.message)); return; }
       try { fs.copyFileSync(tmp, sourcePdf(id)); } catch (e) { console.error('source save failed', e); }
       fs.unlink(tmp, () => {});
-      setOrigMargins(out);
+      setOrigCrop(out);
       console.log('rendered', out, '(source retained)');
       json(res, 200, { ok: true, id });
     });
@@ -118,8 +118,8 @@ function handleSourceStatus(res, id) {
     ok: true,
     hasSource: fs.existsSync(sourcePdf(id)),
     pages: meta.pages || 0,
-    margins: meta.margins || DEFAULT_MARGINS,
-    orig: meta.orig_margins || meta.margins || DEFAULT_MARGINS,
+    crop: meta.crop || DEFAULT_CROP,
+    orig: meta.orig_crop || meta.crop || DEFAULT_CROP,
     title: meta.title || id,
   });
 }
@@ -165,29 +165,30 @@ function handleRender(req, res) {
   readBody(req, res, (buf) => {
     let body; try { body = JSON.parse(buf.toString('utf8')); } catch (_) { return json(res, 400, { ok: false, error: 'bad json' }); }
     const id = safeId(body.id);
-    const m = body.margins;
+    const c = body.crop;
     if (!id) return json(res, 400, { ok: false, error: 'bad id' });
-    if (!Array.isArray(m) || m.length !== 4 || !m.every((v) => Number.isFinite(v) && v >= 0))
-      return json(res, 400, { ok: false, error: 'margins must be 4 non-negative numbers' });
+    if (!Array.isArray(c) || c.length !== 4 || !c.every((v) => Number.isFinite(v) && v >= 0 && v <= 1)
+        || c[2] - c[0] < 0.05 || c[3] - c[1] < 0.05)
+      return json(res, 400, { ok: false, error: 'crop must be 4 fractions 0..1 (min 5% each way)' });
     const src = sourcePdf(id);
     if (!fs.existsSync(src)) return json(res, 404, { ok: false, error: 'no source PDF — attach one first' });
 
     const existing = readMeta(id) || {};
     const title = existing.title || id;
-    const orig = existing.orig_margins || existing.margins || DEFAULT_MARGINS;
-    // clamp to what mkbook accepts (its box_w>=400/box_h>=500 guard still applies)
-    const mr = m.map((v) => String(Math.max(0, Math.min(1000, Math.round(v)))));
+    const orig = existing.orig_crop || existing.crop || DEFAULT_CROP;
+    const ca = c.map((v) => String(v));
     const tmpOut = path.join(INCOMING, `render-${id}-${Date.now()}`);
-    execFile(RENDER, [src, tmpOut, title, mr[0], mr[1], mr[2], mr[3]], { timeout: 240000 }, (err, so, se) => {
+    execFile(RENDER, [src, tmpOut, title, ca[0], ca[1], ca[2], ca[3]], { timeout: 240000 }, (err, so, se) => {
       if (err) { fs.rmSync(tmpOut, { recursive: true, force: true }); console.error('re-render failed', se || err.message); return json(res, 500, { ok: false, error: String(se || err.message) }); }
       try {
         const dest = path.join(DOCS, id);
         fs.mkdirSync(dest, { recursive: true });
         const rendered = JSON.parse(fs.readFileSync(path.join(tmpOut, 'meta.json')));
         // start from the doc's live meta so title/folder/kind the tablet set
-        // survive; only overlay the render outputs + margins.
+        // survive; only overlay the render outputs + crop.
         const meta = { ...existing, pages: rendered.pages, w: rendered.w, h: rendered.h,
-                       margins: rendered.margins, orig_margins: orig };
+                       crop: rendered.crop, orig_crop: orig };
+        delete meta.margins;
         fs.writeFileSync(path.join(dest, 'meta.json'), JSON.stringify(meta));
         copyDir(path.join(tmpOut, 'pages'), path.join(dest, 'pages'));
         copyDir(path.join(tmpOut, 'text'), path.join(dest, 'text'));
@@ -197,8 +198,8 @@ function handleRender(req, res) {
           fs.copyFileSync(path.join(tmpOut, 'state.json'), path.join(dest, 'state.json'));
         fs.rmSync(tmpOut, { recursive: true, force: true });
       } catch (e) { fs.rmSync(tmpOut, { recursive: true, force: true }); console.error('deliver failed', e); return json(res, 500, { ok: false, error: String(e) }); }
-      console.log('re-rendered', id, 'margins', mr.join(','), '-> inbound');
-      json(res, 200, { ok: true, margins: m.map((v) => Math.round(v)) });
+      console.log('re-rendered', id, 'crop', ca.join(','), '-> inbound');
+      json(res, 200, { ok: true, crop: c });
     });
   });
 }

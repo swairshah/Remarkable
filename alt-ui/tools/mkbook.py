@@ -70,27 +70,39 @@ def write_png_gray(path: str, img: np.ndarray) -> None:
         f.write(chunk(b"IEND", b""))
 
 
+CROP_BORDER = 30  # device px of breathing room around a cropped page
+
+
 def build_book(pdf: str, out: str, title: str | None = None,
                dither: bool = False, margin: int = 40,
-               margins: tuple | None = None) -> str:
+               margins: tuple | None = None,
+               crop: tuple | None = None) -> str:
     """Render `pdf` into a bundle at `out`; returns the resolved title.
 
-    `margins` = (left, top, right, bottom) white border in device px;
-    any None falls back to `margin`. Asymmetric margins shift the page
-    like the stock app's page adjustment: e.g. right=220 anchors the
-    content left and leaves a fat right gutter for margin notes."""
+    Two placement modes:
+      `crop` = (cx0, cy0, cx1, cy1) fractions 0..1 of each source page to
+        KEEP; that region is scaled UP to fill the screen (with a small
+        border), so cropping a PDF's wasteful margins makes the text bigger.
+        This is what the web crop editor sends. Applied to every page.
+      `margins` = (left, top, right, bottom) white border in device px — the
+        whole page is scaled to fit inside (the CLI default). Asymmetric
+        margins shift the page like the stock app's page adjustment."""
     doc = fitz.open(pdf)
     n = doc.page_count
     if n == 0:
         raise ValueError("empty PDF")
-    ml, mt, mr, mb = ((margin, margin, margin, margin) if margins is None else
-                      tuple(margin if v is None else v for v in margins))
-    # cap generously (the box_w/box_h check below is the real guard); a low cap
-    # would make the web margin editor's live box diverge from the render.
-    ml, mt, mr, mb = (max(0, min(int(v), 1000)) for v in (ml, mt, mr, mb))
-    box_w, box_h = W - ml - mr, H - mt - mb
-    if box_w < 400 or box_h < 500:
-        raise ValueError(f"margins leave a {box_w}x{box_h} page box — too small")
+
+    if crop is not None:
+        cx0, cy0, cx1, cy1 = (min(max(float(v), 0.0), 1.0) for v in crop)
+        if cx1 - cx0 < 0.05 or cy1 - cy0 < 0.05:
+            raise ValueError(f"crop region {crop} too small")
+    else:
+        ml, mt, mr, mb = ((margin, margin, margin, margin) if margins is None else
+                          tuple(margin if v is None else v for v in margins))
+        ml, mt, mr, mb = (max(0, min(int(v), 1000)) for v in (ml, mt, mr, mb))
+        box_w, box_h = W - ml - mr, H - mt - mb
+        if box_w < 400 or box_h < 500:
+            raise ValueError(f"margins leave a {box_w}x{box_h} page box — too small")
 
     title = (title or "").strip() or ((doc.metadata or {}).get("title") or "").strip()
     title = title or re.sub(r"[-_]+", " ", os.path.splitext(os.path.basename(pdf))[0]).strip()
@@ -102,13 +114,27 @@ def build_book(pdf: str, out: str, title: str | None = None,
     for i in range(n):
         page = doc[i]
         rect = page.rect
-        k = min(box_w / rect.width, box_h / rect.height)
-        pix = page.get_pixmap(matrix=fitz.Matrix(k, k), colorspace=fitz.csGRAY, alpha=False)
+        if crop is not None:
+            # keep the crop region; scale it up to fill the screen (minus border)
+            clip = fitz.Rect(rect.x0 + cx0 * rect.width, rect.y0 + cy0 * rect.height,
+                             rect.x0 + cx1 * rect.width, rect.y0 + cy1 * rect.height)
+            k = min((W - 2 * CROP_BORDER) / clip.width, (H - 2 * CROP_BORDER) / clip.height)
+            pix = page.get_pixmap(matrix=fitz.Matrix(k, k), colorspace=fitz.csGRAY, alpha=False, clip=clip)
+            orig_x, orig_y = clip.x0, clip.y0   # page-pt that maps to the pixmap's top-left
+            drop_outside = True
+        else:
+            k = min(box_w / rect.width, box_h / rect.height)
+            pix = page.get_pixmap(matrix=fitz.Matrix(k, k), colorspace=fitz.csGRAY, alpha=False)
+            orig_x, orig_y = 0.0, 0.0
+            drop_outside = False
         img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.stride)[:, :pix.width]
-        # center only the residual slack WITHIN the margin box, so
-        # asymmetric margins really do shift the page
-        ox = ml + (box_w - pix.width) // 2
-        oy = mt + (box_h - pix.height) // 2
+        if crop is not None:
+            ox = (W - pix.width) // 2
+            oy = (H - pix.height) // 2
+        else:
+            # center the residual slack WITHIN the margin box (asymmetric shift)
+            ox = ml + (box_w - pix.width) // 2
+            oy = mt + (box_h - pix.height) // 2
         canvas = np.full((H, W), 255, dtype=np.uint8)
         canvas[oy:oy + pix.height, ox:ox + pix.width] = img
         if dither:
@@ -118,11 +144,13 @@ def build_book(pdf: str, out: str, title: str | None = None,
         write_png_gray(png_path, canvas)
         total_bytes += os.path.getsize(png_path)
 
-        words = [
-            [int(x0 * k) + ox, int(y0 * k) + oy,
-             int(x1 * k + 0.5) + ox, int(y1 * k + 0.5) + oy, w]
-            for (x0, y0, x1, y1, w, *_rest) in page.get_text("words")
-        ]
+        words = []
+        for (x0, y0, x1, y1, w, *_rest) in page.get_text("words"):
+            nx0, ny0 = (x0 - orig_x) * k + ox, (y0 - orig_y) * k + oy
+            nx1, ny1 = (x1 - orig_x) * k + ox, (y1 - orig_y) * k + oy
+            if drop_outside and (nx1 < ox or nx0 > ox + pix.width or ny1 < oy or ny0 > oy + pix.height):
+                continue  # word cropped away
+            words.append([int(nx0), int(ny0), int(nx1 + 0.5), int(ny1 + 0.5), w])
         text = page.get_text().strip()
         with open(os.path.join(out, "text", f"{i + 1:04}.json"), "w") as f:
             json.dump({"text": text, "words": words}, f, ensure_ascii=False)
@@ -130,9 +158,13 @@ def build_book(pdf: str, out: str, title: str | None = None,
         if (i + 1) % 20 == 0 or i + 1 == n:
             print(f"mkbook: {i + 1}/{n} pages", file=sys.stderr)
 
+    meta = {"title": title, "pages": n, "w": W, "h": H}
+    if crop is not None:
+        meta["crop"] = [cx0, cy0, cx1, cy1]
+    else:
+        meta["margins"] = [ml, mt, mr, mb]
     with open(os.path.join(out, "meta.json"), "w") as f:
-        json.dump({"title": title, "pages": n, "w": W, "h": H,
-                   "margins": [ml, mt, mr, mb]}, f, ensure_ascii=False)
+        json.dump(meta, f, ensure_ascii=False)
 
     print(f"mkbook: '{title}' — {n} pages, {total_bytes // 1024} KB of rasters -> {out}")
     return title
@@ -155,11 +187,15 @@ def main() -> int:
     ap.add_argument("--margin-bottom", type=int)
     ap.add_argument("--dither", action="store_true",
                     help="force 1-bit pages (Bayer); default keeps grayscale")
+    ap.add_argument("--crop", nargs=4, type=float, metavar=("CX0", "CY0", "CX1", "CY1"),
+                    help="keep this fraction (0..1) of each page and scale it up to "
+                         "fill the screen — crops a PDF's margins to enlarge text")
     args = ap.parse_args()
     try:
         build_book(args.pdf, args.out, args.title, dither=args.dither, margin=args.margin,
                    margins=(args.margin_left, args.margin_top,
-                            args.margin_right, args.margin_bottom))
+                            args.margin_right, args.margin_bottom),
+                   crop=(tuple(args.crop) if args.crop else None))
     except ValueError as e:
         print(f"mkbook: {e}", file=sys.stderr)
         return 1

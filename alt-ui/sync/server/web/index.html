@@ -86,9 +86,11 @@
   #med .mnav button { width:30px; height:30px; border-radius:50%; border:1px solid rgba(255,255,255,.3); background:transparent; color:#e8e8e4; cursor:pointer; font-size:15px; }
   #med .mnav button:disabled { opacity:.35; cursor:default; }
   #med .mread { color:#cfcfca; font-size:12.5px; font-variant-numeric:tabular-nums; }
+  #med .mhint { color:#8a8a86; font-size:12px; margin-left:14px; }
   #med .mstage-wrap { display:grid; place-items:center; overflow:hidden; padding:16px; }
-  #med .mstage { position:relative; background:#fbfbf9; box-shadow:0 4px 30px rgba(0,0,0,.5);
-                 height: min(76vh, calc((100vw - 60px) * 1.333)); aspect-ratio: 1404 / 1872; touch-action:none; }
+  /* the stage is sized in JS to the SOURCE page's aspect (it shows the whole
+     page for a photo-style crop), so no fixed aspect-ratio here */
+  #med .mstage { position:relative; background:#fbfbf9; box-shadow:0 4px 30px rgba(0,0,0,.5); touch-action:none; }
   /* Everything (page preview, margin shade, box, handles) is drawn on ONE
      canvas with coordinate hit-testing — no DOM overlays — so dark-mode
      browser extensions (Dark Reader) can't invert the page or paint over the
@@ -347,37 +349,42 @@ async function upload(files) {
 }
 function toast(msg, ms) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms || 3000); }
 
-/* ---------- margin editor ---------- */
-/* The box lives in PAGE coordinates (0..1404 x 0..1872). It IS the content
- * area; margins = the space outside it. The live preview fits the raw page
- * image into the box (object-fit:contain) exactly as mkbook fits-and-centres
- * on render, so dragging is a faithful preview with no server round-trip. */
-const MIN_W = 410, MIN_H = 510;   // mkbook needs content box >= 400 x 500
-const med = { id: null, pages: 0, page: 0, box: null, orig: null, pageImg: null };
+/* ---------- crop editor ---------- */
+/* Photo-crop UX: the stage shows the FULL source page; drag a box around the
+ * content to KEEP; everything outside fades. That kept region is what fills
+ * the reMarkable screen on render, so cropping a PDF's wasteful margins makes
+ * the text BIGGER. The crop lives in page FRACTIONS (0..1) so it applies to
+ * every page. Drawn on one canvas (Dark-Reader-proof). */
+const MIN_FRAC = 0.08;
+const HANDLES = [['nw',0,0],['n',.5,0],['ne',1,0],['e',1,.5],['se',1,1],['s',.5,1],['sw',0,1],['w',0,.5]];
+const CURSORS = { nw:'nwse-resize', se:'nwse-resize', ne:'nesw-resize', sw:'nesw-resize', n:'ns-resize', s:'ns-resize', e:'ew-resize', w:'ew-resize', move:'move' };
+const med = { id: null, pages: 0, page: 0, crop: null, orig: null, pageImg: null, sw: 0, sh: 0 };
 
-const boxFromMargins = (m) => ({ x: m[0], y: m[1], w: PAGE_W - m[0] - m[2], h: PAGE_H - m[1] - m[3] });
-const marginsFromBox = (b) => [b.x, b.y, PAGE_W - (b.x + b.w), PAGE_H - (b.y + b.h)].map(v => Math.max(0, Math.round(v)));
+const boxFromCrop = (c) => ({ x: c[0], y: c[1], w: c[2] - c[0], h: c[3] - c[1] });   // [x0,y0,x1,y1] -> box
+const cropArray = (b) => [b.x, b.y, b.x + b.w, b.y + b.h].map(v => Math.max(0, Math.min(1, v)));
 
 async function openMarginEditor(d) {
-  const el = $('med');
-  el.className = 'show';
+  const el = $('med'); el.className = 'show';
   el.innerHTML = '<div></div><div class="mstage-wrap"><div class="mattach">Loading…</div></div><div></div>';
-  let st;
-  try { st = await fetch(API + 'source-status?id=' + encodeURIComponent(d.id), { cache: 'no-store' }).then(r => r.json()); } catch { st = null; }
-  if (!st || !st.ok) { el.querySelector('.mattach').textContent = 'Could not reach the editor service.'; return; }
+  let st = null;
+  for (let t = 0; t < 3 && !st; t++) {   // retry: the service may be mid-render on a fresh upload
+    try { const r = await fetch(API + 'source-status?id=' + encodeURIComponent(d.id), { cache: 'no-store' }); if (r.ok) st = await r.json(); } catch (_) {}
+    if (!st) await new Promise(r => setTimeout(r, 500));
+  }
+  if (!st || !st.ok) { el.querySelector('.mattach').textContent = 'Could not reach the editor service — try again in a moment.'; return; }
   if (!st.hasSource) return renderAttach(d);
-  med.id = d.id; med.pages = st.pages || 1; med.page = 0;
-  med.orig = st.orig || [40, 40, 40, 40];
-  med.box = boxFromMargins(st.margins || [40, 40, 40, 40]);
+  med.id = d.id; med.pages = st.pages || 1; med.page = 0; med.pageImg = null;
+  med.orig = st.orig || [0, 0, 1, 1];
+  med.crop = boxFromCrop(st.crop || [0, 0, 1, 1]);
   renderEditor(d);
 }
 
 function renderAttach(d) {
   $('med').innerHTML =
     '<div></div><div class="mstage-wrap"><div class="mattach">' +
-    '<div class="mtitle" style="font-size:17px;margin-bottom:10px">Adjust margins — “' + esc(d.meta.title || d.id) + '”</div>' +
+    '<div class="mtitle" style="font-size:17px;margin-bottom:10px">Crop — “' + esc(d.meta.title || d.id) + '”</div>' +
     'This book was rendered on the desk, so its source PDF isn’t on the server yet. ' +
-    'Attach the original PDF once, and you can re-flow its margins from here anytime.' +
+    'Attach the original PDF once, and you can re-crop it from here anytime.' +
     '<div><input type="file" accept="application/pdf" id="med-file" hidden>' +
     '<button class="mbtn primary" id="med-attach">Attach source PDF</button> ' +
     '<button class="mbtn" id="med-cancel2">Cancel</button></div>' +
@@ -397,24 +404,23 @@ function renderAttach(d) {
 
 function renderEditor(d) {
   $('med').innerHTML =
-    '<div class="mhead"><span class="mtitle">Margins — ' + esc(d.meta.title || d.id) + '</span>' +
+    '<div class="mhead"><span class="mtitle">Crop — ' + esc(d.meta.title || d.id) + '</span>' +
       '<span class="mspacer"></span>' +
       '<div class="mnav"><button id="med-prev">‹</button><span id="med-pg"></span><button id="med-next">›</button></div></div>' +
-    '<div class="mstage-wrap"><div class="mstage" id="med-stage">' +
-      '<canvas class="medcanvas" id="med-canvas"></canvas>' +
-      '</div></div>' +
-    '<div class="mfoot"><span class="mread" id="med-read"></span><span class="mspacer"></span>' +
+    '<div class="mstage-wrap"><div class="mstage" id="med-stage"><canvas class="medcanvas" id="med-canvas"></canvas></div></div>' +
+    '<div class="mfoot"><span class="mread" id="med-read"></span>' +
+      '<span class="mhint">drag the box around what to keep — the faded part is cropped away</span>' +
+      '<span class="mspacer"></span>' +
       '<button class="mbtn" id="med-reset">Reset to original</button>' +
       '<button class="mbtn" id="med-cancel">Cancel</button>' +
       '<button class="mbtn primary" id="med-save">Save &amp; push</button></div>';
   $('med-prev').onclick = () => gotoPage(med.page - 1);
   $('med-next').onclick = () => gotoPage(med.page + 1);
   $('med-cancel').onclick = closeEditor;
-  $('med-reset').onclick = () => { med.box = boxFromMargins(med.orig); layoutBox(); };
-  $('med-save').onclick = saveMargins;
+  $('med-reset').onclick = () => { med.crop = boxFromCrop(med.orig); layoutBox(); };
+  $('med-save').onclick = saveCrop;
   setupBoxDrag();
   gotoPage(0);
-  requestAnimationFrame(layoutBox);
 }
 
 function gotoPage(p) {
@@ -423,36 +429,35 @@ function gotoPage(p) {
   $('med-prev').disabled = med.page === 0;
   $('med-next').disabled = med.page === med.pages - 1;
   const want = med.page;
-  med.pageImg = null; layoutBox();   // blank while the raw page loads
   const im = new Image();
-  im.onload = () => { if (med.page === want) { med.pageImg = im; layoutBox(); } };
-  im.onerror = () => { if (med.page === want) layoutBox(); };
+  im.onload = () => { if (med.page === want) { med.pageImg = im; sizeStage(im.naturalWidth, im.naturalHeight); layoutBox(); } };
   im.src = API + 'preview?id=' + encodeURIComponent(med.id) + '&page=' + med.page;
+  if (med.pageImg) layoutBox();   // keep the last page visible until the new one loads
+  if (med.page + 1 < med.pages) { const nx = new Image(); nx.src = API + 'preview?id=' + encodeURIComponent(med.id) + '&page=' + (med.page + 1); }
 }
 
-/* handle name -> unit position on the box (fx, fy in 0..1) */
-const HANDLES = [['nw',0,0],['n',.5,0],['ne',1,0],['e',1,.5],['se',1,1],['s',.5,1],['sw',0,1],['w',0,.5]];
-const CURSORS = { nw:'nwse-resize', se:'nwse-resize', ne:'nesw-resize', sw:'nesw-resize', n:'ns-resize', s:'ns-resize', e:'ew-resize', w:'ew-resize', move:'move' };
+// size the stage to the SOURCE page's aspect, as big as fits the viewport
+function sizeStage(iw, ih) {
+  const stage = $('med-stage'); if (!stage) return;
+  const A = iw / ih, maxH = window.innerHeight * 0.80, maxW = window.innerWidth - 56;
+  let h = maxH, w = h * A; if (w > maxW) { w = maxW; h = w / A; }
+  stage.style.width = Math.round(w) + 'px'; stage.style.height = Math.round(h) + 'px';
+}
 
-/* everything is drawn on ONE canvas: white page, page-image fitted into the
- * box, shaded margins, the box outline and its handles. No DOM overlays, so
- * Dark Reader can't recolour anything. */
+/* draw the full source page, fade everything outside the crop, then the box +
+ * handles — all on one canvas so Dark Reader can't touch it. */
 function layoutBox() {
   const stage = $('med-stage'), cv = $('med-canvas'); if (!stage || !cv) return;
-  const r = stage.getBoundingClientRect(), W = r.width, H = r.height, s = W / PAGE_W;
-  med._s = s;
+  const r = stage.getBoundingClientRect(), W = r.width, H = r.height;
+  med.sw = W; med.sh = H;
   const dpr = window.devicePixelRatio || 1;
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
   cv.style.width = W + 'px'; cv.style.height = H + 'px';
   const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#fbfbf9'; ctx.fillRect(0, 0, W, H);
-  const b = med.box, bx = b.x * s, by = b.y * s, bw = b.w * s, bh = b.h * s;
-  if (med.pageImg) {
-    const iw = med.pageImg.naturalWidth, ih = med.pageImg.naturalHeight;
-    const k = Math.min(bw / iw, bh / ih), dw = iw * k, dh = ih * k;   // contain
-    ctx.drawImage(med.pageImg, bx + (bw - dw) / 2, by + (bh - dh) / 2, dw, dh);
-  }
-  ctx.fillStyle = 'rgba(18,18,22,0.5)';   // shade the margins
+  if (med.pageImg) ctx.drawImage(med.pageImg, 0, 0, W, H);   // whole source page fills the stage
+  const b = med.crop, bx = b.x * W, by = b.y * H, bw = b.w * W, bh = b.h * H;
+  ctx.fillStyle = 'rgba(12,12,15,0.60)';   // fade what gets cropped away
   ctx.fillRect(0, 0, W, by); ctx.fillRect(0, by + bh, W, H - (by + bh));
   ctx.fillRect(0, by, bx, bh); ctx.fillRect(bx + bw, by, W - (bx + bw), bh);
   ctx.strokeStyle = '#f0a020'; ctx.lineWidth = 1.5; ctx.strokeRect(bx, by, bw, bh);
@@ -460,71 +465,65 @@ function layoutBox() {
     ctx.beginPath(); ctx.arc(bx + fx * bw, by + fy * bh, 6, 0, 7);
     ctx.fillStyle = '#f0a020'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
   }
-  const m = marginsFromBox(b);
-  $('med-read').textContent = 'left ' + m[0] + '   top ' + m[1] + '   right ' + m[2] + '   bottom ' + m[3] + '  px';
+  $('med-read').textContent = 'keeping ' + Math.round(b.w * 100) + '% × ' + Math.round(b.h * 100) + '% of the page';
 }
 
-// pointer client coords -> page coords (0..1404 x 0..1872)
-function toPage(e) {
-  const r = $('med-stage').getBoundingClientRect(), s = r.width / PAGE_W;
-  return { px: (e.clientX - r.left) / s, py: (e.clientY - r.top) / s };
-}
-// which handle/'move' is under a page point, or null
-function hitTest(px, py) {
-  const b = med.box, R = 22 / (med._s || 1);
+const toStage = (e) => { const r = $('med-stage').getBoundingClientRect(); return { sx: e.clientX - r.left, sy: e.clientY - r.top }; };
+function hitTest(sx, sy) {   // in stage pixels
+  const b = med.crop, W = med.sw, H = med.sh, R = 22;
   for (const [name, fx, fy] of HANDLES) {
-    if (Math.hypot(px - (b.x + fx * b.w), py - (b.y + fy * b.h)) <= R) return name;
+    if (Math.abs(sx - (b.x + fx * b.w) * W) <= R && Math.abs(sy - (b.y + fy * b.h) * H) <= R) return name;
   }
-  return (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) ? 'move' : null;
+  return (sx >= b.x * W && sx <= (b.x + b.w) * W && sy >= b.y * H && sy <= (b.y + b.h) * H) ? 'move' : null;
 }
 
 function setupBoxDrag() {
   const cv = $('med-canvas');
   let mode = null, start = null, sp = null;
   const move = (e) => {
-    const { px, py } = toPage(e);
-    const dx = px - sp.px, dy = py - sp.py;
+    const { sx, sy } = toStage(e);
+    const dx = (sx - sp.sx) / med.sw, dy = (sy - sp.sy) / med.sh;   // fraction deltas
     let { x, y, w, h } = start;
     if (mode === 'move') {
-      x = clamp(start.x + dx, 0, PAGE_W - w); y = clamp(start.y + dy, 0, PAGE_H - h);
+      x = clamp(start.x + dx, 0, 1 - w); y = clamp(start.y + dy, 0, 1 - h);
     } else {
-      if (mode.includes('w')) { const nx = clamp(start.x + dx, 0, start.x + start.w - MIN_W); w = start.w + (start.x - nx); x = nx; }
-      if (mode.includes('e')) { w = clamp(start.w + dx, MIN_W, PAGE_W - start.x); }
-      if (mode.includes('n')) { const ny = clamp(start.y + dy, 0, start.y + start.h - MIN_H); h = start.h + (start.y - ny); y = ny; }
-      if (mode.includes('s')) { h = clamp(start.h + dy, MIN_H, PAGE_H - start.y); }
+      if (mode.includes('w')) { const nx = clamp(start.x + dx, 0, start.x + start.w - MIN_FRAC); w = start.w + (start.x - nx); x = nx; }
+      if (mode.includes('e')) { w = clamp(start.w + dx, MIN_FRAC, 1 - start.x); }
+      if (mode.includes('n')) { const ny = clamp(start.y + dy, 0, start.y + start.h - MIN_FRAC); h = start.h + (start.y - ny); y = ny; }
+      if (mode.includes('s')) { h = clamp(start.h + dy, MIN_FRAC, 1 - start.y); }
     }
-    med.box = { x, y, w, h }; layoutBox();
+    med.crop = { x, y, w, h }; layoutBox();
   };
   const end = () => { window.removeEventListener('pointermove', move); mode = null; };
   cv.addEventListener('pointerdown', (e) => {
-    const { px, py } = toPage(e); const m = hitTest(px, py);
+    const { sx, sy } = toStage(e); const m = hitTest(sx, sy);
     if (!m) return;
-    e.preventDefault(); mode = m; start = { ...med.box }; sp = { px, py };
+    e.preventDefault(); mode = m; start = { ...med.crop }; sp = { sx, sy };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', end, { once: true });
   });
   cv.addEventListener('pointermove', (e) => {   // hover cursor
     if (mode) return;
-    const { px, py } = toPage(e); const m = hitTest(px, py);
+    const { sx, sy } = toStage(e); const m = hitTest(sx, sy);
     cv.style.cursor = m ? CURSORS[m] : 'default';
   });
 }
 
-async function saveMargins() {
-  const m = marginsFromBox(med.box);
+async function saveCrop() {
+  const c = cropArray(med.crop);
   const btn = $('med-save'); btn.disabled = true; btn.textContent = 'Rendering…';
   try {
-    const r = await fetch(API + 'render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: med.id, margins: m }) });
+    const r = await fetch(API + 'render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: med.id, crop: c }) });
     const j = await r.json(); if (!j.ok) throw new Error(j.error || 'render failed');
     closeEditor();
-    toast('Re-rendered with new margins — it reaches your tablet on the next sync (~90s).', 6000);
+    toast('Re-rendered — it reaches your tablet on the next sync (~90s).', 6000);
     setTimeout(refresh, 2000);
   } catch (err) { toast('Render failed: ' + err.message, 5000); btn.disabled = false; btn.innerHTML = 'Save &amp; push'; }
 }
 
 function closeEditor() { const el = $('med'); el.className = ''; el.innerHTML = ''; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-window.addEventListener('resize', () => { if ($('med').classList.contains('show') && $('med-stage')) layoutBox(); });
+window.addEventListener('resize', () => { if ($('med').classList.contains('show') && med.pageImg && $('med-stage')) { sizeStage(med.pageImg.naturalWidth, med.pageImg.naturalHeight); layoutBox(); } });
 window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('med').classList.contains('show')) closeEditor(); });
 
 /* ---------- poll / boot ---------- */
