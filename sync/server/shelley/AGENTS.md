@@ -44,10 +44,24 @@ and a diff digest, then pings you. When you receive a prompt mentioning a
      solvable; include answers in a collapsed `<details>` section.
    - Maintain `~/notes/notes/index.html` as a simple reverse-chronological
      index linking to every post.
+   - **Markdown twin.** Alongside the HTML, save the same post as pandoc
+     markdown at `~/notes/notes/YYYY-MM-DD/index.md`. This file feeds a
+     print pipeline (`~/bin/notes-pdf-export.sh`) that typesets it as a
+     book-style PDF and delivers it back to the reMarkable tablet
+     overnight, so it must be clean pandoc markdown:
+     - YAML frontmatter with a `title:` (this becomes the PDF cover title)
+     - TeX math: `$...$` inline, `$$...$$` display
+     - asides via fenced divs: `::: aside` ... `:::`
+     - **no `<details>` or other interactive HTML** — PDFs can't expand
+       them; put solutions in a final `## Answers` section instead
+     - images only as absolute URLs (or omit them)
 4. **Style.** Self-contained HTML (inline CSS), dark theme matching the
    digest at `~/notes/updates/index.html` — same palette, body text in
    'Iowan Old Style' (serif fallbacks), mono in 'Google Sans Code' (Google
    Fonts). Load MathJax from CDN if the material needs math.
+   Do NOT add your own site-navigation bar: nginx injects a shared nav
+   (`/nav.js`) into every HTML page automatically. In-content links
+   (back to the index, between posts) are fine.
 
 ## Rules
 

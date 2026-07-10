@@ -42,29 +42,57 @@ bun build "$HERE/server/bin/remarkable-activity-agent.ts" \
   --target=node --format=cjs \
   --outfile "$BUILD_DIR/remarkable-activity-agent.js" >/dev/null
 
-ssh "$HOST" 'mkdir -p ~/bin ~/notes-server/raw ~/notes-server/notebook ~/notes/updates ~/remarkable-backup/xochitl ~/remarkable-backup/notebook-app ~/remarkable-exports'
+ssh "$HOST" 'mkdir -p ~/bin ~/notes-server/raw ~/notes-server/notebook ~/notes/updates ~/notes/notes ~/remarkable-backup/xochitl ~/remarkable-backup/notebook-app ~/remarkable-exports/notes-pdf'
 
 echo "[deploy-server] scp server/bin scripts + agent bundle"
 scp -q "$HERE"/server/bin/*.sh "$HERE"/server/bin/notebook-live-relay.js "$BUILD_DIR/remarkable-activity-agent.js" "$HOST:bin/"
-ssh "$HOST" 'chmod +x ~/bin/remarkable-post-sync.sh ~/bin/remarkable-post-sync-by-name.sh ~/bin/remarkable-activity-agent-hook.sh ~/bin/notebook-live-ingest.sh 2>/dev/null || true'
+ssh "$HOST" 'chmod +x ~/bin/remarkable-post-sync.sh ~/bin/remarkable-post-sync-by-name.sh ~/bin/remarkable-activity-agent-hook.sh ~/bin/notebook-live-ingest.sh ~/bin/notes-md2pdf.sh ~/bin/notes-pdf-export.sh 2>/dev/null || true'
 
-echo "[deploy-server] ensure runtime deps (node, img2pdf, imagemagick)"
+echo "[deploy-server] ensure runtime deps (node, img2pdf, imagemagick, pandoc, chromium, fonts)"
 ssh "$HOST" '
   set -e
   missing=""
-  command -v node    >/dev/null 2>&1 || missing="$missing nodejs"
-  command -v img2pdf >/dev/null 2>&1 || missing="$missing img2pdf"
-  command -v convert >/dev/null 2>&1 || missing="$missing imagemagick"
+  command -v node     >/dev/null 2>&1 || missing="$missing nodejs"
+  command -v img2pdf  >/dev/null 2>&1 || missing="$missing img2pdf"
+  command -v convert  >/dev/null 2>&1 || missing="$missing imagemagick"
+  command -v pandoc   >/dev/null 2>&1 || missing="$missing pandoc"
+  command -v fc-cache >/dev/null 2>&1 || missing="$missing fontconfig"
+  # math glyphs for Chrome MathML rendering
+  fc-list 2>/dev/null | grep -qi "stix\|latinmodern" || missing="$missing fonts-stix fonts-lmodern"
   if [ -n "$missing" ]; then
     sudo apt-get update -y >/dev/null
     sudo apt-get install -y $missing >/dev/null
   fi
+  # headless chrome for the notes PDF renderer (.deb, not snap — snapd is
+  # not set up on the VM and the deb pulls its own deps via apt)
+  if ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
+    curl -fsSL -o /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+    sudo apt-get install -y /tmp/google-chrome.deb >/dev/null
+    rm -f /tmp/google-chrome.deb
+  fi
 '
 
-echo "[deploy-server] scp nginx config + viewer html"
+echo "[deploy-server] ship PDF fonts (Reader, EB Garamond, Google Sans Code)"
+FONT_SRC="$HOME/Library/Fonts"
+READER_SRC="$FONT_SRC"
+[[ -f "$HOME/Desktop/Reader-Fonts/Reader-Regular.ttf" ]] && READER_SRC="$HOME/Desktop/Reader-Fonts"
+font_files=()
+for f in "$READER_SRC"/Reader-*.ttf "$FONT_SRC"/GoogleSansCode-*.ttf "$FONT_SRC"/EBGaramond-*.ttf; do
+  [[ -f "$f" ]] && font_files+=("$f")
+done
+if [[ ${#font_files[@]} -gt 0 ]]; then
+  ssh "$HOST" 'mkdir -p ~/.local/share/fonts'
+  scp -q "${font_files[@]}" "$HOST:.local/share/fonts/"
+  ssh "$HOST" 'fc-cache -f >/dev/null 2>&1 || true'
+else
+  echo "  (no local font TTFs found — the renderer will fall back to system serif)"
+fi
+
+echo "[deploy-server] scp nginx config + viewer html + nav"
 scp -q "$HERE"/server/nginx/default.conf "$HOST:notes-server/default.conf"
 scp -q "$HERE"/server/web/raw/index.html "$HOST:notes-server/raw/index.html"
 scp -q "$HERE"/server/web/notebook/index.html "$HOST:notes-server/notebook/index.html"
+scp -q "$HERE"/server/web/nav.js "$HOST:notes-server/nav.js"
 
 echo "[deploy-server] scp shelley AGENTS.md"
 ssh "$HOST" 'mkdir -p ~/.config/shelley'

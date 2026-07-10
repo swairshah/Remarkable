@@ -45,7 +45,11 @@ JPG_DIR="$OUT_DIR/pages_jpg"
 PDF_OUT="$OUT_DIR/${SAFE_NAME}.pdf"
 LOG="$OUT_DIR/export.log"
 
-mkdir -p "$PAGES_DIR" "$JPG_DIR" "$OUT_BASE/activity-agent"
+mkdir -p "$PAGES_DIR" "$JPG_DIR" "$OUT_BASE/activity-agent" "$OUT_BASE/notes-pdf"
+
+# Heartbeat: every hook invocation is proof of tablet contact. The digest
+# page reads this file's mtime client-side to flag a silent tablet.
+touch "$HOME/notes/updates/last-sync" 2>/dev/null || true
 
 echo "[$(date -Is)] export start uuid_arg=$UUID_ARG resolved_uuid=${UUID:-none} name=$NAME" >> "$LOG"
 
@@ -144,5 +148,12 @@ if [[ -f "$PUB_MARKER" ]]; then
     fi
   fi
 fi
+
+# Render Shelley's daily notes posts (index.md) to reMarkable PDFs. The
+# tablet pulls these back on its next sync (see remarkable-notes-pull.sh).
+# Shelley runs async after the trigger above, so a post edited by this
+# sync's Shelley run gets rendered on the NEXT sync — fine, since the
+# tablet only imports posts from completed days anyway.
+"$HOME/bin/notes-pdf-export.sh" >> "$OUT_BASE/notes-pdf/export.log" 2>&1 || true
 
 echo "[$(date -Is)] export done" >> "$LOG"

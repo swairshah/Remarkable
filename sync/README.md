@@ -90,6 +90,7 @@ sync/
     ├── nginx/
     │   └── default.conf                     nginx site (installed to sites-available)
     └── web/
+        ├── nav.js                           shared site nav (nginx-injected into every HTML page)
         ├── raw/
         │   └── index.html                   swipe/sidebar viewer
         └── notebook/
@@ -149,6 +150,7 @@ stay aligned.
 | Notes-PDF typography (page size, fonts, margins) | `server/bin/notes-md2pdf.sh` (`RM_*` env knobs) | `deploy/deploy-server.sh` |
 | Notes-PDF import policy (folder name, quiet hours) | `tablet/bin/remarkable-notes-pull.sh` | `deploy/deploy-tablet.sh` |
 | What Shelley puts in the markdown twin | `server/shelley/AGENTS.md` | `deploy/deploy-server.sh` |
+| Site nav (links, styling, front-page redirect) | `server/web/nav.js` + `server/nginx/default.conf` | `deploy/deploy-server.sh` |
 
 ## Deploy
 

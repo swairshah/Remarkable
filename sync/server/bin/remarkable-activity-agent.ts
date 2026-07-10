@@ -443,13 +443,15 @@ function renderHtml(summary: string, changes: Change[], history: HistoryEntry[])
 body{background:var(--bg);color:var(--text);font-family:var(--serif);font-size:17px;line-height:1.6;min-height:100vh}
 pre,code{font-family:var(--mono)}
 nav{padding:20px 24px;display:flex;justify-content:space-between;align-items:center}.nav-left{display:flex;align-items:center;gap:14px}.brand{color:var(--bright);text-decoration:none;font-weight:500}.brand:hover{color:var(--accent)}
-.layout{display:flex;height:calc(100vh - 70px)}
+.layout{display:flex;height:calc(100vh - 100px)} /* 70px own nav + ~30px injected site bar (/nav.js) */
 #sidebar{width:340px;max-width:80vw;border-right:1px solid var(--border);padding:16px 14px;overflow:auto;transition:width .2s ease,padding .2s ease}
 #sidebar.collapsed{width:0;padding:0;border-right:none;overflow:hidden}
 .side-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .side-title{color:var(--bright);font-size:14px}
 .toggle{background:var(--bg2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:6px 10px;cursor:pointer;font-family:inherit;font-size:16px;line-height:1}
 .toggle:hover{color:var(--bright)}
+#tablet-seen{color:var(--muted);font-size:12px;font-family:var(--mono);display:none}
+#tablet-seen.stale{color:rgb(239,68,68);border:1px solid rgba(239,68,68,.4);border-radius:999px;padding:2px 10px}
 .hist-list{list-style:none}.hist-item{padding:10px 8px;border-bottom:1px solid var(--border);cursor:pointer;border-radius:6px}.hist-item:hover{background:var(--bg2)}.hist-item.active{background:var(--bg2)}.hist-item.active .hist-time{color:var(--accent)}.hist-time{color:var(--bright);font-size:12px}.hist-meta{color:var(--muted);font-size:11px}.hist-text{color:var(--text);font-size:12px;margin-top:4px}
 main{flex:1;max-width:860px;padding:24px 32px 56px;overflow-y:auto}h1{color:var(--bright);font-size:22px;font-weight:500;margin-bottom:8px;clear:both}.meta{color:var(--muted);font-size:13px;margin-bottom:24px}
 h2{color:var(--bright);font-size:18px;font-weight:500;margin:24px 0 12px}pre{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px;white-space:pre-wrap;overflow:auto;font-size:14px}
@@ -463,7 +465,7 @@ code{background:var(--bg2);border:1px solid var(--border);padding:2px 6px;border
 }
 </style>
 </head><body>
-<nav><div class="nav-left"><button class="toggle" onclick="toggleSidebar()" title="Toggle history">&#9776;</button><a class="brand" href="/updates/">reMarkable diffs</a></div><a class="brand" href="/notes/">notes</a></nav>
+<nav><div class="nav-left"><button class="toggle" onclick="toggleSidebar()" title="Toggle history">&#9776;</button><a class="brand" href="/updates/">reMarkable diffs</a><span id="tablet-seen"></span></div></nav>
 <div class="layout">
 <aside id="sidebar" class="collapsed">
   <div class="side-header"><div class="side-title">previous summaries</div></div>
@@ -509,6 +511,30 @@ function renderEntry(i){
 }
 document.querySelectorAll('.hist-item[data-idx]').forEach((el) =>
   el.addEventListener('click', () => renderEntry(Number(el.dataset.idx))));
+// Tablet heartbeat. last-sync (same dir) is touched by every real tablet
+// contact: each push hook run + the daily notes pull. Staleness is computed
+// HERE, client-side, from the file's Last-Modified — the digest only
+// re-renders when the tablet syncs, so a wedged tablet freezes this page
+// and a server-rendered warning could never appear.
+const STALE_HOURS = 26; // healthy worst case: one notes pull per day + slack
+fetch('last-sync', {method:'HEAD', cache:'no-store'}).then((r) => {
+  if (!r.ok) return;
+  const lm = r.headers.get('Last-Modified');
+  const ageMs = Date.now() - new Date(lm).getTime();
+  if (!lm || isNaN(ageMs)) return;
+  const el = document.getElementById('tablet-seen');
+  const h = ageMs / 3600000;
+  const label = h < 1 ? Math.max(1, Math.round(ageMs / 60000)) + 'm'
+              : h < 48 ? Math.round(h) + 'h'
+              : (h / 24).toFixed(1) + 'd';
+  el.style.display = 'inline-block';
+  if (h > STALE_HOURS) {
+    el.classList.add('stale');
+    el.textContent = '⚠ tablet silent ' + label + ' — sync may be wedged';
+  } else {
+    el.textContent = 'tablet seen ' + label + ' ago';
+  }
+}).catch(() => {});
 </script>
 </body></html>`;
 }

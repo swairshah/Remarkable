@@ -240,6 +240,17 @@ tablet's own timer (the server never initiates anything):
    once: a sync straddling the hotspot outage wedged for 16 h and silently
    stopped all syncing).
 
+### Tablet heartbeat — making silence visible
+
+That 16 h wedge was invisible because a dead pipeline looks like an idle
+one. Now every real tablet contact touches `~/notes/updates/last-sync` on
+the VM (the post-sync hook on each push; the notes pull once a day, which
+covers idle days). The digest page at `/updates/` HEAD-fetches that file
+and shows "tablet seen Xh ago" in the nav — turning into a red
+"⚠ tablet silent" pill past 26 h. The check is **client-side by
+necessity**: the digest only re-renders when the tablet syncs, so a wedged
+tablet freezes the page and a server-rendered warning could never appear.
+
 ## Stage 3 — Web serving (`server/nginx/`, `server/web/`)
 
 nginx runs natively on the VM (no docker), listening on **port 8000**; the
@@ -252,7 +263,8 @@ stock `default` site removed).
 
 | Location | Serves | Notes |
 |---|---|---|
-| `/` | `302 → /updates/` | The digest is the front page |
+| `/` | `302 → /notes/` | Shelley's notes are the front page |
+| `/nav.js` | `~/notes-server/nav.js` | Shared site nav — nginx `sub_filter` injects `<script src="/nav.js">` into **every** HTML response, so all generators (Shelley, digest agent, SPAs, autoindex) get the identical top bar; the notebook link carries a pulse dot lit by `/notebook/live/health` |
 | `/updates/` | `~/notes/updates/` | LLM activity digest |
 | other paths under `/` | `~/notes/` | Generic autoindex for ad-hoc files |
 | `/raw/` | viewer app (`~/notes-server/raw/`) | `server/web/raw/index.html` |
