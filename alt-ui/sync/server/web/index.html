@@ -7,7 +7,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>alt-ui</title>
+<title>Paper</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
@@ -72,7 +72,7 @@
 </head>
 <body>
 <header>
-  <span class="brand" id="brand">alt-ui</span>
+  <span class="brand" id="brand">Paper</span>
   <span id="crumb"></span>
   <span class="spacer"></span>
   <span class="badge" id="badge"><span class="dot"></span>synced view</span>
@@ -80,13 +80,13 @@
 </header>
 <main id="view"><div class="empty">Loading…</div></main>
 <input type="file" id="file" multiple hidden>
-<div id="drop"><div class="box">Drop files to add them to alt-ui</div></div>
+<div id="drop"><div class="box">Drop files to add them to Paper</div></div>
 <div class="toast" id="toast"></div>
 
 <script>
-const DATA = '/alt-ui/data/';
-const INBOUND = '/alt-ui/inbound/';   // web-dropped docs pending tablet sync
-const UPLOAD = '/alt-ui/upload';
+const DATA = '/paper/data/';
+const INBOUND = '/paper/inbound/';   // web-dropped docs pending tablet sync
+const UPLOAD = '/paper/upload';
 const PAGE_W = 1404, PAGE_H = 1872, POLL_MS = 20000;
 const $ = (id) => document.getElementById(id);
 const $view = $('view');
