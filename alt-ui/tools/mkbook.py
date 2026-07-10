@@ -85,7 +85,9 @@ def build_book(pdf: str, out: str, title: str | None = None,
         raise ValueError("empty PDF")
     ml, mt, mr, mb = ((margin, margin, margin, margin) if margins is None else
                       tuple(margin if v is None else v for v in margins))
-    ml, mt, mr, mb = (max(0, min(int(v), 500)) for v in (ml, mt, mr, mb))
+    # cap generously (the box_w/box_h check below is the real guard); a low cap
+    # would make the web margin editor's live box diverge from the render.
+    ml, mt, mr, mb = (max(0, min(int(v), 1000)) for v in (ml, mt, mr, mb))
     box_w, box_h = W - ml - mr, H - mt - mb
     if box_w < 400 or box_h < 500:
         raise ValueError(f"margins leave a {box_w}x{box_h} page box — too small")
@@ -129,7 +131,8 @@ def build_book(pdf: str, out: str, title: str | None = None,
             print(f"mkbook: {i + 1}/{n} pages", file=sys.stderr)
 
     with open(os.path.join(out, "meta.json"), "w") as f:
-        json.dump({"title": title, "pages": n, "w": W, "h": H}, f, ensure_ascii=False)
+        json.dump({"title": title, "pages": n, "w": W, "h": H,
+                   "margins": [ml, mt, mr, mb]}, f, ensure_ascii=False)
 
     print(f"mkbook: '{title}' — {n} pages, {total_bytes // 1024} KB of rasters -> {out}")
     return title
