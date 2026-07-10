@@ -23,3 +23,9 @@ agent/dist/
 sample-app-rust/target/
 # built from the .ts by sync/deploy/deploy-server.sh at deploy time
 sync/server/bin/remarkable-activity-agent.js
+
+# magazine-skill output (generated reading artifacts)
+.magazines/
+
+# Python bytecode
+__pycache__/
