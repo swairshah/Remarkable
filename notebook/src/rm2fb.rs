@@ -110,6 +110,17 @@ impl Rm2fbClient {
         self.send_clamped(x, y, w, h, waveform, flags)
     }
 
+    /// Full 16-level GL16 — smooth, flash-free render for typeset reading
+    /// views. A *partial* update approximates greys with a fast, speckled
+    /// waveform (antialiased text turns to salt-and-pepper); a *full* update
+    /// drives every pixel with the real 16-level LUT, so fine greys render
+    /// smooth, and GL16 has no black clearing phase so nothing flashes.
+    /// Ghost buildup is still reset by the periodic GC16 full_refresh.
+    /// (Ported from alt-ui/Paper.)
+    pub fn gl16_full(&self, x: i32, y: i32, w: i32, h: i32) -> io::Result<()> {
+        self.send_clamped(x, y, w, h, WAVEFORM_GL16, FLAG_FULL)
+    }
+
     /// Flashing clear of the whole panel (ghost removal).
     pub fn full_refresh(&self) -> io::Result<()> {
         self.send_clamped(0, 0, SCREEN_W, SCREEN_H, WAVEFORM_GC16, FLAG_FULL)

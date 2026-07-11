@@ -70,6 +70,7 @@ fetch-server:
 # Streamed over plain ssh (no scp: the device sshd has no sftp subsystem).
 # Kill first: overwriting a running binary fails with "text file busy".
 deploy: build vendor/rm2fb_server
+	node --experimental-strip-types --check ext/notebook-canvas.ts   # a broken extension kills pi silently on-device
 	$(SSH) '$(KILL_APP); mkdir -p $(DEVICE_DIR)'
 	cat $(BUILT) | $(SSH) 'cat > $(DEVICE_DIR)/$(BIN) && chmod +x $(DEVICE_DIR)/$(BIN)'
 	cat scripts/appload-launch.sh | $(SSH) 'cat > $(DEVICE_DIR)/appload-launch.sh && chmod +x $(DEVICE_DIR)/appload-launch.sh'

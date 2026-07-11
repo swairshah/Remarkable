@@ -56,8 +56,32 @@ pub fn face_from_name(name: &str) -> Option<Face> {
     }
 }
 
-/// The notebook-wide default face ($NOTEBOOK_FONT, default serif).
+/// Runtime override for the default face (the sidebar PI FONT toggle).
+/// 255 = unset; else a FACE_ORDER index.
+static FACE_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(255);
+
+pub const FACE_ORDER: [Face; 3] = [Face::Serif, Face::Script, Face::Sans];
+
+pub fn face_name(f: Face) -> &'static str {
+    match f {
+        Face::Serif => "serif",
+        Face::Script => "script",
+        Face::Sans => "sans",
+    }
+}
+
+pub fn set_default_face(f: Face) {
+    let i = FACE_ORDER.iter().position(|x| *x == f).unwrap_or(0) as u8;
+    FACE_OVERRIDE.store(i, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The notebook-wide default face: the sidebar override if set, else
+/// $NOTEBOOK_FONT, else serif.
 pub fn default_face() -> Face {
+    let i = FACE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+    if (i as usize) < FACE_ORDER.len() {
+        return FACE_ORDER[i as usize];
+    }
     std::env::var("NOTEBOOK_FONT")
         .ok()
         .and_then(|v| face_from_name(&v))

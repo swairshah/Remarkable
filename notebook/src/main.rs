@@ -120,10 +120,11 @@ enum SbRow {
     Library,  /* pi's saved material */
     Live,     /* stream strokes to the web viewer */
     Quiet,    /* quiet mode: pauses send NOTHING to pi (write in peace) */
+    PiFont,   /* pi's handwriting face: serif / script / sans (cycles) */
     FontSize, /* [-] 100% [+]: zoom on pi's text */
     Refresh,
 }
-const SB_ROWS: [SbRow; 10] = [
+const SB_ROWS: [SbRow; 11] = [
     SbRow::First,
     SbRow::Last,
     SbRow::Active,
@@ -132,6 +133,7 @@ const SB_ROWS: [SbRow; 10] = [
     SbRow::Library,
     SbRow::Live,
     SbRow::Quiet,
+    SbRow::PiFont,
     SbRow::FontSize,
     SbRow::Refresh,
 ];
@@ -146,8 +148,9 @@ fn settings_path() -> String {
     format!("{home}/.local/share/notebook/settings.json")
 }
 
-/// (text_scale, quiet) from settings.json; both optional in the file.
-fn load_settings() -> (f32, bool) {
+/// (text_scale, quiet, pi_font) from settings.json; all optional in the
+/// file. pi_font None = no override (fall back to $NOTEBOOK_FONT).
+fn load_settings() -> (f32, bool, Option<hershey::Face>) {
     let v = std::fs::read(settings_path())
         .ok()
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
@@ -157,17 +160,26 @@ fn load_settings() -> (f32, bool) {
         .map(|v| (v as f32).clamp(TEXT_SCALE_MIN, TEXT_SCALE_MAX))
         .unwrap_or(1.0);
     let quiet = v.as_ref().and_then(|v| v["quiet"].as_bool()).unwrap_or(false);
-    (scale, quiet)
+    let font = v
+        .as_ref()
+        .and_then(|v| v["pi_font"].as_str())
+        .and_then(hershey::face_from_name);
+    (scale, quiet, font)
 }
 
-fn save_settings(scale: f32, quiet: bool) {
+fn save_settings(scale: f32, quiet: bool, font: hershey::Face) {
     let p = settings_path();
     if let Some(dir) = std::path::Path::new(&p).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(
         &p,
-        serde_json::to_vec(&json!({ "text_scale": scale, "quiet": quiet })).unwrap_or_default(),
+        serde_json::to_vec(&json!({
+            "text_scale": scale,
+            "quiet": quiet,
+            "pi_font": hershey::face_name(font),
+        }))
+        .unwrap_or_default(),
     );
 }
 
@@ -304,6 +316,8 @@ struct App {
 
     /* quiet mode: pauses send nothing to pi (sidebar toggle, persisted) */
     quiet: bool,
+    /* pi's default handwriting face (sidebar toggle, persisted) */
+    pi_font: hershey::Face,
 
     /* transient chrome */
     indicator_until: Option<Instant>,
@@ -465,6 +479,13 @@ impl App {
                         format!("PI: {}", if self.quiet { "QUIET" } else { "AUTO" }),
                         self.quiet,
                     ),
+                    SbRow::PiFont => (
+                        format!(
+                            "PI FONT: {}",
+                            hershey::face_name(self.pi_font).to_uppercase()
+                        ),
+                        false,
+                    ),
                     SbRow::FontSize => (
                         format!("-   PI TEXT {:3}%   +", (self.text_scale * 100.0).round() as i32),
                         false,
@@ -583,9 +604,17 @@ impl App {
                 self.live.toggle(self.nb.current);
                 self.paint_sidebar(); /* stays open: shows the new state */
             }
+            SbRow::PiFont => {
+                let i = hershey::FACE_ORDER.iter().position(|f| *f == self.pi_font).unwrap_or(0);
+                self.pi_font = hershey::FACE_ORDER[(i + 1) % hershey::FACE_ORDER.len()];
+                hershey::set_default_face(self.pi_font);
+                save_settings(self.text_scale, self.quiet, self.pi_font);
+                println!("notebook: pi font -> {}", hershey::face_name(self.pi_font));
+                self.paint_sidebar(); /* stays open for repeated taps */
+            }
             SbRow::Quiet => {
                 self.quiet = !self.quiet;
-                save_settings(self.text_scale, self.quiet);
+                save_settings(self.text_scale, self.quiet, self.pi_font);
                 println!("notebook: pi {}", if self.quiet { "quiet" } else { "auto" });
                 if !self.quiet && self.page_changed {
                     /* back to AUTO: offer the accumulated page soon */
@@ -604,7 +633,7 @@ impl App {
                 };
                 let new = (new * 10.0).round() / 10.0;
                 self.text_scale = new.clamp(TEXT_SCALE_MIN, TEXT_SCALE_MAX);
-                save_settings(self.text_scale, self.quiet);
+                save_settings(self.text_scale, self.quiet, self.pi_font);
                 self.paint_sidebar(); /* stays open for repeated taps */
             }
             SbRow::Refresh => {
@@ -818,7 +847,9 @@ impl App {
         if flash {
             self.disp.full_refresh();
         } else {
-            self.disp.update(0, 0, FB_W, FB_H, Wave::Text);
+            /* full GL16: antialiased reading text stays smooth (a partial
+             * pass speckles the greys) and there is no flash */
+            self.disp.update(0, 0, FB_W, FB_H, Wave::Print);
         }
     }
 
@@ -942,7 +973,7 @@ impl App {
         if flash {
             self.disp.full_refresh();
         } else {
-            self.disp.update(0, 0, FB_W, FB_H, Wave::Text);
+            self.disp.update(0, 0, FB_W, FB_H, Wave::Print);
         }
     }
 
@@ -1892,7 +1923,9 @@ fn main() -> std::process::ExitCode {
     let mut last_activity = Instant::now();
 
     let now = Instant::now();
-    let (text_scale, quiet) = load_settings();
+    let (text_scale, quiet, saved_font) = load_settings();
+    let pi_font = saved_font.unwrap_or_else(hershey::default_face);
+    hershey::set_default_face(pi_font);
     let mut app = App {
         fb,
         disp,
@@ -1927,6 +1960,7 @@ fn main() -> std::process::ExitCode {
         last_activity_page: 0,
         text_scale,
         quiet,
+        pi_font,
         lib_view: None,
         deghost_at: None,
         live: live::Live::new(),

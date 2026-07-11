@@ -29,8 +29,15 @@ use std::os::unix::io::RawFd;
 pub enum Wave {
     /// Low latency, near-binary (pen ink, buttons, scroll repaints).
     Ink,
-    /// Flash-free quality (antialiased conversation text).
+    /// Flash-free quality (antialiased text on an already-white area).
     Text,
+    /// Full-frame flash-free 16-level (GL16 + FULL) for typeset READING
+    /// views (library docs, AGENT.md): a *partial* pass approximates greys
+    /// with a fast speckled waveform, so antialiased text turns to salt-and-
+    /// pepper; a *full* pass drives every pixel with the real 16-level LUT,
+    /// so fine greys render smooth — and GL16 has no black clearing phase,
+    /// so it eases over without a flash. (Ported from alt-ui/Paper.)
+    Print,
 }
 
 pub enum Display {
@@ -70,7 +77,8 @@ impl Display {
             Display::Qtfb { sock, mode } => {
                 let m = match wave {
                     Wave::Ink => RefreshMode::UltraFast,
-                    Wave::Text => RefreshMode::Ui,
+                    /* qtfb (preview) has no full-LUT partial distinction */
+                    Wave::Text | Wave::Print => RefreshMode::Ui,
                 };
                 if mode.get() != m as i32 {
                     mode.set(m as i32);
@@ -78,9 +86,17 @@ impl Display {
                 }
                 let _ = sock.update_region(x, y, w, h);
             }
-            Display::Rm2fb(c) => {
-                let _ = c.update(x, y, w, h, wave == Wave::Ink);
-            }
+            Display::Rm2fb(c) => match wave {
+                Wave::Ink => {
+                    let _ = c.update(x, y, w, h, true);
+                }
+                Wave::Text => {
+                    let _ = c.update(x, y, w, h, false);
+                }
+                Wave::Print => {
+                    let _ = c.gl16_full(x, y, w, h);
+                }
+            },
         }
     }
 
