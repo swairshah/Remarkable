@@ -40,14 +40,15 @@ done
 sleep 0.5
 
 # pi lives in /home/root/bin and needs node on PATH (pi-harness install).
-# PAPER_EXT points pi at the canvas-tools extension shipped next to the
-# binary; the app passes it to pi with -e.
+# PAPER_EXT points pi at the extensions shipped next to the binary
+# (colon-separated; the app passes each to pi with -e): canvas tools +
+# per-turn metrics (latency/tokens/payload -> ~/.local/share/alt-ui/metrics.jsonl).
 # PAPER_FONT is the default face for pi's writing: serif (formal roman),
 # script (natural cursive handwriting), or sans (plain plotter).
 # PAPER_FONT_DIR holds the device-extracted UI fonts (make fonts), optional.
 cd /home/root
 HOME=/home/root PATH="/home/root/bin:/home/root/opt/node/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-    PAPER_EXT="$HERE/paper-canvas.ts" \
+    PAPER_EXT="$HERE/paper-canvas.ts:$HERE/paper-transcribe.ts:$HERE/paper-metrics.ts" \
     PAPER_FONT="${PAPER_FONT:-serif}" \
     PAPER_FONT_DIR="${PAPER_FONT_DIR:-$HERE/fonts}" \
     "$HERE/paper" >>/tmp/paper.log 2>&1

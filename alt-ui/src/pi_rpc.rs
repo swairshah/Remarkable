@@ -202,8 +202,11 @@ impl Pi {
             sys,
         ];
         if let Ok(ext) = std::env::var("PAPER_EXT") {
-            args.push("-e".into());
-            args.push(ext);
+            // colon-separated list of extension paths (canvas tools, metrics, ...)
+            for p in ext.split(':').filter(|p| !p.is_empty()) {
+                args.push("-e".into());
+                args.push(p.to_string());
+            }
         }
         if resumed {
             args.push("--continue".into());

@@ -31,7 +31,7 @@
 # One-time setup: rustup target add armv7-unknown-linux-musleabihf
 # Requires pi already on the tablet (../pi/pi-harness/install.sh).
 
-HOST ?= root@192.168.1.3
+HOST ?= root@192.168.1.2
 BIN := paper
 TARGET := armv7-unknown-linux-musleabihf
 BUILT := target/$(TARGET)/release/$(BIN)
@@ -106,6 +106,8 @@ deploy: build vendor/rm2fb_server
 	cat scripts/appload-launch.sh | $(SSH) 'cat > $(DEVICE_DIR)/appload-launch.sh && chmod +x $(DEVICE_DIR)/appload-launch.sh'
 	cat scripts/takeover.sh | $(SSH) 'cat > $(DEVICE_DIR)/takeover.sh && chmod +x $(DEVICE_DIR)/takeover.sh'
 	cat ext/paper-canvas.ts | $(SSH) 'cat > $(DEVICE_DIR)/paper-canvas.ts'
+	cat ext/paper-metrics.ts | $(SSH) 'cat > $(DEVICE_DIR)/paper-metrics.ts'
+	cat ext/paper-transcribe.ts | $(SSH) 'cat > $(DEVICE_DIR)/paper-transcribe.ts'
 	cat vendor/rm2fb_server | $(SSH) 'cat > $(DEVICE_DIR)/rm2fb_server && chmod +x $(DEVICE_DIR)/rm2fb_server'
 	cat vendor/librm2fb_server.so | $(SSH) 'cat > $(DEVICE_DIR)/librm2fb_server.so'
 	cat app/external.manifest.json | $(SSH) 'cat > $(DEVICE_DIR)/external.manifest.json'
@@ -172,9 +174,11 @@ adopt:
 
 trace:
 	mkdir -p build/sessions
+	rm -f build/sessions/*.jsonl   # mirror the device exactly — no stale sessions
 	$(SSH) 'tar -C $(DATA_DIR)/sessions -cf - .' | tar -C build/sessions -xf -
 	$(SSH) 'cat /tmp/paper.log 2>/dev/null' > build/paper.log || true
-	python3 tools/trace-viewer.py build/sessions --log build/paper.log -o build/trace.html
+	$(SSH) 'cat $(DATA_DIR)/metrics.jsonl 2>/dev/null' > build/metrics.jsonl || true
+	python3 tools/trace-viewer.py build/sessions --log build/paper.log --metrics build/metrics.jsonl -o build/trace.html
 	open build/trace.html 2>/dev/null || true
 
 log:
