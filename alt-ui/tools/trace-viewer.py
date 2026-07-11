@@ -14,6 +14,7 @@ Usage:
 
 No dependencies. Open the output in any browser.
 """
+import datetime
 import html
 import json
 import os
@@ -157,8 +158,18 @@ def render_session(path, out):
     out.append(f"<div class='usage'>cwd {esc(header.get('cwd', '?'))} · {len(entries)} entries</div>")
 
     last_page_img = None   # data URI of the most recent page image pi was shown
+    last_page_no = None    # which page that image shows (from "page N of M" text)
+    blank_pages = set()    # pages created by canvas_insert_note, not yet drawn on
     turn = 0
     nav = []
+    pause_at = None        # datetime of the current pause (user msg) for latency
+    page_re = re.compile(r"page (\d+) of \d+")
+
+    def parse_ts(e):
+        try:
+            return datetime.datetime.fromisoformat((e.get("timestamp") or "").replace("Z", "+00:00"))
+        except ValueError:
+            return None
 
     for e in entries:
         if e.get("type") == "compaction":
@@ -173,12 +184,16 @@ def render_session(path, out):
 
         if role == "user":
             turn += 1
+            pause_at = parse_ts(e)
             anchor = f"t{turn}"
             nav.append(f"<a href='#{anchor}'>#{turn} {ts}</a>")
             out.append(f"<div class='turnhdr' id='{anchor}'>— pause #{turn} · {ts} —</div>")
             out.append("<div class='card user'><div class='role'>page → pi</div>")
             for b in content_blocks(msg.get("content")):
                 if b.get("type") == "text":
+                    pm = page_re.search(b.get("text", ""))
+                    if pm:
+                        last_page_no = int(pm.group(1))
                     out.append(f"<div class='text'>{esc(b['text'])}</div>")
                 elif b.get("type") == "image":
                     uri = f"data:{b.get('mimeType', 'image/png')};base64,{b.get('data', '')}"
@@ -187,7 +202,11 @@ def render_session(path, out):
             out.append("</div>")
 
         elif role == "assistant":
-            out.append(f"<div class='card asst'><div class='role'>pi · {ts} {fmt_usage(msg)}</div>")
+            lat = ""
+            t = parse_ts(e)
+            if pause_at and t:
+                lat = f"<b>+{(t - pause_at).total_seconds():.1f}s</b> · "
+            out.append(f"<div class='card asst'><div class='role'>pi · {lat}{ts} {fmt_usage(msg)}</div>")
             if msg.get("stopReason") in ("error", "aborted"):
                 out.append(f"<span class='badge err'>{esc(msg.get('stopReason'))}: "
                            f"{esc(msg.get('errorMessage', ''))}</span>")
@@ -205,14 +224,24 @@ def render_session(path, out):
                 elif t == "toolCall":
                     name = b.get("name", "?")
                     args = b.get("arguments") or {}
-                    if name == "reader_draw":
+                    if name in ("reader_draw", "canvas_draw"):
                         out.append("<span class='badge drew'>DREW on page "
                                    f"{esc(args.get('page', '(current)'))}</span>")
-                        out.append(overlay_html(last_page_img, args.get("svg", ""),
-                                                "what pi saw", "where pi drew (red)"))
+                        # only composite over the page image if the draw targets
+                        # the page that image actually shows — a draw on a freshly
+                        # inserted note page renders on blank instead
+                        tgt = args.get("page")
+                        bg, cap = last_page_img, "where pi drew (red)"
+                        if tgt is not None and tgt in blank_pages:
+                            bg, cap = None, f"drawn on fresh blank page {esc(tgt)}"
+                            blank_pages.discard(tgt)
+                        elif tgt is not None and last_page_no is not None and tgt != last_page_no:
+                            bg, cap = None, f"drawn on page {esc(tgt)} (image above shows p.{last_page_no})"
+                        out.append(overlay_html(bg, args.get("svg", ""),
+                                                "what pi saw", cap))
                         out.append(f"<details><summary>svg source</summary>"
                                    f"<pre>{esc(args.get('svg', ''))}</pre></details>")
-                    elif name == "reader_erase":
+                    elif name in ("reader_erase", "canvas_erase"):
                         out.append(f"<span class='badge drew'>ERASE patch #{esc(args.get('id'))}"
                                    f" page {esc(args.get('page', '(current)'))}</span>")
                     else:
@@ -226,7 +255,14 @@ def render_session(path, out):
                        f"{esc(msg.get('toolName', 'tool'))} result{err} · {ts}</div>")
             for b in content_blocks(msg.get("content")):
                 if b.get("type") == "text":
-                    out.append(f"<div class='text'>{esc(b['text'][:3000])}</div>")
+                    t = b["text"]
+                    im = re.search(r"inserted as page (\d+)", t)
+                    if im:
+                        blank_pages.add(int(im.group(1)))
+                    sm = re.search(r"Now showing page (\d+) of", t)
+                    if sm:
+                        last_page_no = int(sm.group(1))
+                    out.append(f"<div class='text'>{esc(t[:3000])}</div>")
                 elif b.get("type") == "image":
                     uri = f"data:{b.get('mimeType', 'image/png')};base64,{b.get('data', '')}"
                     last_page_img = uri  # a view result is what pi now sees
@@ -238,6 +274,59 @@ def render_session(path, out):
                        f"{esc(msg.get('customType', 'custom'))}</div></div>")
 
     return nav
+
+
+def render_metrics(path, out):
+    """Per-turn table from paper-metrics.jsonl: latency, real tokens, payload."""
+    try:
+        recs = [json.loads(ln) for ln in open(path) if ln.strip()]
+    except (OSError, ValueError):
+        return
+    turns = [r for r in recs if r.get("t") == "turn"]
+    tools = [r for r in recs if r.get("t") == "tool"]
+    if not turns and not tools:
+        return
+
+    rows = []
+    tot_cost = tot_in = tot_out = 0
+    for r in turns:
+        lat = f"{r['latMs'] / 1000:.1f}s" if r.get("latMs") is not None else "?"
+        cost = r.get("cost")
+        tot_cost += cost or 0
+        tot_in += (r.get("in") or 0) + (r.get("cacheR") or 0)
+        tot_out += r.get("out") or 0
+        rows.append(
+            f"<tr><td>{esc((r.get('ts') or '')[11:19])}</td><td><b>{lat}</b></td>"
+            f"<td>{r.get('in', 0):,}</td><td>{r.get('cacheR', 0):,}</td>"
+            f"<td>{r.get('out', 0):,}</td>"
+            f"<td>{(r.get('sentBytes') or 0) / 1e6:.1f}MB / {r.get('sentImgs', 0)}img</td>"
+            f"<td>{'$%.4f' % cost if cost is not None else '—'}</td>"
+            f"<td>{esc(r.get('stop', ''))}</td></tr>")
+
+    tool_stats = {}
+    for r in tools:
+        s = tool_stats.setdefault(r.get("name", "?"), [0, 0, 0])  # n, total ms, max ms
+        s[0] += 1
+        if r.get("ms") is not None:
+            s[1] += r["ms"]
+            s[2] = max(s[2], r["ms"])
+    tool_rows = "".join(
+        f"<tr><td>{esc(n)}</td><td>{s[0]}</td><td>{s[1] / max(s[0], 1) / 1000:.1f}s</td>"
+        f"<td>{s[2] / 1000:.1f}s</td></tr>"
+        for n, s in sorted(tool_stats.items(), key=lambda kv: -kv[1][1]))
+
+    out.append(
+        "<div class='card meta'><div class='role'>device metrics — per pi turn</div>"
+        f"<div class='usage'>{len(turns)} turns · {tot_in:,} tok in (incl. cache) · "
+        f"{tot_out:,} tok out · ${tot_cost:.4f}</div>"
+        "<table style='border-collapse:collapse;font-size:12px;width:100%'>"
+        "<tr style='text-align:left;opacity:.6'><th>time</th><th>latency</th><th>in</th>"
+        "<th>cache</th><th>out</th><th>payload sent</th><th>cost</th><th>stop</th></tr>"
+        f"{''.join(rows)}</table>"
+        + (f"<details><summary>tool timings</summary><table style='border-collapse:collapse;font-size:12px'>"
+           f"<tr style='text-align:left;opacity:.6'><th>tool</th><th>calls</th><th>avg</th><th>max</th></tr>"
+           f"{tool_rows}</table></details>" if tool_rows else "")
+        + "</div>")
 
 
 def render_device_log(path, out):
@@ -272,6 +361,11 @@ def main():
         i = args.index("--log")
         log_path = args[i + 1]
         del args[i:i + 2]
+    metrics_path = None
+    if "--metrics" in args:
+        i = args.index("--metrics")
+        metrics_path = args[i + 1]
+        del args[i:i + 2]
     files = []
     for a in args:
         if os.path.isdir(a):
@@ -284,6 +378,8 @@ def main():
         sys.exit("no session files given")
 
     body, all_nav = [], []
+    if metrics_path:
+        render_metrics(metrics_path, body)
     if log_path:
         render_device_log(log_path, body)
     for i, f in enumerate(files):
