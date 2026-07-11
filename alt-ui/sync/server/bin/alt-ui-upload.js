@@ -24,20 +24,24 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const crypto = require('crypto');
+const { execFile, spawn } = require('child_process');
 const { URL } = require('url');
+const { serializedLibrary } = require('./alt-ui-library');
 
-const BACKUP = '/home/exedev/remarkable-backup';
+const BACKUP = process.env.ALT_UI_BACKUP || '/home/exedev/remarkable-backup';
 const INBOX = path.join(BACKUP, 'alt-ui-inbound');
 const INCOMING = path.join(INBOX, 'incoming');
 const DOCS = path.join(INBOX, 'docs');                 // inbound bundles (delivery)
 const MIRROR = path.join(BACKUP, 'alt-ui', 'docs');    // tablet mirror (read meta)
 const SOURCES = path.join(BACKUP, 'alt-ui-sources');   // retained PDFs: <id>.pdf
 const PREVIEWS = path.join(BACKUP, 'alt-ui-previews'); // cached raw pages: <id>/<n>.png
-const RENDER = '/home/exedev/bin/alt-ui-render.sh';
+const COVERS = path.join(BACKUP, 'alt-ui-covers');     // small web covers, keyed by source+doc version
+const RENDER = process.env.ALT_UI_RENDER || '/home/exedev/bin/alt-ui-render.sh';
 const PREVIEW_PY = '/home/exedev/bin/alt-ui-preview-page.py';
 const PY = '/home/exedev/alt-ui-venv/bin/python3';
-[INCOMING, DOCS, SOURCES, PREVIEWS].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+const PORT = Number(process.env.ALT_UI_PORT || 8093);
+[INCOMING, DOCS, SOURCES, PREVIEWS, COVERS].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
 const MAX_BYTES = 200 * 1024 * 1024;
 const DEFAULT_CROP = [0, 0, 1, 1];   // whole page (fractions 0..1)
@@ -56,6 +60,59 @@ function freeDir(slug) {
 function safeId(id) { return typeof id === 'string' && /^[a-z0-9][a-z0-9_-]{0,100}$/.test(id) ? id : null; }
 function sourcePdf(id) { return path.join(SOURCES, id + '.pdf'); }
 function json(res, code, obj) { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); }
+
+function handleLibrary(req, res) {
+  const started = process.hrtime.bigint();
+  const result = serializedLibrary({
+    mirror: path.join(BACKUP, 'alt-ui'),
+    inbound: path.join(BACKUP, 'alt-ui-inbound'),
+  });
+  const durationMs = Number(process.hrtime.bigint() - started) / 1e6;
+  const headers = {
+    'Cache-Control': 'no-cache',
+    'ETag': result.etag,
+    'X-Paper-Generation': result.library.generation,
+    'Server-Timing': `library;dur=${durationMs.toFixed(1)}`,
+  };
+  if (req.headers['if-none-match'] === result.etag) {
+    res.writeHead(304, headers); res.end(); return;
+  }
+  res.writeHead(200, { ...headers, 'Content-Type': 'application/json', 'Content-Length': result.body.length });
+  res.end(result.body);
+}
+
+function handleCover(res, source, id, version) {
+  id = safeId(id);
+  if (!id || !/^(?:data|inbound)$/.test(source || '') || !/^[a-z0-9]+$/.test(version || '')) {
+    res.writeHead(400); res.end('bad cover request'); return;
+  }
+  const root = source === 'data' ? path.join(BACKUP, 'alt-ui') : path.join(BACKUP, 'alt-ui-inbound');
+  const docDir = path.join(root, 'docs', id);
+  const thumb = path.join(docDir, 'thumb.png');
+  let original = fs.existsSync(thumb) ? thumb : null;
+  if (!original) {
+    const state = (() => { try { return JSON.parse(fs.readFileSync(path.join(docDir, 'state.json'))); } catch (_) { return null; } })();
+    const first = state && Array.isArray(state.seq) && state.seq[0];
+    const page = first && first.p != null ? first.p + 1 : 1;
+    const candidate = path.join(docDir, 'pages', String(page).padStart(4, '0') + '.png');
+    if (fs.existsSync(candidate)) original = candidate;
+  }
+  if (!original) { res.writeHead(404); res.end('no cover source'); return; }
+
+  const cached = path.join(COVERS, `${source}-${id}-${version}.webp`);
+  const serve = (file, type) => fs.readFile(file, (err, data) => {
+    if (err) { res.writeHead(500); res.end('cover read failed'); return; }
+    res.writeHead(200, {
+      'Content-Type': type,
+      'Content-Length': data.length,
+      'Cache-Control': 'private, max-age=31536000, immutable',
+    });
+    res.end(data);
+  });
+  if (fs.existsSync(cached)) return serve(cached, 'image/webp');
+  execFile('convert', [original, '-resize', '280x373', '-strip', '-quality', '78', '-define', 'webp:method=6', cached],
+    { timeout: 30000 }, (err) => err ? serve(original, 'image/png') : serve(cached, 'image/webp'));
+}
 
 // A doc's meta from wherever it currently lives (pending inbound, then mirror).
 function readMeta(id) {
@@ -160,48 +217,115 @@ function handleAttach(req, res) {
   });
 }
 
-/* ---- POST /render {id, margins:[l,t,r,b]} ---------------------------- */
-function handleRender(req, res) {
-  readBody(req, res, (buf) => {
-    let body; try { body = JSON.parse(buf.toString('utf8')); } catch (_) { return json(res, 400, { ok: false, error: 'bad json' }); }
-    const id = safeId(body.id);
-    const c = body.crop;
-    if (!id) return json(res, 400, { ok: false, error: 'bad id' });
-    if (!Array.isArray(c) || c.length !== 4 || !c.every((v) => Number.isFinite(v) && v >= 0 && v <= 1)
-        || c[2] - c[0] < 0.05 || c[3] - c[1] < 0.05)
-      return json(res, 400, { ok: false, error: 'crop must be 4 fractions 0..1 (min 5% each way)' });
-    const src = sourcePdf(id);
-    if (!fs.existsSync(src)) return json(res, 404, { ok: false, error: 'no source PDF — attach one first' });
+/* ---- full-book crop rendering ---------------------------------------- */
+function renderSpec(body) {
+  const id = safeId(body && body.id);
+  const crop = body && body.crop;
+  if (!id) return { status: 400, error: 'bad id' };
+  if (!Array.isArray(crop) || crop.length !== 4 || !crop.every((v) => Number.isFinite(v) && v >= 0 && v <= 1)
+      || crop[2] - crop[0] < 0.05 || crop[3] - crop[1] < 0.05)
+    return { status: 400, error: 'crop must be 4 fractions 0..1 (min 5% each way)' };
+  const src = sourcePdf(id);
+  if (!fs.existsSync(src)) return { status: 404, error: 'no source PDF — attach one first' };
+  const existing = readMeta(id) || {};
+  return {
+    id, crop, src, existing,
+    title: existing.title || id,
+    orig: existing.orig_crop || existing.crop || DEFAULT_CROP,
+    total: existing.pages || 0,
+  };
+}
 
-    const existing = readMeta(id) || {};
-    const title = existing.title || id;
-    const orig = existing.orig_crop || existing.crop || DEFAULT_CROP;
-    const ca = c.map((v) => String(v));
-    const tmpOut = path.join(INCOMING, `render-${id}-${Date.now()}`);
-    execFile(RENDER, [src, tmpOut, title, ca[0], ca[1], ca[2], ca[3]], { timeout: 240000 }, (err, so, se) => {
-      if (err) { fs.rmSync(tmpOut, { recursive: true, force: true }); console.error('re-render failed', se || err.message); return json(res, 500, { ok: false, error: String(se || err.message) }); }
-      try {
-        const dest = path.join(DOCS, id);
-        fs.mkdirSync(dest, { recursive: true });
-        const rendered = JSON.parse(fs.readFileSync(path.join(tmpOut, 'meta.json')));
-        // start from the doc's live meta so title/folder/kind the tablet set
-        // survive; only overlay the render outputs + crop.
-        const meta = { ...existing, pages: rendered.pages, w: rendered.w, h: rendered.h,
-                       crop: rendered.crop, orig_crop: orig };
-        delete meta.margins;
-        fs.writeFileSync(path.join(dest, 'meta.json'), JSON.stringify(meta));
-        copyDir(path.join(tmpOut, 'pages'), path.join(dest, 'pages'));
-        copyDir(path.join(tmpOut, 'text'), path.join(dest, 'text'));
-        // a doc not yet on the tablet (pending) needs a state.json; one already
-        // on the tablet keeps its own (don't clobber reading position / notes).
-        if (!fs.existsSync(path.join(dest, 'state.json')) && fs.existsSync(path.join(tmpOut, 'state.json')))
-          fs.copyFileSync(path.join(tmpOut, 'state.json'), path.join(dest, 'state.json'));
+function deliverRender(spec, tmpOut) {
+  const dest = path.join(DOCS, spec.id);
+  fs.mkdirSync(dest, { recursive: true });
+  const rendered = JSON.parse(fs.readFileSync(path.join(tmpOut, 'meta.json')));
+  const meta = { ...spec.existing, pages: rendered.pages, w: rendered.w, h: rendered.h,
+                 crop: rendered.crop, orig_crop: spec.orig };
+  delete meta.margins;
+  fs.writeFileSync(path.join(dest, 'meta.json'), JSON.stringify(meta));
+  copyDir(path.join(tmpOut, 'pages'), path.join(dest, 'pages'));
+  copyDir(path.join(tmpOut, 'text'), path.join(dest, 'text'));
+  if (fs.existsSync(path.join(tmpOut, 'thumb.png')))
+    fs.copyFileSync(path.join(tmpOut, 'thumb.png'), path.join(dest, 'thumb.png'));
+  if (!fs.existsSync(path.join(dest, 'state.json')) && fs.existsSync(path.join(tmpOut, 'state.json')))
+    fs.copyFileSync(path.join(tmpOut, 'state.json'), path.join(dest, 'state.json'));
+  fs.rmSync(tmpOut, { recursive: true, force: true });
+  return rendered.pages;
+}
+
+function runRender(spec, onProgress = () => {}) {
+  const ca = spec.crop.map(String);
+  const tmpOut = path.join(INCOMING, `render-${spec.id}-${Date.now()}`);
+  return new Promise((resolve, reject) => {
+    let stderr = '', settled = false;
+    const child = spawn(RENDER, [spec.src, tmpOut, spec.title, ca[0], ca[1], ca[2], ca[3]]);
+    child.stdout.resume();
+    const timer = setTimeout(() => { child.kill('SIGKILL'); }, 240000);
+    child.stderr.on('data', (chunk) => {
+      stderr = (stderr + chunk.toString()).slice(-16000);
+      for (const match of stderr.matchAll(/mkbook: (\d+)\/(\d+) pages/g)) onProgress(Number(match[1]), Number(match[2]));
+    });
+    child.on('error', (err) => {
+      if (settled) return; settled = true; clearTimeout(timer);
+      fs.rmSync(tmpOut, { recursive: true, force: true }); reject(err);
+    });
+    child.on('close', (code, signal) => {
+      if (settled) return; settled = true; clearTimeout(timer);
+      if (code !== 0) {
         fs.rmSync(tmpOut, { recursive: true, force: true });
-      } catch (e) { fs.rmSync(tmpOut, { recursive: true, force: true }); console.error('deliver failed', e); return json(res, 500, { ok: false, error: String(e) }); }
-      console.log('re-rendered', id, 'crop', ca.join(','), '-> inbound');
-      json(res, 200, { ok: true, crop: c });
+        reject(new Error(stderr || `render exited ${code == null ? signal : code}`)); return;
+      }
+      try {
+        const pages = deliverRender(spec, tmpOut);
+        console.log('re-rendered', spec.id, 'crop', ca.join(','), '-> inbound');
+        resolve({ pages });
+      } catch (err) {
+        fs.rmSync(tmpOut, { recursive: true, force: true }); reject(err);
+      }
     });
   });
+}
+
+function readRenderSpec(req, res, cb) {
+  readBody(req, res, (buf) => {
+    let body; try { body = JSON.parse(buf.toString('utf8')); } catch (_) { json(res, 400, { ok: false, error: 'bad json' }); return; }
+    const spec = renderSpec(body);
+    if (spec.error) { json(res, spec.status, { ok: false, error: spec.error }); return; }
+    cb(spec);
+  });
+}
+
+// Compatibility endpoint: waits for the full render before responding.
+function handleRender(req, res) {
+  readRenderSpec(req, res, (spec) => runRender(spec)
+    .then(() => json(res, 200, { ok: true, crop: spec.crop }))
+    .catch((err) => { console.error('re-render failed', err); json(res, 500, { ok: false, error: String(err.message || err) }); }));
+}
+
+const renderJobs = new Map();
+function pruneRenderJobs() {
+  const cutoff = Date.now() - 3600000;
+  for (const [id, job] of renderJobs) if (job.updated < cutoff) renderJobs.delete(id);
+}
+function handleRenderJob(req, res) {
+  readRenderSpec(req, res, (spec) => {
+    pruneRenderJobs();
+    const id = crypto.randomBytes(10).toString('hex');
+    const job = { id, ok: true, status: 'queued', page: 0, total: spec.total, updated: Date.now() };
+    renderJobs.set(id, job);
+    json(res, 202, { ok: true, job: id });
+    setImmediate(() => {
+      Object.assign(job, { status: 'rendering', updated: Date.now() });
+      runRender(spec, (page, total) => Object.assign(job, { page, total, updated: Date.now() }))
+        .then(({ pages }) => Object.assign(job, { status: 'done', page: pages, total: pages, crop: spec.crop, updated: Date.now() }))
+        .catch((err) => { console.error('render job failed', err); Object.assign(job, { status: 'failed', error: String(err.message || err), updated: Date.now() }); });
+    });
+  });
+}
+function handleRenderStatus(res, id) {
+  if (!/^[a-f0-9]{20}$/.test(id || '') || !renderJobs.has(id)) return json(res, 404, { ok: false, error: 'unknown render job' });
+  json(res, 200, renderJobs.get(id));
 }
 
 /* ---- router ----------------------------------------------------------- */
@@ -209,10 +333,14 @@ http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   const p = u.pathname;
   if (req.method === 'GET' && p === '/health') { res.writeHead(200); res.end('ok'); return; }
+  if (req.method === 'GET' && p === '/library') return handleLibrary(req, res);
+  if (req.method === 'GET' && p === '/cover') return handleCover(res, u.searchParams.get('source'), u.searchParams.get('id'), u.searchParams.get('v'));
   if (req.method === 'GET' && p === '/source-status') return handleSourceStatus(res, u.searchParams.get('id'));
   if (req.method === 'GET' && p === '/preview') return handlePreview(res, u.searchParams.get('id'), parseInt(u.searchParams.get('page'), 10));
   if (req.method === 'POST' && p === '/upload') return handleUpload(req, res);
   if (req.method === 'POST' && p === '/attach') return handleAttach(req, res);
   if (req.method === 'POST' && p === '/render') return handleRender(req, res);
+  if (req.method === 'POST' && p === '/render-job') return handleRenderJob(req, res);
+  if (req.method === 'GET' && p === '/render-status') return handleRenderStatus(res, u.searchParams.get('job'));
   res.writeHead(404); res.end('not found');
-}).listen(8093, '127.0.0.1', () => console.log('paper upload/editor service on 127.0.0.1:8093'));
+}).listen(PORT, '127.0.0.1', () => console.log(`paper upload/editor service on 127.0.0.1:${PORT}`));

@@ -139,11 +139,20 @@ const DATA = '/paper/data/';
 const INBOUND = '/paper/inbound/';   // web-dropped docs pending tablet sync
 const UPLOAD = '/paper/upload';
 const API = '/paper/api/';           // crop editor: source-status, preview, render, attach
+const LIBRARY = API + 'library';
 const bust = {};                     // docId -> cache-bust token, bumped after a re-render
 const bustq = (id) => bust[id] ? ('?v=' + bust[id]) : '';   // so new pages load, not the cached ones
-const PAGE_W = 1404, PAGE_H = 1872, POLL_MS = 20000;
+const PAGE_W = 1404, PAGE_H = 1872, POLL_MS = 60000;
 const $ = (id) => document.getElementById(id);
 const $view = $('view');
+const PERF_START = performance.now();
+const paperPerf = window.__paperPerf = {};
+function perfMark(name) {
+  const ms = Math.round(performance.now() - PERF_START);
+  paperPerf[name] = ms;
+  document.documentElement.dataset['paper' + name[0].toUpperCase() + name.slice(1) + 'Ms'] = String(ms);
+  return ms;
+}
 
 const state = {
   folder: null,        // current folder ("" = root, null = not loaded)
@@ -162,6 +171,7 @@ async function jidx(path) { return jidxB(DATA, path); }
 async function jfile(path){ return jfileB(DATA, path); }
 async function tfile(path){ const r = await fetch(DATA + path, {cache:'no-store'}); if (!r.ok) return null; return r.text(); }
 const pad4 = (n) => String(n).padStart(4, '0');
+const withVersion = (url, version) => version ? url + (url.includes('?') ? '&' : '?') + 'v=' + encodeURIComponent(version) : url;
 const relDate = (ms) => {
   if (!ms) return '';
   const d = Math.floor((Date.now() - ms) / 86400000);
@@ -184,7 +194,7 @@ async function loadFrom(base, pending) {
   return docs;
 }
 
-async function loadDocs() {
+async function loadDocsLegacy() {
   const mirror = await loadFrom(DATA, false);
   const inbound = await loadFrom(INBOUND, true);
   /* a doc that has made it to the tablet mirror supersedes its pending copy */
@@ -199,6 +209,24 @@ async function loadDocs() {
   const sig = docs.map(d => d.id + ':' + d.mtime).join('|') + '#' + state.folders.join(',');
   const changed = sig !== state.sig; state.sig = sig;
   return changed;
+}
+
+async function loadDocs() {
+  try {
+    const r = await fetch(LIBRARY, { cache: 'no-cache' });
+    if (!r.ok) throw new Error('library ' + r.status);
+    const library = await r.json();
+    if (!library || !Array.isArray(library.docs)) throw new Error('bad library');
+    state.docs = library.docs;
+    state.folders = Array.isArray(library.folders) ? library.folders : [];
+    const sig = library.generation || JSON.stringify([state.docs.map(d => [d.id, d.version]), state.folders]);
+    const changed = sig !== state.sig; state.sig = sig;
+    perfMark('library');
+    return changed;
+  } catch (err) {
+    console.warn('Paper library endpoint unavailable; using legacy index', err);
+    return loadDocsLegacy();
+  }
 }
 
 /* ---------- rendering: shared stroke drawer (alt-ui/notebook JSON) ---------- */
@@ -241,7 +269,8 @@ async function thumbCanvas(d) {
   const e0 = st && st.seq && st.seq[0];
   if (d.meta.kind === 'book') {
     const pnum = e0 && e0.p != null ? e0.p : 0;
-    await drawImage(ctx, d.base, 'docs/' + d.id + '/pages/' + pad4(pnum + 1) + '.png' + bustq(d.id), scale).catch(()=>{});
+    const img = await loadImage(d.base + 'docs/' + d.id + '/pages/' + pad4(pnum + 1) + '.png' + bustq(d.id)).catch(()=>null);
+    if (img) ctx.drawImage(img, 0, 0, PAGE_W*scale, PAGE_H*scale);
     const ink = await jfileB(d.base, 'docs/' + d.id + '/ink/pdf-' + pad4(pnum + 1) + '.json');
     drawInk(ctx, ink, scale);
   } else {
@@ -252,12 +281,32 @@ async function thumbCanvas(d) {
   return c;
 }
 
-function drawImage(ctx, base, path, scale) {
-  return new Promise((res, rej) => {
+const imageCache = new Map();
+const jsonCache = new Map();
+function loadImage(url) {
+  if (imageCache.has(url)) return imageCache.get(url);
+  const pending = new Promise((res, rej) => {
     const img = new Image();
-    img.onload = () => { ctx.drawImage(img, 0, 0, PAGE_W*scale, PAGE_H*scale); res(); };
-    img.onerror = rej; img.src = base + path;
+    img.onload = () => res(img);
+    img.onerror = rej; img.src = url;
   });
+  imageCache.set(url, pending);
+  pending.catch(() => imageCache.delete(url));
+  return pending;
+}
+function cachedJson(url) {
+  if (!jsonCache.has(url)) {
+    jsonCache.set(url, fetch(url).then(r => r.ok ? r.json() : null).catch(() => null));
+  }
+  return jsonCache.get(url);
+}
+function inkKey(e) {
+  if (e && e.p != null) return 'pdf-' + pad4(e.p + 1);
+  if (e && e.n != null) return 'note-' + pad4(e.n);
+  return null;
+}
+function hasInk(d, key) {
+  return !Array.isArray(d.ink) || d.ink.includes(key);
 }
 
 /* ---------- home view ---------- */
@@ -296,11 +345,12 @@ async function renderHome() {
     const sub = d.pending
       ? (d.meta.kind === 'book' ? `${n} page${n===1?'':'s'} · syncing to tablet…` : 'notebook · syncing…')
       : (d.meta.kind === 'book' ? `${n} page${n===1?'':'s'}` : 'notebook') + ' · ' + relDate(d.mtime);
-    card.innerHTML = `<div class="thumb" data-id="${esc(d.id)}"></div>
+    const cover = d.cover ? (d.cover.startsWith('/') ? d.cover : withVersion(d.base + d.cover, d.coverVersion || d.version)) : '';
+    card.innerHTML = `<div class="thumb" data-id="${esc(d.id)}">${cover ? `<img src="${esc(cover)}" alt="" loading="lazy" decoding="async">` : ''}</div>
       <div class="meta"><div class="t">${esc(d.meta.title || d.id)}</div><div class="s">${esc(sub)}</div></div>`;
     card.onclick = () => openDoc(d);
     grid.appendChild(card);
-    thumbCanvas(d).then(c => { const t = card.querySelector('.thumb'); if (t) { t.innerHTML = ''; t.appendChild(c); } });
+    if (!cover) thumbCanvas(d).then(c => { const t = card.querySelector('.thumb'); if (t) { t.innerHTML = ''; t.appendChild(c); } });
   }
   $view.innerHTML = '';
   if (state.folder) {
@@ -310,6 +360,7 @@ async function renderHome() {
     $view.appendChild(back);
   }
   $view.appendChild(grid);
+  perfMark('grid');
 }
 
 /* ---------- doc reader ---------- */
@@ -329,6 +380,12 @@ function openEditor() {
 function toggleSidebar() {
   if (state.open) document.body.classList.toggle('sidebar');
 }
+function redrawOpenPages() {
+  if (!state.open) return;
+  document.querySelectorAll('.page').forEach(p => {
+    if (p._cv) renderPage(p._cv, state.open, p._entry);
+  });
+}
 // the doc-view sidebar (wide screens): navigation + per-doc actions
 function buildSidebar(d) {
   $('docside') && $('docside').remove();
@@ -342,16 +399,19 @@ function buildSidebar(d) {
   side.appendChild(mk('‹', 'My files', 'esc', goFiles));
   if (d.meta.kind === 'book') side.appendChild(mk('▦', 'Adjust margins', '', openEditor));
   const ai = mk('✦', 'AI ink', '', null, state.aiBlue);
-  ai.onclick = () => { state.aiBlue = !state.aiBlue; ai.classList.toggle('active', state.aiBlue); if (state.open) openDoc(state.open); };
+  ai.onclick = () => { state.aiBlue = !state.aiBlue; ai.classList.toggle('active', state.aiBlue); redrawOpenPages(); };
   side.appendChild(ai);
   document.body.appendChild(side);
   document.body.classList.add('reading', 'sidebar');   // sidebar on by default (CSS makes room)
 }
 
 async function openDoc(d) {
-  const st = await jfileB(d.base, 'docs/' + d.id + '/state.json');
-  const seq = (st && st.seq) || [];
-  state.open = { id: d.id, base: d.base, meta: d.meta, seq };
+  let seq = Array.isArray(d.seq) ? d.seq : null;
+  if (!seq) {
+    const st = await jfileB(d.base, 'docs/' + d.id + '/state.json');
+    seq = (st && st.seq) || [];
+  }
+  state.open = { ...d, seq };
   buildSidebar(d);
   $('crumb').innerHTML = '  ›  <span class="crumb" id="home-crumb">My files</span>  ›  ' + esc(d.meta.title || d.id);
   const hc = $('home-crumb'); if (hc) hc.onclick = () => { state.folder = d.meta.folder || null; renderHome(); };
@@ -379,9 +439,9 @@ async function openDoc(d) {
         if (!p._cv) {
           const cv = document.createElement('canvas'); cv.width = PAGE_W; cv.height = PAGE_H;
           p.insertBefore(cv, p.firstChild); p._cv = cv;
-          renderPage(cv, d.base, d.id, p._entry);
+          renderPage(cv, state.open, p._entry);
         }
-      } else if (p._cv) { p._cv.remove(); p._cv = null; }
+      } else if (p._cv) { p._cv._renderToken = (p._cv._renderToken || 0) + 1; p._cv.remove(); p._cv = null; }
     }
   }, { rootMargin: '1200px 0px' });
   openDoc._io = io;
@@ -396,15 +456,26 @@ async function openDoc(d) {
   }
 }
 
-async function renderPage(cv, base, id, e) {
+async function renderPage(cv, d, e) {
+  const token = (cv._renderToken || 0) + 1; cv._renderToken = token;
   const ctx = cv.getContext('2d');
   ctx.fillStyle = '#fbfbf9'; ctx.fillRect(0, 0, PAGE_W, PAGE_H);
+  const version = bust[d.id] || d.version;
+  const key = inkKey(e);
+  const inkPromise = key && hasInk(d, key)
+    ? cachedJson(withVersion(d.base + 'docs/' + d.id + '/ink/' + key + '.json', version))
+    : Promise.resolve(null);
   if (e.p != null) {
-    await drawImage(ctx, base, 'docs/' + id + '/pages/' + pad4(e.p + 1) + '.png' + bustq(id), 1).catch(()=>{});
-    const ink = await jfileB(base, 'docs/' + id + '/ink/pdf-' + pad4(e.p + 1) + '.json');
+    const imagePromise = loadImage(withVersion(d.base + 'docs/' + d.id + '/pages/' + pad4(e.p + 1) + '.png', version));
+    const img = await imagePromise.catch(() => null);
+    if (cv._renderToken !== token) return;
+    if (img) ctx.drawImage(img, 0, 0, PAGE_W, PAGE_H);
+    const ink = await inkPromise;
+    if (cv._renderToken !== token) return;
     drawInk(ctx, ink, 1);
   } else if (e.n != null) {
-    const ink = await jfileB(base, 'docs/' + id + '/ink/note-' + pad4(e.n) + '.json');
+    const ink = await inkPromise;
+    if (cv._renderToken !== token) return;
     drawInk(ctx, ink, 1);
   }
 }
@@ -590,8 +661,21 @@ async function saveCrop() {
   const d = med.doc, id = med.id;
   const btn = $('med-save'); btn.disabled = true; btn.textContent = 'Rendering…';
   try {
-    const r = await fetch(API + 'render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, crop: c }) });
-    const j = await r.json(); if (!j.ok) throw new Error(j.error || 'render failed');
+    const r = await fetch(API + 'render-job', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, crop: c }) });
+    const j = await r.json(); if (!j.ok || !j.job) throw new Error(j.error || 'render failed');
+    const deadline = Date.now() + 300000;
+    while (Date.now() < deadline) {
+      const sr = await fetch(API + 'render-status?job=' + encodeURIComponent(j.job), { cache: 'no-store' });
+      const status = await sr.json();
+      if (!sr.ok || !status.ok) throw new Error(status.error || 'render status failed');
+      if (status.status === 'failed') throw new Error(status.error || 'render failed');
+      if (status.status === 'done') break;
+      btn.textContent = status.total && status.page
+        ? `Rendering ${status.page} / ${status.total}…`
+        : 'Preparing render…';
+      await new Promise(resolve => setTimeout(resolve, 750));
+    }
+    if (Date.now() >= deadline) throw new Error('render timed out');
     bust[id] = Date.now();          // force the viewer to load the NEW pages, not the cached ones
     closeEditor();
     toast('Cropped & re-rendered — reaches your tablet on the next sync (~90s).', 6000);
@@ -614,10 +698,14 @@ window.addEventListener('keydown', (e) => {
 });
 
 /* ---------- poll / boot ---------- */
+let refreshBusy = false;
 async function refresh() {
-  const changed = await loadDocs();
-  if (state.open) return;         // reading a doc: leave it alone
-  if (changed || $view.querySelector('.empty')) renderHome();
+  if (state.open || document.hidden || refreshBusy) return;
+  refreshBusy = true;
+  try {
+    const changed = await loadDocs();
+    if (changed || $view.querySelector('.empty')) renderHome();
+  } finally { refreshBusy = false; }
 }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
@@ -629,10 +717,13 @@ window.addEventListener('dragenter', (e) => { e.preventDefault(); if (dragN++ ==
 window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('dragleave', () => { if (--dragN <= 0) { dragN = 0; $('drop').classList.remove('show'); } });
 window.addEventListener('drop', (e) => { e.preventDefault(); dragN = 0; $('drop').classList.remove('show'); if (e.dataTransfer.files.length) upload(e.dataTransfer.files); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !state.open) refresh(); });
 
 (async function boot() {
   await loadDocs();
   renderHome();
+  perfMark('ready');
+  console.info('Paper ready', paperPerf);
   setInterval(refresh, POLL_MS);
 })();
 </script>

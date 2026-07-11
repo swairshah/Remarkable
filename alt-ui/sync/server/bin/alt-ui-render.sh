@@ -23,6 +23,13 @@ fi
 
 "$PY" "$MKBOOK" "$PDF" -o "$OUT" --title "$TITLE" "${CROPARGS[@]}"
 
+# The tablet normally maintains this 1/4-scale home cover itself. Web uploads
+# need the same artifact before their first tablet sync so the browser can use
+# one small cacheable image instead of fetching state + a full page + ink.
+if command -v convert >/dev/null 2>&1 && [ -f "$OUT/pages/0001.png" ]; then
+  convert "$OUT/pages/0001.png" -resize 351x468 -strip -define png:compression-level=9 "$OUT/thumb.png"
+fi
+
 # synthesize state.json: seq = every PDF page, 1-based positions
 PAGES="$("$PY" -c "import json;print(json.load(open('$OUT/meta.json'))['pages'])")"
 "$PY" - "$OUT" "$PAGES" <<'PYEOF'
