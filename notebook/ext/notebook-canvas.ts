@@ -170,7 +170,7 @@ export default function (pi: ExtensionAPI) {
       "Returns a fresh image of a notebook page (half scale: multiply image coordinates by 2 " +
       "to get page coordinates) plus the list of your patches on it (ids and bounding boxes). " +
       "Use it to re-check the page after drawing, or to read another page for context — e.g. " +
-      "the previous page when the current one continues a draft, list, or question from it."
+      "the previous page when the current one continues a draft, list, or question from it.",
     parameters: {
       type: "object",
       properties: {
