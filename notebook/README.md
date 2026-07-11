@@ -66,7 +66,8 @@ is `pass`; draw only when addressed, asked, or correcting something.
 | Tap the top-left corner (pen or finger) | Toggle the sidebar: first/last/active page, go-to-page number pad, INSTRUCTIONS (AGENT.md), LIBRARY, pi text size [-]/[+], refresh |
 | Sidebar → LIBRARY | Browse pi's saved material (`~/.local/share/notebook/library/*.md`): tap an item to read it, swipe left/right to page through, swipe right at the start to go back |
 | Swipe right on page 1 | The INSTRUCTIONS page (AGENT.md as text): write feedback on it, pause — pi rewrites the file; swipe left to return |
-| Swipe down from the top edge, tap CLOSE | Exit to xochitl |
+| Sidebar → X CLOSE (pinned at the bottom) | Exit to xochitl |
+| Sidebar → PI: AUTO / QUIET | Quiet mode: pauses send NOTHING to pi (write in peace, zero cost); toggle back to AUTO and the accumulated page is offered |
 | Power button | Sleep page + real suspend; wake resumes in place (WiFi re-healed) |
 
 A small gray dot top-right = pi is looking at the page / drawing. A `3 / 7`

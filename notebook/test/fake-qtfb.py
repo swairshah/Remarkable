@@ -165,6 +165,7 @@ def main():
     pen(PEN_PRESS, 40, 40)          # corner tap: sidebar
     pen(PEN_RELEASE, 40, 40)
     drain(1.0)
+    write_png(out_png.replace(".png", "-sidebar.png"))
     pen(PEN_PRESS, 180, 130 + 5 * 68 + 30)   # LIBRARY row
     pen(PEN_RELEASE, 180, 130 + 5 * 68 + 30)
     drain(1.5)

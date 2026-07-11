@@ -90,14 +90,9 @@ fn pi_stall() -> Duration {
 }
 const PI_RESPAWN_DELAY: Duration = Duration::from_secs(5);
 
-/* takeover exit, xochitl-style: top-edge swipe reveals CLOSE */
-const EDGE_Y: i32 = 16;
-const SWIPE_DIST: i32 = 90;
-const CLOSE_X0: i32 = 16;
-const CLOSE_Y0: i32 = 12;
-const CLOSE_BTN_W: i32 = 190;
-const CLOSE_BTN_H: i32 = 64;
-const CLOSE_TTL: Duration = Duration::from_secs(4);
+/* takeover exit: the X CLOSE button pinned at the sidebar's bottom */
+const SB_CLOSE_H: i32 = 64;
+const SB_CLOSE_MARGIN: i32 = 24;
 
 /* page-flip gesture: mostly-horizontal finger travel */
 const FLIP_DX: i32 = 260;
@@ -124,10 +119,11 @@ enum SbRow {
     Agent,
     Library,  /* pi's saved material */
     Live,     /* stream strokes to the web viewer */
+    Quiet,    /* quiet mode: pauses send NOTHING to pi (write in peace) */
     FontSize, /* [-] 100% [+]: zoom on pi's text */
     Refresh,
 }
-const SB_ROWS: [SbRow; 9] = [
+const SB_ROWS: [SbRow; 10] = [
     SbRow::First,
     SbRow::Last,
     SbRow::Active,
@@ -135,6 +131,7 @@ const SB_ROWS: [SbRow; 9] = [
     SbRow::Agent,
     SbRow::Library,
     SbRow::Live,
+    SbRow::Quiet,
     SbRow::FontSize,
     SbRow::Refresh,
 ];
@@ -149,21 +146,29 @@ fn settings_path() -> String {
     format!("{home}/.local/share/notebook/settings.json")
 }
 
-fn load_text_scale() -> f32 {
-    std::fs::read(settings_path())
+/// (text_scale, quiet) from settings.json; both optional in the file.
+fn load_settings() -> (f32, bool) {
+    let v = std::fs::read(settings_path())
         .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let scale = v
+        .as_ref()
         .and_then(|v| v["text_scale"].as_f64())
         .map(|v| (v as f32).clamp(TEXT_SCALE_MIN, TEXT_SCALE_MAX))
-        .unwrap_or(1.0)
+        .unwrap_or(1.0);
+    let quiet = v.as_ref().and_then(|v| v["quiet"].as_bool()).unwrap_or(false);
+    (scale, quiet)
 }
 
-fn save_text_scale(v: f32) {
+fn save_settings(scale: f32, quiet: bool) {
     let p = settings_path();
     if let Some(dir) = std::path::Path::new(&p).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&p, serde_json::to_vec(&json!({ "text_scale": v })).unwrap_or_default());
+    let _ = std::fs::write(
+        &p,
+        serde_json::to_vec(&json!({ "text_scale": scale, "quiet": quiet })).unwrap_or_default(),
+    );
 }
 
 /* the go-to-page number pad, inside the sidebar */
@@ -262,7 +267,6 @@ struct App {
     nb: Notebook,
     ipc: Option<IpcServer>,
 
-    takeover: bool,
     ink_flush: Duration,
 
     /* pen */
@@ -297,8 +301,9 @@ struct App {
     /* touch gestures */
     touch_start: Option<(i32, i32)>,
     touch_last: (i32, i32),
-    swipe_from: Option<i32>,
-    close_until: Option<Instant>,
+
+    /* quiet mode: pauses send nothing to pi (sidebar toggle, persisted) */
+    quiet: bool,
 
     /* transient chrome */
     indicator_until: Option<Instant>,
@@ -386,41 +391,6 @@ impl App {
         }
     }
 
-    fn show_close_button(&mut self) {
-        self.close_until = Some(Instant::now() + CLOSE_TTL);
-        self.fb.fill_rect(CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H, BLACK);
-        let label = "X CLOSE";
-        self.fb.text(
-            CLOSE_X0 + (CLOSE_BTN_W - text_width(label, 3)) / 2,
-            CLOSE_Y0 + (CLOSE_BTN_H - 21) / 2,
-            label,
-            3,
-            WHITE,
-        );
-        self.disp.update(CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H, Wave::Ink);
-    }
-
-    fn dismiss_close_button(&mut self) {
-        self.close_until = None;
-        if self.lib_view.is_some() {
-            self.render_library(false);
-            return;
-        }
-        if self.agent_page.is_some() {
-            /* it overlapped the header — cheapest correct fix: redraw all */
-            self.render_agent_page(false);
-            return;
-        }
-        let r = Rect {
-            x0: CLOSE_X0,
-            y0: CLOSE_Y0,
-            x1: CLOSE_X0 + CLOSE_BTN_W - 1,
-            y1: CLOSE_Y0 + CLOSE_BTN_H - 1,
-        };
-        let had_gray = self.nb.page.render_region(&mut self.fb, r);
-        self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
-    }
-
     /* -- the sidebar -- */
 
     fn show_sidebar(&mut self) {
@@ -491,6 +461,10 @@ impl App {
                         format!("LIVE STREAM: {}", if self.live.enabled { "ON" } else { "OFF" }),
                         self.live.enabled,
                     ),
+                    SbRow::Quiet => (
+                        format!("PI: {}", if self.quiet { "QUIET" } else { "AUTO" }),
+                        self.quiet,
+                    ),
                     SbRow::FontSize => (
                         format!("-   PI TEXT {:3}%   +", (self.text_scale * 100.0).round() as i32),
                         false,
@@ -507,6 +481,17 @@ impl App {
                     self.fb.text(36, y + (SB_ROW_H - 8 - 21) / 2, &label, 3, BLACK);
                 }
             }
+            /* X CLOSE, pinned at the bottom: the takeover exit */
+            let cy = FB_H - SB_CLOSE_H - SB_CLOSE_MARGIN;
+            self.fb.fill_rect(SB_CLOSE_MARGIN, cy, SB_W - 2 * SB_CLOSE_MARGIN, SB_CLOSE_H, BLACK);
+            let label = "X CLOSE";
+            self.fb.text(
+                (SB_W - text_width(label, 3)) / 2,
+                cy + (SB_CLOSE_H - 21) / 2,
+                label,
+                3,
+                WHITE,
+            );
         }
         self.disp.update(0, 0, SB_W, FB_H, Wave::Ink);
     }
@@ -559,6 +544,13 @@ impl App {
             self.numpad_press(x, y);
             return;
         }
+        /* the X CLOSE bar at the bottom */
+        let cy = FB_H - SB_CLOSE_H - SB_CLOSE_MARGIN;
+        if in_rect(x, y, SB_CLOSE_MARGIN, cy, SB_W - 2 * SB_CLOSE_MARGIN, SB_CLOSE_H) {
+            println!("notebook: close (sidebar)");
+            RUNNING.store(false, Ordering::Relaxed);
+            return;
+        }
         let idx = (y - SB_LIST_Y0) / SB_ROW_H;
         let Some(row) = (idx >= 0).then(|| SB_ROWS.get(idx as usize)).flatten().copied() else {
             return; /* header / dead space: keep the panel up */
@@ -591,6 +583,16 @@ impl App {
                 self.live.toggle(self.nb.current);
                 self.paint_sidebar(); /* stays open: shows the new state */
             }
+            SbRow::Quiet => {
+                self.quiet = !self.quiet;
+                save_settings(self.text_scale, self.quiet);
+                println!("notebook: pi {}", if self.quiet { "quiet" } else { "auto" });
+                if !self.quiet && self.page_changed {
+                    /* back to AUTO: offer the accumulated page soon */
+                    self.idle_at = Some(Instant::now());
+                }
+                self.paint_sidebar(); /* stays open: shows the new state */
+            }
             SbRow::FontSize => {
                 /* left third = smaller, right third = bigger, middle = 100% */
                 let new = if x < SB_W / 3 {
@@ -602,7 +604,7 @@ impl App {
                 };
                 let new = (new * 10.0).round() / 10.0;
                 self.text_scale = new.clamp(TEXT_SCALE_MIN, TEXT_SCALE_MAX);
-                save_text_scale(self.text_scale);
+                save_settings(self.text_scale, self.quiet);
                 self.paint_sidebar(); /* stays open for repeated taps */
             }
             SbRow::Refresh => {
@@ -1227,19 +1229,6 @@ impl App {
         }
         match phase {
             Phase::Press => {
-                if self.close_until.is_some() {
-                    if in_rect(x, y, CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H) {
-                        println!("notebook: close button");
-                        RUNNING.store(false, Ordering::Relaxed);
-                    } else {
-                        self.dismiss_close_button();
-                    }
-                    return;
-                }
-                if self.takeover && y <= EDGE_Y {
-                    self.swipe_from = Some(y);
-                    return;
-                }
                 if x < MENU_HOT && y < MENU_HOT {
                     self.show_sidebar();
                     return;
@@ -1248,19 +1237,11 @@ impl App {
                 self.touch_last = (x, y);
             }
             Phase::Move => {
-                if let Some(sy) = self.swipe_from {
-                    if y - sy >= SWIPE_DIST {
-                        self.swipe_from = None;
-                        self.show_close_button();
-                    }
-                    return;
-                }
                 if self.touch_start.is_some() {
                     self.touch_last = (x, y);
                 }
             }
             Phase::Release => {
-                self.swipe_from = None;
                 if let Some((sx, sy)) = self.touch_start.take() {
                     let (dx, dy) = (self.touch_last.0 - sx, self.touch_last.1 - sy);
                     if dx.abs() >= FLIP_DX && dy.abs() <= FLIP_DY_MAX {
@@ -1291,6 +1272,9 @@ impl App {
         if self.agent_page.is_some() {
             self.send_agent_feedback();
             return;
+        }
+        if self.quiet {
+            return; /* quiet mode: write in peace — nothing is sent, nothing costs */
         }
         if !self.page_changed || self.nb.page.is_empty() {
             return;
@@ -1908,13 +1892,13 @@ fn main() -> std::process::ExitCode {
     let mut last_activity = Instant::now();
 
     let now = Instant::now();
+    let (text_scale, quiet) = load_settings();
     let mut app = App {
         fb,
         disp,
         pi,
         nb: Notebook::open(),
         ipc,
-        takeover,
         ink_flush: if takeover { INK_FLUSH_TAKEOVER } else { INK_FLUSH_QTFB },
         cur_stroke: None,
         ink_dirty: None,
@@ -1936,14 +1920,13 @@ fn main() -> std::process::ExitCode {
         last_anim: now,
         touch_start: None,
         touch_last: (0, 0),
-        swipe_from: None,
-        close_until: None,
         indicator_until: None,
         working: false,
         agent_page: None,
         sidebar: None,
         last_activity_page: 0,
-        text_scale: load_text_scale(),
+        text_scale,
+        quiet,
         lib_view: None,
         deghost_at: None,
         live: live::Live::new(),
@@ -2112,10 +2095,6 @@ fn main() -> std::process::ExitCode {
                 }
             }
         }
-        if app.close_until.is_some_and(|at| Instant::now() >= at) {
-            app.dismiss_close_button();
-        }
-
         /* -- idle auto-suspend -- */
         if let (Some(limit), Some(p)) = (auto_sleep, powerdev.as_mut()) {
             /* deferred while pi is mid-turn (streaming/working clear on End,
@@ -2155,9 +2134,6 @@ fn next_timeout(app: &App) -> i32 {
         soonest(at.saturating_duration_since(Instant::now()));
     }
     if let Some(at) = app.indicator_until {
-        soonest(at.saturating_duration_since(Instant::now()));
-    }
-    if let Some(at) = app.close_until {
         soonest(at.saturating_duration_since(Instant::now()));
     }
     if let Some(at) = app.deghost_at {

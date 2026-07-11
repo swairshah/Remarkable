@@ -84,14 +84,9 @@ const SNAP_DIV: i32 = 2;
 
 const ERASER_R: f32 = 22.0;
 
-/* takeover exit, xochitl-style: top-edge swipe reveals CLOSE */
-const EDGE_Y: i32 = 16;
-const SWIPE_DIST: i32 = 90;
-const CLOSE_X0: i32 = 16;
-const CLOSE_Y0: i32 = 12;
-const CLOSE_BTN_W: i32 = 190;
-const CLOSE_BTN_H: i32 = 64;
-const CLOSE_TTL: Duration = Duration::from_secs(4);
+/* takeover exit: X CLOSE pinned at the bottom of the sidebar / home */
+const SB_CLOSE_H: i32 = 64;
+const SB_CLOSE_MARGIN: i32 = 24;
 
 /* page-flip gesture: mostly-horizontal finger travel */
 const FLIP_DX: i32 = 260;
@@ -283,7 +278,6 @@ struct App {
     import_queue: VecDeque<import::Job>,
     import_shown: (usize, usize),   /* progress last painted */
 
-    takeover: bool,
     ink_flush: Duration,
 
     /* pen */
@@ -312,8 +306,6 @@ struct App {
     touch_start: Option<(i32, i32)>,
     touch_t0: Option<Instant>, /* when the current touch began (long-press) */
     touch_last: (i32, i32),
-    swipe_from: Option<i32>,
-    close_until: Option<Instant>,
 
     /* transient chrome */
     indicator_until: Option<Instant>,
@@ -428,38 +420,23 @@ impl App {
         }
     }
 
-    fn show_close_button(&mut self) {
-        self.close_until = Some(Instant::now() + CLOSE_TTL);
-        self.fb.fill_rect(CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H, BLACK);
+    /// The X CLOSE bar (bottom of the sidebar and of the home shelf).
+    fn close_bar_rect() -> (i32, i32, i32, i32) {
+        let cy = FB_H - SB_CLOSE_H - SB_CLOSE_MARGIN;
+        (SB_CLOSE_MARGIN, cy, SB_W - 2 * SB_CLOSE_MARGIN, SB_CLOSE_H)
+    }
+
+    fn draw_close_bar(&mut self) {
+        let (x, y, w, h) = Self::close_bar_rect();
+        self.fb.fill_rect(x, y, w, h, BLACK);
         let label = "X CLOSE";
         self.fb.text(
-            CLOSE_X0 + (CLOSE_BTN_W - text_width(label, 3)) / 2,
-            CLOSE_Y0 + (CLOSE_BTN_H - 21) / 2,
+            x + (w - text_width(label, 3)) / 2,
+            y + (h - 21) / 2,
             label,
             3,
             WHITE,
         );
-        self.disp.update(CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H, Wave::Ink);
-    }
-
-    fn dismiss_close_button(&mut self) {
-        self.close_until = None;
-        if self.agent_page.is_some() {
-            self.render_agent_page(false);
-            return;
-        }
-        if self.on_home() {
-            self.render_home(false);
-            return;
-        }
-        let r = Rect {
-            x0: CLOSE_X0,
-            y0: CLOSE_Y0,
-            x1: CLOSE_X0 + CLOSE_BTN_W - 1,
-            y1: CLOSE_Y0 + CLOSE_BTN_H - 1,
-        };
-        self.render_page_region(r);
-        self.draw_menu_icon();
     }
 
     /* -- the home screen (book shelf) -- */
@@ -500,12 +477,13 @@ impl App {
                 self.shelf.len()
             )
         } else {
-            "tap a book to open it - hold to delete - top-edge swipe closes".to_string()
+            "tap a book to open it - hold to delete".to_string()
         };
         self.fb.text(72, 108, &sub, 2, draw::GRAY);
         self.fb.fill_rect(0, 140, FB_W, 2, BLACK);
         self.draw_corner_button("IMPORT +");
         self.draw_import_status();
+        self.draw_close_bar();
         if self.shelf.is_empty() {
             text::draw_line(
                 &mut self.fb,
@@ -578,6 +556,12 @@ impl App {
     fn home_press(&mut self, x: i32, y: i32) {
         if in_rect(x, y, IMP_BTN_X, IMP_BTN_Y, IMP_BTN_W, IMP_BTN_H) {
             self.open_lib_list();
+            return;
+        }
+        let (cx, cy, cw, ch) = Self::close_bar_rect();
+        if in_rect(x, y, cx, cy, cw, ch) {
+            println!("reader: close (home)");
+            RUNNING.store(false, Ordering::Relaxed);
             return;
         }
         if let Some(idx) = self.home_row_at(y) {
@@ -1020,6 +1004,7 @@ impl App {
                     self.fb.text(36, y + (SB_ROW_H - 8 - 21) / 2, &label, 3, BLACK);
                 }
             }
+            self.draw_close_bar();
         }
         self.disp.update(0, 0, SB_W, FB_H, Wave::Ink);
     }
@@ -1063,6 +1048,12 @@ impl App {
         let numpad = self.sidebar.as_ref().is_some_and(|s| s.numpad);
         if numpad {
             self.numpad_press(x, y);
+            return;
+        }
+        let (cx, cy, cw, ch) = Self::close_bar_rect();
+        if in_rect(x, y, cx, cy, cw, ch) {
+            println!("reader: close (sidebar)");
+            RUNNING.store(false, Ordering::Relaxed);
             return;
         }
         let idx = (y - SB_LIST_Y0) / SB_ROW_H;
@@ -1562,19 +1553,6 @@ impl App {
         }
         match phase {
             Phase::Press => {
-                if self.close_until.is_some() {
-                    if in_rect(x, y, CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H) {
-                        println!("reader: close button");
-                        RUNNING.store(false, Ordering::Relaxed);
-                    } else {
-                        self.dismiss_close_button();
-                    }
-                    return;
-                }
-                if self.takeover && y <= EDGE_Y {
-                    self.swipe_from = Some(y);
-                    return;
-                }
                 if !self.on_home() && x < MENU_HOT && y < MENU_HOT {
                     self.show_sidebar();
                     return;
@@ -1584,19 +1562,11 @@ impl App {
                 self.touch_last = (x, y);
             }
             Phase::Move => {
-                if let Some(sy) = self.swipe_from {
-                    if y - sy >= SWIPE_DIST {
-                        self.swipe_from = None;
-                        self.show_close_button();
-                    }
-                    return;
-                }
                 if self.touch_start.is_some() {
                     self.touch_last = (x, y);
                 }
             }
             Phase::Release => {
-                self.swipe_from = None;
                 if let Some((sx, sy)) = self.touch_start.take() {
                     let (dx, dy) = (self.touch_last.0 - sx, self.touch_last.1 - sy);
                     if self.on_home() && self.lib_list.is_some() {
@@ -2487,7 +2457,6 @@ fn main() -> std::process::ExitCode {
         importer: None,
         import_queue: VecDeque::new(),
         import_shown: (0, 0),
-        takeover,
         ink_flush: if takeover { INK_FLUSH_TAKEOVER } else { INK_FLUSH_QTFB },
         cur_stroke: None,
         ink_dirty: None,
@@ -2506,8 +2475,7 @@ fn main() -> std::process::ExitCode {
         touch_start: None,
         touch_t0: None,
         touch_last: (0, 0),
-        swipe_from: None,
-        close_until: None,
+
         indicator_until: None,
         working: false,
         agent_page: None,
@@ -2699,10 +2667,6 @@ fn main() -> std::process::ExitCode {
                 }
             }
         }
-        if app.close_until.is_some_and(|at| Instant::now() >= at) {
-            app.dismiss_close_button();
-        }
-
         /* -- idle auto-suspend -- */
         if let (Some(limit), Some(p)) = (auto_sleep, powerdev.as_mut()) {
             /* deferred while pi is mid-turn (streaming/working clear on End,
@@ -2744,9 +2708,6 @@ fn next_timeout(app: &App) -> i32 {
         soonest(at.saturating_duration_since(Instant::now()));
     }
     if let Some(at) = app.indicator_until {
-        soonest(at.saturating_duration_since(Instant::now()));
-    }
-    if let Some(at) = app.close_until {
         soonest(at.saturating_duration_since(Instant::now()));
     }
     if let Some(at) = app.deghost_at {

@@ -86,6 +86,16 @@ over one long sentence, and space your baselines at least 1.5 x font-size \
 apart — cramped lines read badly on e-ink. Each notebook_draw result reports the page's \
 updated ink rows — use those for any further drawing in the same turn.
 
+OTHER PAGES ARE THERE WHEN YOU NEED THEM. Every pause message names the \
+page you are seeing (page N of M) — the notebook is a sequence, and writing \
+often continues across pages. When the current page alone is ambiguous — \
+mid-draft prose that clearly started earlier, a list continuing from \
+'above', a question referring to something not on this page — call \
+notebook_view with the previous page number (or another page) to read the \
+context BEFORE deciding to draw or pass. Do this only when the ambiguity \
+is real: most pauses need no extra pages, and each viewed page costs \
+tokens. Draws land on the CURRENT page unless you pass a page number.
+
 Fixing yourself: every notebook_draw returns a patch id, and \
 notebook_erase(id) removes that patch cleanly — the user's ink underneath \
 survives. Erase ONLY to fix a mistake (yours or a placement accident) or \

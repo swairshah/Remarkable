@@ -59,7 +59,7 @@ your ink, notes and reading position.
 - **sidebar** (tap the top-left corner): first/last/active page, GO TO
   numpad, `+ NOTE PAGE HERE`, INSTRUCTIONS (the AGENT.md pi maintains from
   your handwritten feedback), pi text zoom, refresh.
-- **exit**: swipe down from the top edge → CLOSE. Power button sleeps.
+- **exit**: X CLOSE at the bottom of the sidebar (or of the home shelf). Power button sleeps.
 
 ## Build / dev
 
