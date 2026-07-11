@@ -1,0 +1,5 @@
+# the exported trajectory is large + reproducible (make trace / scp from device)
+trajectory/*.jsonl
+# per-run instrumentation output
+reports/
+node_modules/

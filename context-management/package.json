@@ -1,0 +1,9 @@
+{
+  "name": "context-management",
+  "private": true,
+  "type": "module",
+  "description": "Sandbox for hand-rolling pi context compression for the Paper reMarkable app",
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

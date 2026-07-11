@@ -1,0 +1,115 @@
+# context-management — pi context-compression sandbox
+# Run `just` (no args) to list recipes. Override the session with:
+#   just session=trajectory/session-full.jsonl observe
+
+dir          := justfile_directory()
+session      := dir / "trajectory/session-sample.jsonl"
+observe_ext    := dir / "extensions/observe.ts"
+compress_ext   := dir / "extensions/compress.ts"
+transcribe_ext := dir / "extensions/transcribe.ts"
+
+# show available recipes
+default:
+    @just --list
+
+# --- DRY investigation (aborts before the model call → zero cost) ------------
+
+# baseline: what pi would send, uncompressed
+observe:
+    @echo "▶ baseline payload from {{file_name(session)}}"
+    @PI_OBSERVE_ABORT=1 PI_OBSERVE_TAG=baseline \
+      pi --fork "{{session}}" -ne -e "{{observe_ext}}" --no-tools --print "ping" 2>&1 \
+      | grep -E "observe:|tok" || true
+
+# compressed: what pi would send WITH compress.ts applied
+compress:
+    @echo "▶ compressed payload from {{file_name(session)}}"
+    @PI_OBSERVE_ABORT=1 PI_OBSERVE_TAG=compressed \
+      pi --fork "{{session}}" -ne -e "{{compress_ext}}" -e "{{observe_ext}}" --no-tools --print "ping" 2>&1 \
+      | grep -E "observe:|tok" || true
+
+# EDIT LOOP: watch compress.ts and re-run the dry before/after on every save
+dev:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    echo "▶ watching extensions/compress.ts — save to re-measure (Ctrl-C to stop)"
+    last=""
+    while true; do
+      cur=$(stat -f %m extensions/compress.ts extensions/observe.ts 2>/dev/null | tr '\n' '-')
+      if [ "$cur" != "$last" ]; then
+        last="$cur"; clear
+        just session="{{session}}" compare || true
+        echo ""; echo "(watching compress.ts — Ctrl-C to stop)"
+      fi
+      sleep 1
+    done
+
+# run both and print the before/after summary lines
+compare: clean
+    @just session="{{session}}" observe
+    @echo ""
+    @just session="{{session}}" compress
+    @echo "\n── summary ──────────────────────────────"
+    @cat reports/baseline-summary.log reports/compressed-summary.log 2>/dev/null || true
+
+# --- transcription method (image→text via a cheap out-of-band model call) ----
+
+# STEP 1: warm the transcription store — transcribe every image in the session
+# (real but cheap model calls; the main turn is aborted so no big call)
+warm:
+    @echo "▶ warming transcription store from {{file_name(session)}} (cheap vision calls)…"
+    @PI_TRANSCRIBE_BACKFILL=1 PI_OBSERVE_ABORT=1 PI_OBSERVE_TAG=transcribe \
+      pi --fork "{{session}}" -ne -e "{{transcribe_ext}}" -e "{{observe_ext}}" --no-tools --print "ping" 2>&1 \
+      | grep -E "transcribe|observe:|tok" || true
+
+# STEP 2: dry measurement using the warmed store (keep newest image, swap rest→text)
+transcribe:
+    @echo "▶ transcription-compressed payload from {{file_name(session)}}"
+    @PI_OBSERVE_ABORT=1 PI_OBSERVE_TAG=transcribe \
+      pi --fork "{{session}}" -ne -e "{{transcribe_ext}}" -e "{{observe_ext}}" --no-tools --print "ping" 2>&1 \
+      | grep -E "transcribe|observe:|tok" || true
+
+# live/online: chat; each answered page is transcribed and swapped on later turns
+chat-transcribe:
+    pi --fork "{{session}}" -ne -e "{{transcribe_ext}}"
+
+# --- LIVE (actually calls the model; compress.ts keeps the payload small) ----
+
+# interactive chat on a fresh fork, compression ON
+chat:
+    pi --fork "{{session}}" -ne -e "{{compress_ext}}"
+
+# interactive chat, compression ON + observe logging each turn to reports/
+watch:
+    PI_OBSERVE_TAG=live pi --fork "{{session}}" -ne -e "{{compress_ext}}" -e "{{observe_ext}}"
+
+# one-shot prompt on a fresh fork, compression ON:  just run "summarize page 9"
+run prompt:
+    pi --fork "{{session}}" -ne -e "{{compress_ext}}" --print "{{prompt}}"
+
+# resume the LAST fork you were chatting in (this cwd), compression ON
+continue:
+    pi -c -ne -e "{{compress_ext}}"
+
+# --- housekeeping ------------------------------------------------------------
+
+# wipe instrumentation reports
+clean:
+    @rm -f reports/*.json reports/*.log 2>/dev/null || true
+    @echo "cleaned reports/"
+
+# remove the throwaway forked sessions this sandbox created in pi's store
+clean-forks:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    store=$(ls -d "$HOME"/.pi/agent/sessions/*context-management* 2>/dev/null || true)
+    if [ -n "$store" ]; then
+      n=$(ls "$store"/*.jsonl 2>/dev/null | wc -l | tr -d ' ')
+      rm -f "$store"/*.jsonl
+      echo "removed $n forked session(s) from $store"
+    else
+      echo "no fork store for this cwd"
+    fi
+
+# clean reports + forks
+reset: clean clean-forks
