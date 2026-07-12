@@ -29,11 +29,13 @@ if [ -f "$HOME/.env" ]; then set -a; . "$HOME/.env"; set +a; fi
 
 mkdir -p "$WORK/assets" "$OUT"
 
-INSTRUCTIONS="$(cat "$JOB/instructions.md")"
-
 status "researching sources"
 
-cat > "$JOB/prompt.md" <<PROMPT
+# The prompt is assembled from QUOTED heredocs with the instructions file
+# cat'd between them: user text must never pass through shell expansion
+# (a $(...) in pasted instructions would otherwise execute here).
+{
+cat <<'PROMPT'
 You are a document-composition agent for Paper (a reMarkable tablet
 library). The user wants a new reading document created from the
 instructions below. Your final deliverable is ONE markdown file at
@@ -42,7 +44,9 @@ typeset PDF for an e-ink tablet, so the markdown must be clean and
 self-contained.
 
 --- USER INSTRUCTIONS ---
-$INSTRUCTIONS
+PROMPT
+cat "$JOB/instructions.md"
+cat <<'PROMPT'
 --- END USER INSTRUCTIONS ---
 
 ## Step 1 — Gather the sources
@@ -80,7 +84,7 @@ material thoroughly. Requirements:
   projections, Frobenius norm" — not "some math background").
 - Do not invent specific facts (numbers, dates, theorem names,
   citations). Mark anything inferred rather than read as "(inferred)".
-- Math: \$...\$ inline, \$\$...\$\$ display. Use \\dots (never \\hdots). The
+- Math: $...$ inline, $$...$$ display. Use \dots (never \hdots). The
   renderer uses native MathML — stick to standard LaTeX.
 - Code in fenced blocks with language tags.
 - Images: download any image you want to include into assets/ (curl with
@@ -103,6 +107,7 @@ material thoroughly. Requirements:
 Work in the current directory. Write article.md there. When done, reply
 with exactly one line: the final title of the article.
 PROMPT
+} > "$JOB/prompt.md"
 
 cd "$WORK"
 

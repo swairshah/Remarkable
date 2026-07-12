@@ -426,7 +426,15 @@ function handleCompose(req, res) {
     composeJobs.set(id, job);
     json(res, 202, { ok: true, job: id });
 
-    const child = spawn(COMPOSE_SH, [dir], { stdio: ['ignore', 'pipe', 'pipe'] });
+    // Run a per-job COPY of the script: bash reads scripts from disk
+    // incrementally, so a deploy overwriting the shared one mid-run would
+    // corrupt a job that is hours into its work (learned the hard way).
+    const script = path.join(dir, 'compose.sh');
+    try { fs.copyFileSync(COMPOSE_SH, script); fs.chmodSync(script, 0o755); } catch (err) {
+      Object.assign(job, { status: 'failed', error: 'compose script unavailable: ' + err.message, updated: Date.now() });
+      persistComposeResult(id, job); return;
+    }
+    const child = spawn(script, [dir], { stdio: ['ignore', 'pipe', 'pipe'] });
     let tail = '';
     child.stdout.resume();
     child.stderr.on('data', (c) => { tail = (tail + c.toString()).slice(-8000); });
