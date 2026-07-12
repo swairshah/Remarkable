@@ -18,7 +18,7 @@
 # runs `/home/root/bin/pi --mode rpc` in the background with the
 # sketchbook-canvas.ts extension (its page-drawing tools).
 
-HOST ?= root@192.168.1.7
+HOST ?= root@192.168.1.2
 BIN := sketchbook
 TARGET := armv7-unknown-linux-musleabihf
 BUILT := target/$(TARGET)/release/$(BIN)
@@ -30,7 +30,7 @@ RM2FB_IPK := https://github.com/timower/rM2-stuff/releases/latest/download/rm2di
 # matching its own ssh command line. Stopping the transient unit first lets
 # takeover.sh's trap restore xochitl cleanly.
 KILL_APP := systemctl stop sketchbook-takeover 2>/dev/null; \
-            q=$$(pgrep -f 'appload/sketchbook/[n]otebook'); \
+            q=$$(pgrep -f 'appload/sketchbook/[s]ketchbook'); \
             if [ -n "$$q" ]; then kill $$q; sleep 1; kill -9 $$q 2>/dev/null; fi
 
 .PHONY: all build preview fetch-server deploy push-key trace log log-server kill restore-ui uninstall clean
@@ -77,6 +77,7 @@ deploy: build vendor/rm2fb_server
 	cat scripts/appload-launch.sh | $(SSH) 'cat > $(DEVICE_DIR)/appload-launch.sh && chmod +x $(DEVICE_DIR)/appload-launch.sh'
 	cat scripts/takeover.sh | $(SSH) 'cat > $(DEVICE_DIR)/takeover.sh && chmod +x $(DEVICE_DIR)/takeover.sh'
 	cat ext/sketchbook-canvas.ts | $(SSH) 'cat > $(DEVICE_DIR)/sketchbook-canvas.ts'
+	cat ext/jpeg-decode.cjs | $(SSH) 'cat > $(DEVICE_DIR)/jpeg-decode.cjs'
 	cat vendor/rm2fb_server | $(SSH) 'cat > $(DEVICE_DIR)/rm2fb_server && chmod +x $(DEVICE_DIR)/rm2fb_server'
 	cat vendor/librm2fb_server.so | $(SSH) 'cat > $(DEVICE_DIR)/librm2fb_server.so'
 	cat app/external.manifest.json | $(SSH) 'cat > $(DEVICE_DIR)/external.manifest.json'
@@ -91,7 +92,7 @@ deploy: build vendor/rm2fb_server
 # shell's environment; lands outside the app dir so redeploys never touch it.
 push-key:
 	@test -n "$$GEMINI_API_KEY" || { echo 'GEMINI_API_KEY is not set in this shell'; exit 1; }
-	@$(SSH) 'mkdir -p /home/root/.config/sketchbook && umask 077 && printf "GEMINI_API_KEY=%s\n" "$$0" > /home/root/.config/sketchbook/env' "$$GEMINI_API_KEY"
+	@printf 'GEMINI_API_KEY=%s\n' "$$GEMINI_API_KEY" | $(SSH) 'mkdir -p /home/root/.config/sketchbook && umask 077 && cat > /home/root/.config/sketchbook/env'
 	@echo 'key installed at /home/root/.config/sketchbook/env'
 
 vendor/rm2fb_server:

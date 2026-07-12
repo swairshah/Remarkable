@@ -22,11 +22,19 @@
 
 import * as net from "node:net";
 import * as zlib from "node:zlib";
+import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const SOCK = process.env.SKETCHBOOK_SOCK ?? "";
-const IMG_MODEL = process.env.SKETCHBOOK_IMG_MODEL ?? "gemini-3.1-flash-image";
-const API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_AI_STUDIO_API_KEY ?? "";
+/* jpeg-js's decoder (vendored, BSD) — Gemini image models answer JPEG */
+const jpegDecode = createRequire(import.meta.url)("./jpeg-decode.cjs") as (
+  data: Buffer,
+  opts?: { useTArray?: boolean; formatAsRGBA?: boolean; maxMemoryUsageInMB?: number },
+) => { width: number; height: number; data: Uint8Array };
+
+/* NOTE: `||` not `??` — takeover.sh passes these as empty strings when unset */
+const SOCK = process.env.SKETCHBOOK_SOCK || "";
+const IMG_MODEL = process.env.SKETCHBOOK_IMG_MODEL || "gemini-3.1-flash-image";
+const API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_STUDIO_API_KEY || "";
 
 const DEFAULT_STYLE =
   "a refined, confident artist's pencil sketch: pure monochrome graphite on white " +
@@ -138,6 +146,50 @@ function pngToGray(png: Buffer): { w: number; h: number; gray: Buffer } {
   return { w, h, gray: out };
 }
 
+/** Decode whatever image Gemini returned (PNG or JPEG) to 8-bit grayscale. */
+function imageToGray(buf: Buffer): { w: number; h: number; gray: Buffer } {
+  if (buf.length > 8 && buf.readUInt32BE(0) === 0x89504e47) return pngToGray(buf);
+  if (buf.length > 2 && buf[0] === 0xff && buf[1] === 0xd8) {
+    const img = jpegDecode(buf, { useTArray: true, formatAsRGBA: true, maxMemoryUsageInMB: 256 });
+    const gray = Buffer.alloc(img.width * img.height);
+    for (let i = 0; i < gray.length; i++) {
+      const o = i * 4;
+      gray[i] = Math.round(
+        0.299 * img.data[o] + 0.587 * img.data[o + 1] + 0.114 * img.data[o + 2],
+      );
+    }
+    return { w: img.width, h: img.height, gray };
+  }
+  throw new Error("model returned an unrecognized image format");
+}
+
+/** Normalize tones for e-ink: stretch so the paper reads as true white
+ *  (models return ~245-250 backgrounds, which would render as visible
+ *  gray wash on the panel) and the darkest marks as true black. */
+function autocontrast(gray: Buffer): Buffer {
+  const hist = new Array(256).fill(0);
+  for (const g of gray) hist[g]++;
+  const total = gray.length;
+  let lo = 0, hi = 255, acc = 0;
+  for (let v = 255; v >= 0; v--) {
+    acc += hist[v];
+    if (acc > total * 0.01) { hi = v; break; } /* 1% highlight cutoff */
+  }
+  acc = 0;
+  for (let v = 0; v < 256; v++) {
+    acc += hist[v];
+    if (acc > total * 0.002) { lo = v; break; } /* 0.2% shadow cutoff */
+  }
+  if (hi <= lo) return gray;
+  const out = Buffer.alloc(gray.length);
+  for (let i = 0; i < gray.length; i++) {
+    let v = Math.max(0, Math.min(255, Math.round(((gray[i] - lo) * 255) / (hi - lo))));
+    if (v >= 238) v = 255; /* clip near-whites: kills watermark texture on paper */
+    out[i] = v;
+  }
+  return out;
+}
+
 /* ---- Gemini image generation --------------------------------------------- */
 
 async function generate(sketchPngB64: string, subject: string, style: string): Promise<Buffer> {
@@ -216,19 +268,20 @@ export default function (pi: ExtensionAPI) {
       try {
         const s = await call({ cmd: "sketch", page: params.page });
         if (!s.ok) return textResult(`render failed: ${s.error}`, true);
-        const png = await generate(
+        const img = await generate(
           s.png_base64,
           params.subject,
           params.style?.trim() || DEFAULT_STYLE,
         );
-        const { w, h, gray } = pngToGray(png);
+        const { w, h, gray } = imageToGray(img);
+        const normalized = autocontrast(gray);
         const r = await call(
           {
             cmd: "render",
             page: params.page,
             w,
             h,
-            raw_base64: gray.toString("base64"),
+            raw_base64: normalized.toString("base64"),
           },
           60000,
         );
