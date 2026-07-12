@@ -52,9 +52,10 @@ ssh "$HOST" 'chmod +x ~/bin/remarkable-post-sync.sh ~/bin/remarkable-post-sync-b
 
 echo "[deploy-server] scp Paper viewer + library/upload service"
 scp -q "$PAPER_SERVER"/bin/alt-ui-upload.js "$PAPER_SERVER"/bin/alt-ui-library.js \
-  "$PAPER_SERVER"/bin/alt-ui-preview-page.py "$PAPER_SERVER"/bin/alt-ui-render.sh "$HOST:bin/"
+  "$PAPER_SERVER"/bin/alt-ui-preview-page.py "$PAPER_SERVER"/bin/alt-ui-render.sh \
+  "$PAPER_SERVER"/bin/alt-ui-compose.sh "$HOST:bin/"
 scp -q "$PAPER_SERVER"/web/index.html "$HOST:notes-server/alt-ui/index.html"
-ssh "$HOST" 'chmod +x ~/bin/alt-ui-preview-page.py ~/bin/alt-ui-render.sh'
+ssh "$HOST" 'chmod +x ~/bin/alt-ui-preview-page.py ~/bin/alt-ui-render.sh ~/bin/alt-ui-compose.sh'
 
 echo "[deploy-server] ensure runtime deps (node, img2pdf, imagemagick, pandoc, chromium, fonts)"
 ssh "$HOST" '

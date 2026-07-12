@@ -6,6 +6,28 @@ event-driven (Paper's debounced on-edit sync, push via `rm-sync-flush.sh`
 before suspend, pull via `rm-sync-wake.sh` after resume), and
 `alt-ui-sync.sh` grew `pull|push|both` modes.
 
+Second revision (2026-07-13), three additions to the web viewer:
+
+- **PDF.js reading path.** Books whose source PDF is retained on the VM
+  (`hasSource` in the library manifest) are rendered in the browser from
+  the source PDF itself — ONE immutable download per document
+  (`/paper/api/source-pdf?id=&v=`) instead of a ~150KB PNG + ink JSON round
+  trip per page, at DPR-crisp vector quality. Page placement replicates
+  mkbook.py's crop/margins math exactly so the ink overlay stays aligned
+  with the tablet raster; raster PNGs remain the fallback (notebooks,
+  desk-rendered books, PDF.js load failure).
+- **Latency**: bigger IntersectionObserver lookahead (2400px raster /
+  3600px vector) and the doc's ink JSONs (listed in the manifest) are
+  prefetched at open.
+- **✦ Compose** (agentic doc creation): a header button posts
+  instructions/links to `POST /paper/api/compose`; `alt-ui-compose.sh`
+  runs a headless `pi` agent on the VM (research → one teaching article →
+  `notes-md2pdf.sh` typesetting, the Clippings enrich style minus the
+  reference appendix/quiz), then the PDF takes the exact upload path
+  (book bundle → inbound → tablet, source retained). Job phase is polled
+  via `GET /paper/api/compose-status?job=` and survives page reloads
+  (localStorage) and service restarts (result.json).
+
 ## Model: mirror out, drop-to-add in
 
 Sync is asymmetric, which is what makes it conflict-free:

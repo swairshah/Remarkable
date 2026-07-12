@@ -90,6 +90,20 @@
   .docside .sbtn .k { margin-left:auto; font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:1px 5px; }
   .docside .sbtn.active .k { color:inherit; border-color:currentColor; opacity:.7; }
 
+  /* ---- compose modal + status chip ---- */
+  #cmp { position: fixed; inset: 0; z-index: 40; background: rgba(15,15,17,.6); display: none; place-items: center; }
+  #cmp.show { display: grid; }
+  #cmp .box { background: var(--card); border: 1px solid var(--line); border-radius: 12px; width: min(560px, calc(100vw - 40px)); padding: 20px; box-shadow: 0 12px 48px rgba(0,0,0,.3); }
+  #cmp h3 { margin: 0 0 6px; font-size: 16px; }
+  #cmp .sub { color: var(--muted); font-size: 13px; margin-bottom: 14px; line-height: 1.45; }
+  #cmp input[type=text], #cmp textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--accent); font: inherit; font-size: 14px; padding: 9px 11px; }
+  #cmp textarea { min-height: 150px; resize: vertical; margin-top: 10px; }
+  #cmp .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+  #cmpchip { position: fixed; right: 18px; bottom: 18px; z-index: 25; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,.18); display: none; align-items: center; gap: 9px; max-width: 340px; }
+  #cmpchip.show { display: flex; }
+  #cmpchip .spin { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: cspin 1s linear infinite; flex: none; }
+  @keyframes cspin { to { transform: rotate(360deg); } }
+
   /* ---- margin editor ---- */
   #med { position: fixed; inset: 0; z-index: 40; background: rgba(15,15,17,.86); display:none; }
   #med.show { display: grid; grid-template-rows: auto 1fr auto; }
@@ -126,12 +140,21 @@
   <span id="crumb"></span>
   <span class="spacer"></span>
   <span class="badge" id="badge"><span class="dot"></span>synced view</span>
+  <button class="addbtn" id="compose-btn">✦ Compose</button>
   <button class="addbtn" id="add">+ Add document</button>
 </header>
 <main id="view"><div class="empty">Loading…</div></main>
 <input type="file" id="file" multiple hidden>
 <div id="drop"><div class="box">Drop files to add them to Paper</div></div>
 <div id="med"></div>
+<div id="cmp"><div class="box">
+  <h3>✦ Compose a document</h3>
+  <div class="sub">Paste links and/or describe what you want. An agent on the server researches it, writes a typeset article, and adds the PDF to Paper — it syncs to your tablet like any upload. Takes a few minutes.</div>
+  <input type="text" id="cmp-title" placeholder="Title (optional)">
+  <textarea id="cmp-instr" placeholder="e.g. https://arxiv.org/abs/2405.12345 — teach me this paper properly, with the math worked through and a running example…"></textarea>
+  <div class="row"><button class="addbtn" id="cmp-cancel">Cancel</button><button class="addbtn" id="cmp-go" style="background:var(--accent);color:var(--card)">Create</button></div>
+</div></div>
+<div id="cmpchip"></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -227,6 +250,47 @@ async function loadDocs() {
     console.warn('Paper library endpoint unavailable; using legacy index', err);
     return loadDocsLegacy();
   }
+}
+
+/* ---------- PDF.js: render books straight from the source PDF ---------- */
+/* Books uploaded via the web retain their source PDF on the server (the crop
+ * editor uses it). Rendering THAT with PDF.js means one cached download for
+ * the whole document instead of a ~150KB PNG + ink round trip per page — and
+ * crisp vector text at any zoom/DPR instead of a fixed 1404px raster. */
+const PDFJS_VER = '4.8.69';
+const PDFJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/' + PDFJS_VER + '/pdf.min.mjs';
+const PDFJS_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/' + PDFJS_VER + '/pdf.worker.min.mjs';
+let pdfjsPromise = null;
+function ensurePdfjs() {
+  if (!pdfjsPromise) {
+    pdfjsPromise = import(PDFJS_URL).then((m) => { m.GlobalWorkerOptions.workerSrc = PDFJS_WORKER; return m; });
+    pdfjsPromise.catch(() => { pdfjsPromise = null; });
+  }
+  return pdfjsPromise;
+}
+// Start loading a book's source PDF; resolves null on any failure so the
+// viewer falls back to the pre-rendered raster pages.
+function startSourcePdf(d) {
+  if (d.meta.kind !== 'book' || !d.hasSource) return null;
+  const url = API + 'source-pdf?id=' + encodeURIComponent(d.id) + (d.srcVersion ? '&v=' + d.srcVersion : '');
+  return ensurePdfjs()
+    .then((pdfjs) => pdfjs.getDocument({ url }).promise)
+    .catch((err) => { console.warn('source PDF unavailable; using raster pages', err); return null; });
+}
+// Replicate mkbook.py's placement so PDF.js pages align pixel-for-pixel with
+// the tablet raster — ink annotations land exactly where they do on device.
+const CROP_BORDER = 30;   // device px, same constant as mkbook.py
+function pagePlacement(meta, pw, ph) {
+  if (Array.isArray(meta.crop) && meta.crop.length === 4) {
+    const [cx0, cy0, cx1, cy1] = meta.crop;
+    const cw = (cx1 - cx0) * pw, ch = (cy1 - cy0) * ph;
+    const k = Math.min((PAGE_W - 2 * CROP_BORDER) / cw, (PAGE_H - 2 * CROP_BORDER) / ch);
+    return { k, ox: (PAGE_W - cw * k) / 2, oy: (PAGE_H - ch * k) / 2, sx: cx0 * pw, sy: cy0 * ph };
+  }
+  const m = Array.isArray(meta.margins) && meta.margins.length === 4 ? meta.margins : [40, 40, 40, 40];
+  const bw = PAGE_W - m[0] - m[2], bh = PAGE_H - m[1] - m[3];
+  const k = Math.min(bw / pw, bh / ph);
+  return { k, ox: m[0] + (bw - pw * k) / 2, oy: m[1] + (bh - ph * k) / 2, sx: 0, sy: 0 };
 }
 
 /* ---------- rendering: shared stroke drawer (alt-ui/notebook JSON) ---------- */
@@ -411,7 +475,7 @@ async function openDoc(d) {
     const st = await jfileB(d.base, 'docs/' + d.id + '/state.json');
     seq = (st && st.seq) || [];
   }
-  state.open = { ...d, seq };
+  state.open = { ...d, seq, pdfPromise: startSourcePdf(d) };
   buildSidebar(d);
   $('crumb').innerHTML = '  ›  <span class="crumb" id="home-crumb">My files</span>  ›  ' + esc(d.meta.title || d.id);
   const hc = $('home-crumb'); if (hc) hc.onclick = () => { state.folder = d.meta.folder || null; renderHome(); };
@@ -432,18 +496,33 @@ async function openDoc(d) {
    * page is just a sized div; a canvas is created + drawn only when the page
    * nears the viewport, and freed again when it scrolls far away. */
   if (openDoc._io) openDoc._io.disconnect();
+  /* PDF.js pages render locally from the already-downloaded PDF, so a much
+   * larger lookahead costs nothing over the network; raster pages get a
+   * bigger margin too so scrolling stalls on fewer cold fetches. */
+  const lookahead = state.open.pdfPromise ? '3600px 0px' : '2400px 0px';
   const io = new IntersectionObserver((entries) => {
     for (const en of entries) {
       const p = en.target;
       if (en.isIntersecting) {
         if (!p._cv) {
-          const cv = document.createElement('canvas'); cv.width = PAGE_W; cv.height = PAGE_H;
+          const cv = document.createElement('canvas');
+          if (state.open && state.open.pdfPromise) {
+            /* vector source: size the canvas to the DISPLAYED px × DPR for
+             * crisp text (the fixed 1404px raster is what looked soft) */
+            const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+            const w = Math.min(Math.round((p.clientWidth || 900) * dpr), 2160);
+            cv.width = w; cv.height = Math.round(w * PAGE_H / PAGE_W);
+          } else { cv.width = PAGE_W; cv.height = PAGE_H; }
           p.insertBefore(cv, p.firstChild); p._cv = cv;
           renderPage(cv, state.open, p._entry);
         }
-      } else if (p._cv) { p._cv._renderToken = (p._cv._renderToken || 0) + 1; p._cv.remove(); p._cv = null; }
+      } else if (p._cv) {
+        p._cv._renderToken = (p._cv._renderToken || 0) + 1;
+        if (p._cv._renderTask) { try { p._cv._renderTask.cancel(); } catch (_) {} p._cv._renderTask = null; }
+        p._cv.remove(); p._cv = null;
+      }
     }
-  }, { rootMargin: '1200px 0px' });
+  }, { rootMargin: lookahead });
   openDoc._io = io;
   for (let i = 0; i < seq.length; i++) {
     const e = seq[i];
@@ -454,29 +533,66 @@ async function openDoc(d) {
     wrap.appendChild(page);
     io.observe(page);
   }
+  /* warm the ink cache: the library lists exactly which ink files exist, and
+   * they are tiny — prefetching them removes one round trip per page later */
+  const version = bust[d.id] || d.version;
+  (Array.isArray(d.ink) ? d.ink : []).slice(0, 80).forEach((key) =>
+    cachedJson(withVersion(d.base + 'docs/' + d.id + '/ink/' + key + '.json', version)));
 }
 
 async function renderPage(cv, d, e) {
   const token = (cv._renderToken || 0) + 1; cv._renderToken = token;
   const ctx = cv.getContext('2d');
-  ctx.fillStyle = '#fbfbf9'; ctx.fillRect(0, 0, PAGE_W, PAGE_H);
+  const S = cv.width / PAGE_W;   // canvas px per device px (1 on the raster path)
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#fbfbf9'; ctx.fillRect(0, 0, cv.width, cv.height);
   const version = bust[d.id] || d.version;
   const key = inkKey(e);
   const inkPromise = key && hasInk(d, key)
     ? cachedJson(withVersion(d.base + 'docs/' + d.id + '/ink/' + key + '.json', version))
     : Promise.resolve(null);
   if (e.p != null) {
-    const imagePromise = loadImage(withVersion(d.base + 'docs/' + d.id + '/pages/' + pad4(e.p + 1) + '.png', version));
-    const img = await imagePromise.catch(() => null);
-    if (cv._renderToken !== token) return;
-    if (img) ctx.drawImage(img, 0, 0, PAGE_W, PAGE_H);
+    let drawn = false;
+    if (d.pdfPromise) {
+      try {
+        const pdf = await d.pdfPromise;
+        if (cv._renderToken !== token) return;
+        if (pdf) {
+          const page = await pdf.getPage(e.p + 1);
+          if (cv._renderToken !== token) return;
+          const vp1 = page.getViewport({ scale: 1 });
+          const pl = pagePlacement(d.meta || {}, vp1.width, vp1.height);
+          if (cv._renderTask) { try { cv._renderTask.cancel(); } catch (_) {} }
+          const task = page.render({
+            canvasContext: ctx,
+            viewport: page.getViewport({ scale: pl.k }),
+            transform: [S, 0, 0, S, (pl.ox - pl.sx * pl.k) * S, (pl.oy - pl.sy * pl.k) * S],
+            background: '#fbfbf9',
+          });
+          cv._renderTask = task;
+          await task.promise;
+          cv._renderTask = null;
+          if (cv._renderToken !== token) return;
+          drawn = true;
+        }
+      } catch (err) {
+        if (err && err.name === 'RenderingCancelledException') return;
+        console.warn('PDF.js page render failed; using raster page', err);
+      }
+    }
+    if (!drawn) {
+      const img = await loadImage(withVersion(d.base + 'docs/' + d.id + '/pages/' + pad4(e.p + 1) + '.png', version)).catch(() => null);
+      if (cv._renderToken !== token) return;
+      if (img) ctx.drawImage(img, 0, 0, cv.width, cv.height);
+    }
     const ink = await inkPromise;
     if (cv._renderToken !== token) return;
-    drawInk(ctx, ink, 1);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    drawInk(ctx, ink, S);
   } else if (e.n != null) {
     const ink = await inkPromise;
     if (cv._renderToken !== token) return;
-    drawInk(ctx, ink, 1);
+    drawInk(ctx, ink, S);
   }
 }
 
@@ -495,6 +611,65 @@ async function upload(files) {
   setTimeout(refresh, 1500);
 }
 function toast(msg, ms) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms || 3000); }
+
+/* ---------- compose (agentic doc creation) ---------- */
+/* ✦ Compose: instructions/links -> POST /paper/api/compose -> a pi agent on
+ * the VM researches + writes + typesets a PDF -> it enters the normal upload
+ * path and appears in the library (then on the tablet). The job id lives in
+ * localStorage so a reload keeps tracking the run. */
+const COMPOSE_KEY = 'paper-compose-job';
+let composeTimer = null;
+function composeModal(show) { $('cmp').classList.toggle('show', !!show); if (show) $('cmp-instr').focus(); }
+function chipShow(text, spinning) {
+  const c = $('cmpchip');
+  c.innerHTML = (spinning ? '<span class="spin"></span>' : '') + '<span>' + esc(text) + '</span>';
+  c.classList.add('show');
+}
+function chipHide() { $('cmpchip').classList.remove('show'); }
+async function submitCompose() {
+  const instructions = $('cmp-instr').value.trim();
+  const title = $('cmp-title').value.trim();
+  if (!instructions) { toast('Describe what to create (or paste links) first.'); return; }
+  const btn = $('cmp-go'); btn.disabled = true; btn.textContent = 'Starting…';
+  try {
+    const r = await fetch(API + 'compose', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instructions, title }) });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ('compose ' + r.status));
+    localStorage.setItem(COMPOSE_KEY, j.job);
+    composeModal(false); $('cmp-instr').value = ''; $('cmp-title').value = '';
+    watchCompose(j.job);
+  } catch (err) { toast('Compose failed to start: ' + err.message, 5000); }
+  btn.disabled = false; btn.textContent = 'Create';
+}
+function watchCompose(job) {
+  clearInterval(composeTimer);
+  chipShow('Composing…', true);
+  const poll = async () => {
+    let j = null;
+    try {
+      const r = await fetch(API + 'compose-status?job=' + encodeURIComponent(job), { cache: 'no-store' });
+      j = await r.json().catch(() => null);
+      if (r.status === 404) { clearInterval(composeTimer); composeTimer = null; localStorage.removeItem(COMPOSE_KEY); chipHide(); return; }
+    } catch (_) { return; }   // transient network error: keep polling
+    if (!j) return;
+    if (j.status === 'running' || j.status === 'rendering') {
+      chipShow((j.title ? j.title + ' — ' : '') + (j.phase || 'working…'), true);
+      return;
+    }
+    clearInterval(composeTimer); composeTimer = null;
+    localStorage.removeItem(COMPOSE_KEY);
+    if (j.status === 'done') {
+      chipHide();
+      toast('“' + (j.title || j.docId) + '” is ready — syncing to your tablet.', 8000);
+      state.sig = ''; refresh();
+    } else {
+      chipShow('Compose failed: ' + (j.error || 'unknown error'), false);
+      setTimeout(chipHide, 15000);
+    }
+  };
+  poll();
+  composeTimer = setInterval(poll, 5000);
+}
 
 /* ---------- crop editor ---------- */
 /* Photo-crop UX: the stage shows the FULL source page; drag a box around the
@@ -688,8 +863,9 @@ function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 window.addEventListener('resize', () => { if ($('med').classList.contains('show') && med.pageImg && $('med-stage')) { sizeStage(med.pageImg.naturalWidth, med.pageImg.naturalHeight); layoutBox(); } });
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if ($('med').classList.contains('show')) closeEditor();   // 1st Esc: close the crop editor
-    else if (state.open) goFiles();                           // 2nd (or in reader): back to My files
+    if ($('cmp').classList.contains('show')) composeModal(false);   // compose modal first
+    else if ($('med').classList.contains('show')) closeEditor();    // then the crop editor
+    else if (state.open) goFiles();                                  // then: back to My files
     return;
   }
   if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B')) {   // Cmd/Ctrl+B: toggle the sidebar
@@ -711,6 +887,10 @@ function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&
 
 $('brand').onclick = () => { state.folder = null; renderHome(); };
 $('add').onclick = () => $('file').click();
+$('compose-btn').onclick = () => composeModal(true);
+$('cmp-cancel').onclick = () => composeModal(false);
+$('cmp-go').onclick = submitCompose;
+$('cmp').addEventListener('click', (e) => { if (e.target.id === 'cmp') composeModal(false); });
 $('file').onchange = (e) => upload(e.target.files);
 let dragN = 0;
 window.addEventListener('dragenter', (e) => { e.preventDefault(); if (dragN++ === 0) $('drop').classList.add('show'); });
@@ -720,6 +900,8 @@ window.addEventListener('drop', (e) => { e.preventDefault(); dragN = 0; $('drop'
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !state.open) refresh(); });
 
 (async function boot() {
+  const pendingCompose = localStorage.getItem(COMPOSE_KEY);
+  if (pendingCompose) watchCompose(pendingCompose);
   await loadDocs();
   renderHome();
   perfMark('ready');

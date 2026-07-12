@@ -15,6 +15,14 @@
 //   POST /render   {id,margins:[l,t,r,b]}  re-render with new margins and ship
 //                           pages/text/meta to the tablet via inbound (NOT
 //                           state.json/ink, so annotations survive).
+//   GET  /source-pdf?id=&v= stream the retained source PDF (immutable when
+//                           versioned) — the viewer renders it with PDF.js.
+//   POST /compose  {instructions,title?}  agentic doc creation: a pi agent on
+//                           this VM researches the instructions/links, writes
+//                           a typeset markdown article, renders it with
+//                           notes-md2pdf.sh, and the result enters the normal
+//                           upload path (book bundle -> inbound -> tablet).
+//   GET  /compose-status?job=  phase/progress of a compose job.
 //
 // Inbound is a SEPARATE dir from the mirror on purpose: the tablet's outbound
 // rsync uses --delete, so writing straight into the mirror would be wiped on
@@ -37,11 +45,13 @@ const MIRROR = path.join(BACKUP, 'alt-ui', 'docs');    // tablet mirror (read me
 const SOURCES = path.join(BACKUP, 'alt-ui-sources');   // retained PDFs: <id>.pdf
 const PREVIEWS = path.join(BACKUP, 'alt-ui-previews'); // cached raw pages: <id>/<n>.png
 const COVERS = path.join(BACKUP, 'alt-ui-covers');     // small web covers, keyed by source+doc version
+const COMPOSE = path.join(BACKUP, 'alt-ui-compose');   // compose job workdirs
 const RENDER = process.env.ALT_UI_RENDER || '/home/exedev/bin/alt-ui-render.sh';
+const COMPOSE_SH = process.env.ALT_UI_COMPOSE || '/home/exedev/bin/alt-ui-compose.sh';
 const PREVIEW_PY = '/home/exedev/bin/alt-ui-preview-page.py';
 const PY = '/home/exedev/alt-ui-venv/bin/python3';
 const PORT = Number(process.env.ALT_UI_PORT || 8093);
-[INCOMING, DOCS, SOURCES, PREVIEWS, COVERS].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+[INCOMING, DOCS, SOURCES, PREVIEWS, COVERS, COMPOSE].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
 const MAX_BYTES = 200 * 1024 * 1024;
 const DEFAULT_CROP = [0, 0, 1, 1];   // whole page (fractions 0..1)
@@ -66,6 +76,7 @@ function handleLibrary(req, res) {
   const result = serializedLibrary({
     mirror: path.join(BACKUP, 'alt-ui'),
     inbound: path.join(BACKUP, 'alt-ui-inbound'),
+    sources: SOURCES,
   });
   const durationMs = Number(process.hrtime.bigint() - started) / 1e6;
   const headers = {
@@ -178,6 +189,28 @@ function handleSourceStatus(res, id) {
     crop: meta.crop || DEFAULT_CROP,
     orig: meta.orig_crop || meta.crop || DEFAULT_CROP,
     title: meta.title || id,
+  });
+}
+
+/* ---- GET /source-pdf?id=&v= ------------------------------------------ */
+// One request for the whole document: the viewer renders it locally with
+// PDF.js instead of fetching one full-page PNG per page. When ?v= (source
+// mtime token) is present the response is immutable in the browser.
+function handleSourcePdf(req, res, id, v) {
+  if (!safeId(id)) { res.writeHead(400); res.end('bad id'); return; }
+  const src = sourcePdf(id);
+  fs.stat(src, (err, st) => {
+    if (err) { res.writeHead(404); res.end('no source pdf'); return; }
+    const headers = {
+      'Content-Type': 'application/pdf',
+      'Content-Length': st.size,
+      'Cache-Control': /^[a-z0-9]+$/.test(v || '')
+        ? 'private, max-age=31536000, immutable'
+        : 'no-cache',
+    };
+    if (req.method === 'HEAD') { res.writeHead(200, headers); res.end(); return; }
+    res.writeHead(200, headers);
+    fs.createReadStream(src).pipe(res);
   });
 }
 
@@ -328,6 +361,109 @@ function handleRenderStatus(res, id) {
   json(res, 200, renderJobs.get(id));
 }
 
+/* ---- agentic compose --------------------------------------------------- */
+// POST /compose {instructions, title?} -> {ok, job}. A detached-ish pipeline:
+//   1. job dir under alt-ui-compose/<job>/ with instructions.md
+//   2. alt-ui-compose.sh runs a headless pi agent (research + write + render
+//      via notes-md2pdf.sh) -> <job>/out/article.pdf + <job>/title.txt,
+//      updating <job>/status.txt as it goes
+//   3. on success the PDF takes the exact upload path: book bundle into
+//      inbound docs/, source retained for the crop editor + PDF.js viewer.
+// Result is also persisted to <job>/result.json so status survives restarts.
+const composeJobs = new Map();
+const COMPOSE_TIMEOUT = 40 * 60000;
+
+function composeDir(id) { return path.join(COMPOSE, id); }
+function readComposePhase(id) {
+  try { return fs.readFileSync(path.join(composeDir(id), 'status.txt'), 'utf8').trim().slice(0, 200); } catch (_) { return null; }
+}
+function persistComposeResult(id, job) {
+  try { fs.writeFileSync(path.join(composeDir(id), 'result.json'), JSON.stringify(job)); } catch (_) {}
+}
+
+function finishCompose(job, dir) {
+  const pdf = path.join(dir, 'out', 'article.pdf');
+  if (!fs.existsSync(pdf)) {
+    Object.assign(job, { status: 'failed', error: 'agent produced no PDF', updated: Date.now() });
+    persistComposeResult(job.id, job); return;
+  }
+  let title = job.title || '';
+  try { title = (fs.readFileSync(path.join(dir, 'title.txt'), 'utf8').trim() || title); } catch (_) {}
+  title = title || 'Composed document';
+  const out = freeDir(slugify(title + '.pdf'));
+  const docId = path.basename(out);
+  Object.assign(job, { status: 'rendering', phase: 'rendering pages for the tablet', updated: Date.now() });
+  execFile(RENDER, [pdf, out, title, '0', '0', '1', '1'], { timeout: 240000 }, (err, so, se) => {
+    if (err) {
+      Object.assign(job, { status: 'failed', error: 'book render failed: ' + String(se || err.message).slice(0, 500), updated: Date.now() });
+      persistComposeResult(job.id, job); return;
+    }
+    try { fs.copyFileSync(pdf, sourcePdf(docId)); } catch (e) { console.error('compose source save failed', e); }
+    setOrigCrop(out);
+    console.log('composed', docId, '->', out);
+    Object.assign(job, { status: 'done', docId, title, updated: Date.now() });
+    persistComposeResult(job.id, job);
+  });
+}
+
+function handleCompose(req, res) {
+  readBody(req, res, (buf) => {
+    let body; try { body = JSON.parse(buf.toString('utf8')); } catch (_) { return json(res, 400, { ok: false, error: 'bad json' }); }
+    const instructions = String(body && body.instructions || '').trim();
+    const title = String(body && body.title || '').trim().slice(0, 160);
+    if (!instructions) return json(res, 400, { ok: false, error: 'instructions are required' });
+    if (instructions.length > 100000) return json(res, 413, { ok: false, error: 'instructions too long' });
+
+    const id = crypto.randomBytes(8).toString('hex');
+    const dir = composeDir(id);
+    fs.mkdirSync(path.join(dir, 'work'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'out'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'instructions.md'),
+      (title ? `Preferred title: ${title}\n\n` : '') + instructions + '\n');
+    fs.writeFileSync(path.join(dir, 'status.txt'), 'starting');
+
+    const job = { id, ok: true, status: 'running', phase: 'starting', title, updated: Date.now() };
+    composeJobs.set(id, job);
+    json(res, 202, { ok: true, job: id });
+
+    const child = spawn(COMPOSE_SH, [dir], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let tail = '';
+    child.stdout.resume();
+    child.stderr.on('data', (c) => { tail = (tail + c.toString()).slice(-8000); });
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, COMPOSE_TIMEOUT);
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      Object.assign(job, { status: 'failed', error: String(err.message || err), updated: Date.now() });
+      persistComposeResult(id, job);
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (job.status === 'failed') return;
+      if (code !== 0) {
+        const reason = signal === 'SIGKILL' ? 'timed out' : `agent exited ${code == null ? signal : code}`;
+        console.error('compose failed:', reason, tail.slice(-1000));
+        Object.assign(job, { status: 'failed', error: reason, updated: Date.now() });
+        persistComposeResult(id, job); return;
+      }
+      finishCompose(job, dir);
+    });
+  });
+}
+
+function handleComposeStatus(res, id) {
+  if (!/^[a-f0-9]{16}$/.test(id || '')) return json(res, 400, { ok: false, error: 'bad job id' });
+  let job = composeJobs.get(id);
+  if (!job) {   // service restarted mid-job or long after: fall back to disk
+    try { job = JSON.parse(fs.readFileSync(path.join(composeDir(id), 'result.json'), 'utf8')); } catch (_) {}
+    if (!job) {
+      if (fs.existsSync(composeDir(id))) return json(res, 200, { ok: true, id, status: 'failed', error: 'service restarted during compose' });
+      return json(res, 404, { ok: false, error: 'unknown compose job' });
+    }
+  }
+  const phase = job.status === 'running' ? (readComposePhase(id) || job.phase) : job.phase;
+  json(res, 200, { ...job, phase });
+}
+
 /* ---- router ----------------------------------------------------------- */
 http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
@@ -337,6 +473,9 @@ http.createServer((req, res) => {
   if (req.method === 'GET' && p === '/cover') return handleCover(res, u.searchParams.get('source'), u.searchParams.get('id'), u.searchParams.get('v'));
   if (req.method === 'GET' && p === '/source-status') return handleSourceStatus(res, u.searchParams.get('id'));
   if (req.method === 'GET' && p === '/preview') return handlePreview(res, u.searchParams.get('id'), parseInt(u.searchParams.get('page'), 10));
+  if ((req.method === 'GET' || req.method === 'HEAD') && p === '/source-pdf') return handleSourcePdf(req, res, u.searchParams.get('id'), u.searchParams.get('v'));
+  if (req.method === 'POST' && p === '/compose') return handleCompose(req, res);
+  if (req.method === 'GET' && p === '/compose-status') return handleComposeStatus(res, u.searchParams.get('job'));
   if (req.method === 'POST' && p === '/upload') return handleUpload(req, res);
   if (req.method === 'POST' && p === '/attach') return handleAttach(req, res);
   if (req.method === 'POST' && p === '/render') return handleRender(req, res);

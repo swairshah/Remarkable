@@ -46,6 +46,21 @@ test('buildLibrary merges sources, ignores stale dirs, and exposes cover/ink met
   assert.match(library.generation, /^[a-f0-9]{16}$/);
 });
 
+test('buildLibrary flags docs whose source PDF is retained', (t) => {
+  const f = fixture();
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const sources = path.join(f.root, 'sources');
+  fs.mkdirSync(sources, { recursive: true });
+  fs.writeFileSync(path.join(sources, 'book.pdf'), '%PDF-fake');
+  const library = buildLibrary({ mirror: f.mirror, inbound: f.inbound, sources });
+  const book = library.docs.find((doc) => doc.id === 'book');
+  const pending = library.docs.find((doc) => doc.id === 'pending');
+  assert.equal(book.hasSource, true);
+  assert.match(book.srcVersion, /^[a-z0-9]+$/);
+  assert.equal(pending.hasSource, false);
+  assert.equal(pending.srcVersion, null);
+});
+
 test('serializedLibrary is stable until the filesystem changes', (t) => {
   const f = fixture();
   t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));

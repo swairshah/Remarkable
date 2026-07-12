@@ -33,7 +33,7 @@ function readInkKeys(docDir) {
   }
 }
 
-function readSource(root, base, pending, coverEndpoint) {
+function readSource(root, base, pending, coverEndpoint, sourcesDir) {
   const docsDir = path.join(root, 'docs');
   let entries;
   try { entries = fs.readdirSync(docsDir, { withFileTypes: true }); } catch (_) { return []; }
@@ -63,6 +63,8 @@ function readSource(root, base, pending, coverEndpoint) {
     const cover = coverFile && fs.existsSync(coverFile)
       ? `${coverEndpoint}?source=${pending ? 'inbound' : 'data'}&id=${encodeURIComponent(id)}&v=${coverVersion}`
       : null;
+    const sourcePdf = sourcesDir ? path.join(sourcesDir, id + '.pdf') : null;
+    const srcMtime = sourcePdf ? mtimeMs(sourcePdf) : 0;
     const inkDir = path.join(docDir, 'ink');
     const pagesDir = path.join(docDir, 'pages');
     const versionFiles = [docDir, metaPath, statePath, thumbPath, inkDir, pagesDir];
@@ -78,14 +80,16 @@ function readSource(root, base, pending, coverEndpoint) {
       coverVersion,
       seq,
       ink: readInkKeys(docDir),
+      hasSource: srcMtime > 0,
+      srcVersion: srcMtime > 0 ? Math.trunc(srcMtime).toString(36) : null,
     });
   }
   return docs;
 }
 
-function buildLibrary({ mirror, inbound, dataBase = '/paper/data/', inboundBase = '/paper/inbound/', coverEndpoint = '/paper/api/cover' }) {
-  const mirrored = readSource(mirror, dataBase, false, coverEndpoint);
-  const pending = readSource(inbound, inboundBase, true, coverEndpoint);
+function buildLibrary({ mirror, inbound, sources = null, dataBase = '/paper/data/', inboundBase = '/paper/inbound/', coverEndpoint = '/paper/api/cover' }) {
+  const mirrored = readSource(mirror, dataBase, false, coverEndpoint, sources);
+  const pending = readSource(inbound, inboundBase, true, coverEndpoint, sources);
   const have = new Set(mirrored.map((doc) => doc.id));
   const docs = mirrored.concat(pending.filter((doc) => !have.has(doc.id)));
 
