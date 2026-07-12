@@ -90,6 +90,13 @@
   .docside .sbtn .k { margin-left:auto; font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:1px 5px; }
   .docside .sbtn.active .k { color:inherit; border-color:currentColor; opacity:.7; }
 
+  /* ---- full PDF.js viewer overlay ---- */
+  #pv { position: fixed; inset: 0; z-index: 45; background: var(--bg); display: none; flex-direction: column; }
+  #pv.show { display: flex; }
+  #pv .pvbar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: var(--card); border-bottom: 1px solid var(--line); }
+  #pv .pvtitle { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #pv iframe { flex: 1; border: 0; width: 100%; }
+
   /* ---- compose modal + status chip ---- */
   #cmp { position: fixed; inset: 0; z-index: 40; background: rgba(15,15,17,.6); display: none; place-items: center; }
   #cmp.show { display: grid; }
@@ -147,6 +154,7 @@
 <input type="file" id="file" multiple hidden>
 <div id="drop"><div class="box">Drop files to add them to Paper</div></div>
 <div id="med"></div>
+<div id="pv"><div class="pvbar"><span class="pvtitle" id="pv-title"></span><span class="spacer"></span><button class="addbtn" id="pv-close">✕ Close</button></div><iframe id="pv-frame" title="PDF viewer"></iframe></div>
 <div id="cmp"><div class="box">
   <h3>✦ Compose a document</h3>
   <div class="sub">Paste links and/or describe what you want. An agent on the server researches it, writes a typeset article, and adds the PDF to Paper — it syncs to your tablet like any upload. Takes a few minutes.</div>
@@ -440,6 +448,17 @@ function goFiles() {
 function openEditor() {
   if (state.open && state.open.meta.kind === 'book') openMarginEditor(state.open);
 }
+/* Full PDF.js viewer app (self-hosted at /paper/pdfjs/): proper zoom, smooth
+ * scroll, text search/selection, thumbnails, outline. Reads the same cached
+ * source-pdf URL as the inline reader. Note: shows the clean PDF — ink
+ * annotations live in the inline reader. */
+function openPdfViewer(d) {
+  const url = API + 'source-pdf?id=' + encodeURIComponent(d.id) + (d.srcVersion ? '&v=' + d.srcVersion : '');
+  $('pv-title').textContent = d.meta.title || d.id;
+  $('pv-frame').src = '/paper/pdfjs/web/viewer.html?file=' + encodeURIComponent(url);
+  $('pv').classList.add('show');
+}
+function closePdfViewer() { $('pv').classList.remove('show'); $('pv-frame').src = 'about:blank'; }
 // Cmd/Ctrl+B -> show/hide the doc-view sidebar
 function toggleSidebar() {
   if (state.open) document.body.classList.toggle('sidebar');
@@ -462,6 +481,7 @@ function buildSidebar(d) {
   };
   side.appendChild(mk('‹', 'My files', 'esc', goFiles));
   if (d.meta.kind === 'book') side.appendChild(mk('▦', 'Adjust margins', '', openEditor));
+  if (d.meta.kind === 'book' && d.hasSource) side.appendChild(mk('⤡', 'PDF viewer', '', () => openPdfViewer(d)));
   const ai = mk('✦', 'AI ink', '', null, state.aiBlue);
   ai.onclick = () => { state.aiBlue = !state.aiBlue; ai.classList.toggle('active', state.aiBlue); redrawOpenPages(); };
   side.appendChild(ai);
@@ -487,6 +507,12 @@ async function openDoc(d) {
     btn.textContent = '⌸  Adjust margins';
     btn.onclick = () => openMarginEditor(d);
     bar.appendChild(btn);
+    if (d.hasSource) {
+      const pvb = document.createElement('button'); pvb.className = 'addbtn';
+      pvb.textContent = '⤡  PDF viewer';
+      pvb.onclick = () => openPdfViewer(d);
+      bar.appendChild(pvb);
+    }
     $view.appendChild(bar);
   }
   const wrap = document.createElement('div'); wrap.className = 'pages';
@@ -863,7 +889,8 @@ function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 window.addEventListener('resize', () => { if ($('med').classList.contains('show') && med.pageImg && $('med-stage')) { sizeStage(med.pageImg.naturalWidth, med.pageImg.naturalHeight); layoutBox(); } });
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if ($('cmp').classList.contains('show')) composeModal(false);   // compose modal first
+    if ($('pv').classList.contains('show')) closePdfViewer();       // PDF viewer overlay first
+    else if ($('cmp').classList.contains('show')) composeModal(false);
     else if ($('med').classList.contains('show')) closeEditor();    // then the crop editor
     else if (state.open) goFiles();                                  // then: back to My files
     return;
@@ -891,6 +918,7 @@ $('compose-btn').onclick = () => composeModal(true);
 $('cmp-cancel').onclick = () => composeModal(false);
 $('cmp-go').onclick = submitCompose;
 $('cmp').addEventListener('click', (e) => { if (e.target.id === 'cmp') composeModal(false); });
+$('pv-close').onclick = closePdfViewer;
 $('file').onchange = (e) => upload(e.target.files);
 let dragN = 0;
 window.addEventListener('dragenter', (e) => { e.preventDefault(); if (dragN++ === 0) $('drop').classList.add('show'); });

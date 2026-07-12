@@ -85,7 +85,13 @@ material thoroughly. Requirements:
 - Do not invent specific facts (numbers, dates, theorem names,
   citations). Mark anything inferred rather than read as "(inferred)".
 - Math: $...$ inline, $$...$$ display. Use \dots (never \hdots). The
-  renderer uses native MathML — stick to standard LaTeX.
+  renderer converts math with Pandoc's MathML backend — use only
+  standard LaTeX it supports. NO color or styling macros (\colorbox,
+  \fcolorbox, \textcolor, \color, \bbox, \cancel, \bm), no
+  \newcommand. The output is a grayscale e-ink screen: express emphasis
+  structurally (\mathbf, \boldsymbol, \underbrace, \text{...} labels),
+  never with color. When quoting math from a source that uses color,
+  strip the color and keep the mathematics.
 - Code in fenced blocks with language tags.
 - Images: download any image you want to include into assets/ (curl with
   a Referer of the page it came from) and reference it as
@@ -126,6 +132,70 @@ fi
 
 # Portable-math normalization (same fix enrich_clippings applies).
 sed -i 's/\\hdots/\\dots/g' "$WORK/article.md"
+
+# ---- review pass: catch what the typesetter cannot render ---------------
+# Pandoc's MathML converter rejects some LaTeX (\colorbox, \textcolor, ...)
+# and leaves it as RAW TeX TEXT in the PDF. Detect those — plus referenced
+# image files that don't exist — and send the agent back to repair
+# article.md, up to two fix rounds before shipping anyway.
+collect_render_problems() {
+  local problems missing=""
+  problems="$(pandoc "$WORK/article.md" \
+      --from markdown+smart+tex_math_dollars --to html5 --mathml -o /dev/null 2>&1 \
+    | grep -A3 'Could not convert TeX math' | head -120 || true)"
+  while IFS= read -r img; do
+    [ -z "$img" ] && continue
+    [ -f "$WORK/$img" ] || missing="$missing  $img"$'\n'
+  done < <(grep -o 'assets/[A-Za-z0-9._/-]*' "$WORK/article.md" 2>/dev/null | sort -u)
+  if [ -n "$missing" ]; then
+    problems="$problems"$'\n'"Referenced image files that do not exist on disk (remove or fix these references):"$'\n'"$missing"
+  fi
+  printf '%s' "$problems" | sed '/^[[:space:]]*$/d'
+}
+
+for PASS in 1 2 3; do
+  PROBLEMS="$(collect_render_problems)"
+  [ -z "$PROBLEMS" ] && { echo "[compose] review clean (pass $PASS)" >&2; break; }
+  if [ "$PASS" = 3 ]; then
+    echo "[compose] unresolved rendering problems after 2 fix passes — shipping anyway:" >&2
+    printf '%s\n' "$PROBLEMS" >&2
+    break
+  fi
+  status "fixing typesetting issues (pass $PASS)"
+  printf '%s\n' "$PROBLEMS" > "$JOB/render-problems.txt"
+  {
+  cat <<'FIX'
+You previously wrote article.md in the current directory (it is there
+now). The PDF typesetter reported problems that would appear as raw
+LaTeX text or broken images in the final document. Fix article.md IN
+PLACE, changing as little else as possible.
+
+Rules:
+- The renderer converts math with Pandoc's MathML backend. It does NOT
+  support color/styling macros: \colorbox, \fcolorbox, \textcolor,
+  \color, \bbox, \style, \class, \cancel, \bm, \hdots. Rewrite any such
+  math in plain supported LaTeX (\mathbf, \boldsymbol, \underbrace,
+  \text{...} labels). The document is for a grayscale e-ink screen —
+  express emphasis structurally, never with color.
+- For every "Could not convert TeX math" snippet below, find it in
+  article.md and rewrite it so it parses as standard LaTeX.
+- For every missing image file, remove the image reference or replace
+  it with a short text description.
+- Do not add new content and do not restructure the article.
+
+--- PROBLEMS REPORTED BY THE RENDERER ---
+FIX
+  cat "$JOB/render-problems.txt"
+  cat <<'FIX'
+--- END PROBLEMS ---
+
+Edit article.md now. When done, reply with one line: FIXED.
+FIX
+  } > "$JOB/fix-prompt.md"
+  set +e
+  "$PI_BIN" -p --no-session "@$JOB/fix-prompt.md" >> "$JOB/agent.stdout.log" 2>>"$JOB/agent.stderr.log"
+  set -e
+done
 
 # Resolve the title: YAML title -> first heading -> agent's last line.
 TITLE="$(awk -F': *' '/^title:/ { sub(/^title: */, ""); gsub(/^"|"$/, ""); print; exit }' "$WORK/article.md" || true)"

@@ -26,7 +26,19 @@ Second revision (2026-07-13), three additions to the web viewer:
   reference appendix/quiz), then the PDF takes the exact upload path
   (book bundle → inbound → tablet, source retained). Job phase is polled
   via `GET /paper/api/compose-status?job=` and survives page reloads
-  (localStorage) and service restarts (result.json).
+  (localStorage) and service restarts (result.json). Jobs run a per-job
+  COPY of the script (deploys can't corrupt in-flight runs) and user
+  instructions never pass through shell expansion. After writing, a
+  review loop checks the article with pandoc's MathML converter
+  (unsupported macros like `\colorbox` would print as raw TeX) plus a
+  missing-image check, and sends the agent back to repair the file — up
+  to two fix rounds.
+- **Full PDF.js viewer app** (self-hosted at `/paper/pdfjs/`, pinned
+  4.8.69, installed by deploy-server.sh): "PDF viewer" in the doc
+  sidebar/docbar opens Mozilla's complete viewer (zoom, smooth scroll,
+  text search/selection, thumbnails, outline) in an overlay iframe on
+  the same cached `source-pdf` URL. Ink annotations stay in the inline
+  reader; the app shows the clean PDF.
 
 ## Model: mirror out, drop-to-add in
 

@@ -97,6 +97,19 @@ else
   echo "  (no local font TTFs found — the renderer will fall back to system serif)"
 fi
 
+echo "[deploy-server] ensure pdf.js prebuilt viewer"
+ssh "$HOST" '
+  set -e
+  V=4.8.69
+  if [ ! -f ~/notes-server/pdfjs/.version-$V ]; then
+    curl -fsSL -o /tmp/pdfjs.zip https://github.com/mozilla/pdf.js/releases/download/v$V/pdfjs-$V-dist.zip
+    command -v unzip >/dev/null || sudo apt-get install -y unzip >/dev/null 2>&1
+    rm -rf ~/notes-server/pdfjs && mkdir -p ~/notes-server/pdfjs
+    unzip -q /tmp/pdfjs.zip -d ~/notes-server/pdfjs
+    rm /tmp/pdfjs.zip && touch ~/notes-server/pdfjs/.version-$V
+  fi
+'
+
 echo "[deploy-server] scp nginx config + viewer html + nav"
 scp -q "$HERE"/server/nginx/default.conf "$HOST:notes-server/default.conf"
 scp -q "$HERE"/server/web/raw/index.html "$HOST:notes-server/raw/index.html"
