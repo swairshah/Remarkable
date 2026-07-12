@@ -61,6 +61,11 @@ const INK_FLUSH_QTFB: Duration = Duration::from_millis(12);
 const INK_FLUSH_TAKEOVER: Duration = Duration::from_millis(8);
 const PEN_TIMEOUT: Duration = Duration::from_millis(1500); /* palm rejection */
 
+/* page turns render as partial GC16 (crisp for bold ink, no flash — the
+ * stock-app feel, inherited from Paper); a flashing deghost every Nth turn
+ * clears accumulated partial-update residue */
+const FLIP_DEGHOST_EVERY: u32 = 8;
+
 /// How long a writing pause must last before the page goes to pi.
 const IDLE_DELAY: Duration = Duration::from_millis(2800);
 
@@ -279,7 +284,8 @@ struct App {
     cur_stroke: Option<Stroke>,
     ink_dirty: Option<Rect>,
     last_ink_flush: Instant,
-    palm: palm::PalmGuard,     /* any pen sign of life (incl. hover) */
+    palm: palm::PalmGuard,
+    flips_since_flash: u32, /* partial-GC16 turns; flash every FLIP_DEGHOST_EVERY */     /* any pen sign of life (incl. hover) */
     last_contact: Option<Instant>, /* actual glass contact */
     contact_changed: bool,         /* this contact wrote or erased something */
 
@@ -1090,7 +1096,13 @@ impl App {
         self.page_changed = false;
         self.idle_at = None;
         self.nb.page.render_full(&mut self.fb);
-        self.disp.full_refresh(); /* the page-turn flash doubles as deghost */
+        self.flips_since_flash += 1;
+        if self.flips_since_flash >= FLIP_DEGHOST_EVERY {
+            self.flips_since_flash = 0;
+            self.disp.full_refresh(); /* periodic deghost */
+        } else {
+            self.disp.update(0, 0, FB_W, FB_H, Wave::Page); /* flash-free turn */
+        }
         self.working = false; /* dot was flashed away; redraw if still busy */
         if self.streaming {
             self.set_working(true);
@@ -1935,6 +1947,7 @@ fn main() -> std::process::ExitCode {
         ink_dirty: None,
         last_ink_flush: now,
         palm: palm::PalmGuard::default(),
+        flips_since_flash: 0,
         last_contact: None,
         contact_changed: false,
         page_changed: false,

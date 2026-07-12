@@ -391,12 +391,6 @@ impl Book {
         self.raster.is_some()
     }
 
-    pub fn render_full(&self, fb: &mut Framebuffer) {
-        self.render_region(
-            fb,
-            crate::ink::Rect { x0: 0, y0: 0, x1: SCREEN_W - 1, y1: SCREEN_H - 1 },
-        );
-    }
 
     /// Snapshot the CURRENT entry for pi at 1/`div` scale: downsampled
     /// raster, user ink black, AI ink gray.

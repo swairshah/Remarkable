@@ -65,6 +65,11 @@ const INK_FLUSH_QTFB: Duration = Duration::from_millis(12);
 const INK_FLUSH_TAKEOVER: Duration = Duration::from_millis(8);
 const PEN_TIMEOUT: Duration = Duration::from_millis(1500); /* palm rejection */
 
+/* page turns render gently (full GL16 over print — smooth greys, no flash;
+ * partial GC16 over pure-ink note pages), inherited from Paper; a flashing
+ * deghost every Nth turn clears the residue the gentle passes leave */
+const FLIP_DEGHOST_EVERY: u32 = 8;
+
 /// How long a writing pause must last before the page goes to pi.
 const IDLE_DELAY: Duration = Duration::from_millis(2800);
 
@@ -277,7 +282,8 @@ struct App {
     cur_stroke: Option<Stroke>,
     ink_dirty: Option<Rect>,
     last_ink_flush: Instant,
-    palm: palm::PalmGuard,     /* any pen sign of life (incl. hover) */
+    palm: palm::PalmGuard,
+    flips_since_flash: u32, /* gentle turns; flash every FLIP_DEGHOST_EVERY */     /* any pen sign of life (incl. hover) */
     last_contact: Option<Instant>, /* actual glass contact */
     contact_changed: bool,         /* this contact wrote or erased something */
 
@@ -897,22 +903,34 @@ impl App {
                 save_settings(self.text_scale, slug);
                 self.page_changed = false;
                 self.idle_at = None;
-                self.render_book_full();
+                self.render_book_full(true); /* clean GC16 on open */
                 self.show_page_indicator();
             }
             None => println!("reader: could not open book '{slug}'"),
         }
     }
 
-    /// Full repaint of the current book page + flash + chrome.
-    fn render_book_full(&mut self) {
-        self.ink_settle = None; /* the flash below supersedes any settle */
+    /// Full repaint of the current book page + chrome. `flash` = the GC16
+    /// deghost blink; page turns instead ease over with GL16 (print pages —
+    /// full-frame so the greys stay smooth) or partial GC16 (pure-ink note
+    /// pages), exactly like Paper.
+    fn render_book_full(&mut self, flash: bool) {
+        self.ink_settle = None; /* the whole-page repaint supersedes any settle */
         self.ink_settle_at = None;
-        if let Some(b) = &self.book {
-            b.render_full(&mut self.fb);
+        let has_raster = match &self.book {
+            Some(b) => b.render_region(
+                &mut self.fb,
+                Rect { x0: 0, y0: 0, x1: FB_W - 1, y1: FB_H - 1 },
+            ),
+            None => false,
+        };
+        if flash {
+            self.disp.full_refresh();
+        } else {
+            let wave = if has_raster { Wave::Print } else { Wave::Page };
+            self.disp.update(0, 0, FB_W, FB_H, wave);
         }
-        self.disp.full_refresh();
-        self.working = false; /* the flash wiped the dot; redraw if busy */
+        self.working = false; /* the repaint wiped the dot; redraw if busy */
         if self.streaming {
             self.set_working(true);
         }
@@ -1027,7 +1045,7 @@ impl App {
         if delta != 0 {
             self.flip(delta);
         } else {
-            self.render_book_full();
+            self.render_book_full(true);
             self.show_page_indicator();
         }
     }
@@ -1194,7 +1212,7 @@ impl App {
             self.render_home(true);
             return;
         }
-        self.render_book_full();
+        self.render_book_full(true);
         /* a pending page change resumes its pause countdown */
         if self.page_changed {
             self.idle_at = Some(Instant::now() + IDLE_DELAY);
@@ -1360,7 +1378,12 @@ impl App {
         self.cur_stroke = None;
         self.page_changed = false;
         self.idle_at = None;
-        self.render_book_full();
+        self.flips_since_flash += 1;
+        let flash = self.flips_since_flash >= FLIP_DEGHOST_EVERY;
+        if flash {
+            self.flips_since_flash = 0;
+        }
+        self.render_book_full(flash);
         self.show_page_indicator();
         if let Some(b) = &self.book {
             println!("reader: page {} / {} ({})", b.current + 1, b.count(), b.label(b.current));
@@ -2457,6 +2480,7 @@ fn main() -> std::process::ExitCode {
         ink_dirty: None,
         last_ink_flush: now,
         palm: palm::PalmGuard::default(),
+        flips_since_flash: 0,
         last_contact: None,
         contact_changed: false,
         page_changed: false,
