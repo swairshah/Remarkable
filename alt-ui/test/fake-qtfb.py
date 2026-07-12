@@ -25,161 +25,29 @@ import time
 import zlib
 
 
-def copy_tree(src, dst):
-    """python3-minimal has no shutil; this is all we need of copytree."""
-    os.makedirs(dst, exist_ok=True)
-    for name in os.listdir(src):
-        s, d = os.path.join(src, name), os.path.join(dst, name)
-        if os.path.isdir(s):
-            copy_tree(s, d)
-        else:
-            with open(s, "rb") as fi, open(d, "wb") as fo:
-                fo.write(fi.read())
+# The protocol core (Harness/Session/write_png) is shared across the
+# libreink apps: libreink/tools/preview/qtfb_host.py. LIBREINK_PREVIEW
+# points at it inside the preview container; the relative default serves
+# host runs straight from the repo checkout.
+sys.path.insert(0, os.environ.get(
+    "LIBREINK_PREVIEW",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "..", "..", "..", "libreink", "tools", "preview")))
+from qtfb_host import *  # noqa: E402,F403
 
-W, H = 1404, 1872
-SHM_KEY = 7
-
-SHM_PATH = f"/dev/shm/qtfb_{SHM_KEY}"
-SOCK_PATH = "/tmp/qtfb.sock"
 DATA_DIR = "/tmp/au-data"
-
-PEN_PRESS, PEN_RELEASE, PEN_UPDATE = 0x20, 0x21, 0x22
-TOUCH_PRESS, TOUCH_RELEASE, TOUCH_UPDATE = 0x10, 0x11, 0x12
-MESSAGE_USERINPUT = 4
-
 CLOSE_TAP_X, CLOSE_TAP_Y = 1318, 44  # inside the CLOSE button (now top-RIGHT)
 
 
-def write_png(path):
-    raw = memoryview(open(SHM_PATH, "rb").read()).cast("H")
-    gray = bytes(((v >> 5) & 0x3F) * 255 // 63 for v in raw)
-
-    def chunk(tag, data):
-        c = tag + data
-        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
-
-    ihdr = struct.pack(">IIBBBBB", W, H, 8, 0, 0, 0, 0)
-    rows = b"".join(b"\x00" + gray[y * W:(y + 1) * W] for y in range(H))
-    with open(path, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) +
-                chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
-    print(f"fake-qtfb: wrote {path}")
-
-
-class Harness:
-    """Owns the qtfb server socket; launches app sessions on demand."""
-
-    def __init__(self, app_bin):
-        self.app_bin = app_bin
-        with open(SHM_PATH, "wb") as f:
-            f.truncate(W * H * 2)
-        if os.path.exists(SOCK_PATH):
-            os.remove(SOCK_PATH)
-        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-        self.srv.bind(SOCK_PATH)
-        self.srv.listen(1)
-        self.here = os.path.dirname(os.path.abspath(__file__))
-        self.launched = []
-
-    def cleanup(self):
-        for app in self.launched:
-            if app.poll() is None:
-                app.terminate()
-                try:
-                    app.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    app.kill()
+class PaperHarness(Harness):
+    """The shared harness + Paper's env: fake pi, data dir, tool socket."""
 
     def launch(self, **env_extra):
-        env = dict(os.environ,
-                   QTFB_KEY="12345",
-                   PAPER_PI_BIN=os.path.join(self.here, "fake-pi.py"),
-                   PAPER_DATA_DIR=DATA_DIR,
-                   PAPER_SOCK="/tmp/au.sock",
-                   HOME="/tmp")
-        env.pop("PAPER_OPEN", None)
-        env.update(env_extra)
-        app = subprocess.Popen(["qemu-arm-static", self.app_bin], env=env)
-        self.launched.append(app)
-        conn, _ = self.srv.accept()
-        init = conn.recv(64)
-        assert init[0] == 0, init[0]
-        conn.send(struct.pack("<B3xiI12x", 0, SHM_KEY, W * H * 2))
-        return Session(conn, app)
-
-
-class Session:
-    """One accepted app connection + input/screenshot helpers."""
-
-    def __init__(self, conn, app):
-        self.conn = conn
-        self.app = app
-
-    def pen(self, itype, x, y, d=0):
-        self.conn.send(struct.pack("<B3xiiiii", MESSAGE_USERINPUT, itype, 0, x, y, d))
-
-    def touch(self, itype, x, y):
-        self.conn.send(struct.pack("<B3xiiiii", MESSAGE_USERINPUT, itype, 0, x, y, 0))
-
-    def drain(self, seconds):
-        self.conn.settimeout(seconds)
-        end = time.time() + seconds
-        try:
-            while time.time() < end:
-                self.conn.recv(64)
-        except (socket.timeout, OSError):
-            pass
-
-    def drain_counting(self, seconds):
-        """Drain, counting UPDATE messages and summing their rect areas."""
-        self.conn.settimeout(seconds)
-        end = time.time() + seconds
-        count, area = 0, 0
-        try:
-            while time.time() < end:
-                msg = self.conn.recv(64)
-                if len(msg) >= 24 and msg[0] == 1:  # MESSAGE_UPDATE
-                    ut, x, y, w, hh = struct.unpack_from("<iiiii", msg, 4)
-                    count += 1
-                    area += (w * hh) if ut == 1 else (W * H)
-        except (socket.timeout, OSError):
-            pass
-        return count, area
-
-    def swipe(self, x0, x1, y=900):
-        step = (x1 - x0) // 11
-        self.touch(TOUCH_PRESS, x0, y)
-        for i in range(1, 12):
-            self.touch(TOUCH_UPDATE, x0 + i * step, y)
-        self.touch(TOUCH_RELEASE, x1, y)
-
-    def swipe_down_from_top(self, x=700):
-        self.touch(TOUCH_PRESS, x, 4)
-        for i in range(1, 12):
-            self.touch(TOUCH_UPDATE, x, 4 + i * 14)
-        self.touch(TOUCH_RELEASE, x, 4 + 12 * 14)
-
-    def tap(self, x, y):
-        self.touch(TOUCH_PRESS, x, y)
-        self.touch(TOUCH_RELEASE, x, y)
-
-    def squiggle(self, x0, y0, n=50, dx=9, amp=24):
-        self.pen(PEN_PRESS, x0, y0)
-        for i in range(1, n):
-            self.pen(PEN_UPDATE, x0 + i * dx, y0 + int(amp * math.sin(i / 3)))
-        self.pen(PEN_RELEASE, x0 + n * dx, y0)
-
-    def expect_exit(self, why):
-        try:
-            self.app.wait(timeout=6)
-        except subprocess.TimeoutExpired:
-            raise AssertionError(f"app did not exit ({why})")
-        print(f"fake-qtfb: app exited rc={self.app.returncode} ({why})")
-        assert self.app.returncode == 0, f"app exit rc={self.app.returncode}"
-
-    def terminate_clean(self):
-        self.app.terminate()  # SIGTERM -> save_all -> clean exit
-        self.expect_exit("SIGTERM")
+        base = dict(PAPER_PI_BIN=os.path.join(self.here, "fake-pi.py"),
+                    PAPER_DATA_DIR=DATA_DIR,
+                    PAPER_SOCK="/tmp/au.sock")
+        base.update(env_extra)
+        return super().launch(drop=("PAPER_OPEN",), **base)
 
 
 def scenario_m0(h, out_png):
@@ -897,7 +765,7 @@ SCENARIOS = {
 def main():
     app_bin, out_png = sys.argv[1], sys.argv[2]
     scenario = SCENARIOS[os.environ.get("PAPER_SCENARIO", "m1")]
-    h = Harness(app_bin)
+    h = PaperHarness(app_bin)
     try:
         scenario(h, out_png)
     finally:

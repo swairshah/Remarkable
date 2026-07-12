@@ -78,7 +78,8 @@ preview: build testbook
 	mkdir -p build
 	chmod +x test/fake-pi.py
 	docker build --platform linux/arm64 -t paper-preview -f test/preview.Dockerfile test
-	docker run --rm --platform linux/arm64 -v "$(CURDIR):/src" -w /src \
+	docker run --rm --platform linux/arm64 -v "$(CURDIR):/src" \
+		-v "$(abspath $(CURDIR)/../../libreink):/libreink:ro" -e LIBREINK_PREVIEW=/libreink/tools/preview -w /src \
 		-e PAPER_SCENARIO=$(or $(SCENARIO),m1) \
 		paper-preview python3 test/fake-qtfb.py $(BUILT) build/preview.png
 
