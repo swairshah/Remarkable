@@ -97,6 +97,19 @@ else
   echo "  (no local font TTFs found — the renderer will fall back to system serif)"
 fi
 
+echo "[deploy-server] ensure STIX Two Math (darker MathML glyphs for e-ink)"
+ssh "$HOST" '
+  set -e
+  if [ ! -f ~/.local/share/fonts/STIXTwoMath-Regular.otf ]; then
+    mkdir -p ~/.local/share/fonts
+    curl -fsSL -o /tmp/stix2-otf.zip https://mirrors.ctan.org/fonts/stix2-otf.zip
+    command -v unzip >/dev/null || sudo apt-get install -y unzip >/dev/null 2>&1
+    unzip -o -j -q /tmp/stix2-otf.zip "stix2-otf/STIXTwoMath-Regular.otf" -d ~/.local/share/fonts
+    rm -f /tmp/stix2-otf.zip
+    fc-cache -f >/dev/null 2>&1 || true
+  fi
+'
+
 echo "[deploy-server] ensure pdf.js prebuilt viewer"
 ssh "$HOST" '
   set -e

@@ -198,6 +198,13 @@ $code_font_css
   }
   math {
     max-width: 100%;
+    /* Chrome's MathML default (Latin Modern Math) is too thin for e-ink:
+       hairline strokes dither to faded gray on the reMarkable panel.
+       Prefer STIX Two Math (installed by deploy-server.sh), which has a
+       darker, sturdier cut, and add a hairline stroke so glyphs survive
+       the grayscale dither. Both knobs are overridable per render. */
+    font-family: ${RM_MATH_FONT:-"STIX Two Math", "STIX Math", "Latin Modern Math"}, math;
+    -webkit-text-stroke: ${RM_MATH_STROKE:-0.25px} currentColor;
   }
   pre, table {
     overflow-x: hidden;
