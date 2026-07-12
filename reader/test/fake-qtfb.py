@@ -3,7 +3,7 @@
 
 Plays the server side of the qtfb protocol (see src/qtfb.rs): backs the
 framebuffer with /dev/shm, launches the app under qemu with a FAKE pi
-(test/fake-pi.py) wired in via READER_BIN and the testbook bundle via
+(test/fake-pi.py) wired in via READER_PI_BIN and the testbook bundle via
 READER_BOOKS, then scripts a session: open the book from the home screen,
 scribble (the pause trigger), let the fake pi underline / margin-note /
 insert a note page, and flip through everything. Screenshots along the way.
@@ -77,7 +77,7 @@ def main():
 
     env = dict(os.environ,
                QTFB_KEY="12345",
-               READER_BIN=os.path.join(here, "fake-pi.py"),
+               READER_PI_BIN=os.path.join(here, "fake-pi.py"),
                READER_BOOKS="/tmp/rd-books",
                READER_SOCK="/tmp/rd.sock",
                HOME="/tmp")

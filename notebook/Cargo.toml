@@ -12,6 +12,7 @@ libreink-display = { path = "../../libreink/crates/libreink-display" }  # qtfb/r
 libreink-input = { path = "../../libreink/crates/libreink-input" }      # touch/pen/power
 libreink-hershey = { path = "../../libreink/crates/libreink-hershey" }  # plotter stroke fonts
 libreink-page = { path = "../../libreink/crates/libreink-page" }        # vector ink page model
+libreink-pi = { path = "../../libreink/crates/libreink-pi" }            # agent transport + tool socket
 libreink-svg = { path = "../../libreink/crates/libreink-svg" }          # agent SVG -> ink
 libreink-text = { path = "../../libreink/crates/libreink-text" }        # typeset text (fontdue)
 

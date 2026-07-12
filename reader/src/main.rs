@@ -36,13 +36,13 @@ pub use libreink_display::{display, qtfb, rm2fb};
 pub use libreink_input::{palm, pen, power, touch};
 pub use libreink_hershey as hershey;
 pub use libreink_svg as svg_ink;
+pub use libreink_pi::ipc;
 pub use libreink_text as text;
 pub use libreink_page as ink;
 
 mod book;
 mod import;
 mod xochitl;
-mod ipc;
 mod pi_rpc;
 
 use book::{Book, Entry};
@@ -2391,10 +2391,10 @@ fn main() -> std::process::ExitCode {
     install_signal_handlers();
 
     let sock = sock_path();
-    let ipc = IpcServer::open(&sock)
+    let ipc = IpcServer::open(APP, &sock)
         .map_err(|e| eprintln!("reader: tool socket: {e} — pi gets no tools"))
         .ok();
-    let pi = match Pi::spawn(&sock) {
+    let pi = match pi_rpc::spawn(&sock) {
         Ok(p) => Some(p),
         Err(e) => {
             eprintln!("reader: could not start pi: {e}");

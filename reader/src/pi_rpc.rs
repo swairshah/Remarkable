@@ -10,11 +10,8 @@
 //! A fixed session dir + `--continue` makes the whole reader ONE pi
 //! session that survives app restarts.
 
-use crate::png;
-use serde_json::{json, Value};
-use std::io::Write;
-use std::os::unix::io::{AsRawFd, RawFd};
-use std::process::{Child, ChildStdin, Command, Stdio};
+pub use libreink_pi::{Pi, PiEvent};
+use libreink_pi::PiConfig;
 
 fn session_dir() -> String {
     if let Ok(d) = std::env::var("READER_SESSION_DIR") {
@@ -112,39 +109,13 @@ You keep your normal shell tools and web access — use them to ANSWER \
 something the user explicitly asks for (look up a citation, check a fact, \
 run a computation), never as a side effect of an ordinary page.";
 
-pub enum PiEvent {
-    /// A chunk of assistant text — logged, not rendered (reader mode).
-    Delta(String),
-    Start,
-    End,
-    /// A one-line notice for the log (tool runs, retries, errors).
-    Notice(String),
-    Died(String),
-}
-
-pub struct Pi {
-    child: Child,
-    stdin: ChildStdin,
-    stdout_fd: RawFd,
-    buf: Vec<u8>,
-}
-
-impl Pi {
-    /// Spawn pi in RPC mode with the reader extension. READER_BIN
+    /// Spawn pi in RPC mode with the reader extension. READER_PI_BIN
     /// overrides the binary (the preview harness points it at a fake);
     /// READER_EXT is the extension path (set by takeover.sh);
     /// `sock` is the tool socket path, handed to the extension via env.
     pub fn spawn(sock: &str) -> std::io::Result<Pi> {
-        let bin = std::env::var("READER_BIN").unwrap_or_else(|_| "/home/root/bin/pi".into());
         let home = std::env::var("HOME").unwrap_or_else(|_| "/home/root".into());
         let dir = session_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        let resumed = std::fs::read_dir(&dir)
-            .map(|rd| {
-                rd.flatten()
-                    .any(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
-            })
-            .unwrap_or(false);
 
         /* The user's standing-instructions file. pi OWNS it: handwritten
          * feedback ("pi: smaller margin notes") should be persisted there
@@ -187,186 +158,13 @@ impl Pi {
              files in {dir}; you may read them with your tools if the user \
              refers to an earlier day."
         );
-        let mut args = vec![
-            "--mode".to_string(),
-            "rpc".into(),
-            "--session-dir".into(),
-            dir.clone(),
-            "--name".into(),
-            "reader".into(),
-            "--append-system-prompt".into(),
-            sys,
-        ];
-        if let Ok(ext) = std::env::var("READER_EXT") {
-            args.push("-e".into());
-            args.push(ext);
-        }
-        if resumed {
-            args.push("--continue".into());
-        }
-
-        let mut child = Command::new(&bin)
-            .args(&args)
-            .current_dir(&home)
-            .env("READER_SOCK", sock)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit()) /* -> journal / log file */
-            .spawn()?;
-        let stdin = child.stdin.take().unwrap();
-        let stdout_fd = child.stdout.as_ref().unwrap().as_raw_fd();
-        unsafe {
-            let fl = libc::fcntl(stdout_fd, libc::F_GETFL, 0);
-            libc::fcntl(stdout_fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
-        }
-        println!(
-            "reader: spawned {bin} (session-dir {dir}, {})",
-            if resumed { "continued" } else { "fresh" }
-        );
-        Ok(Pi { child, stdin, stdout_fd, buf: Vec::new() })
+        Pi::spawn(
+            &PiConfig {
+                app: crate::APP,
+                name: "reader",
+                session_dir: dir,
+                system_prompt: sys,
+            },
+            sock,
+        )
     }
-
-    pub fn raw_fd(&self) -> RawFd {
-        self.stdout_fd
-    }
-
-    fn send(&mut self, v: &Value) -> std::io::Result<()> {
-        let mut line = serde_json::to_vec(v)?;
-        line.push(b'\n');
-        self.stdin.write_all(&line)
-    }
-
-    /// An image+text prompt: the pause trigger and the AGENT.md annotation
-    /// flow both use this (main.rs formats the message).
-    pub fn send_image_message(
-        &mut self,
-        gray: &[u8],
-        w: u32,
-        h: u32,
-        msg: &str,
-        streaming: bool,
-    ) -> std::io::Result<()> {
-        let png = png::encode_gray(w, h, gray);
-        let mut cmd = json!({
-            "type": "prompt",
-            "message": msg,
-            "images": [{
-                "type": "image",
-                "data": png::base64(&png),
-                "mimeType": "image/png",
-            }],
-        });
-        if streaming {
-            cmd["streamingBehavior"] = json!("followUp");
-        }
-        self.send(&cmd)
-    }
-
-    /// Auto-dismiss extension dialogs so a headless question can't wedge
-    /// the agent (we have no keyboard to answer with).
-    fn dismiss_dialog(&mut self, id: &Value) {
-        let _ = self.send(&json!({
-            "type": "extension_ui_response", "id": id, "cancelled": true,
-        }));
-    }
-
-    /// Drain whatever pi has written and distill it into UI events.
-    pub fn drain(&mut self) -> Vec<PiEvent> {
-        let mut out = Vec::new();
-        loop {
-            let mut chunk = [0u8; 16384];
-            let n = unsafe {
-                libc::read(self.stdout_fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
-            };
-            if n > 0 {
-                self.buf.extend_from_slice(&chunk[..n as usize]);
-                continue;
-            }
-            if n == 0 {
-                let status = self
-                    .child
-                    .try_wait()
-                    .ok()
-                    .flatten()
-                    .map(|s| format!("exit {}", s.code().unwrap_or(-1)))
-                    .unwrap_or_else(|| "stdout closed".into());
-                out.push(PiEvent::Died(status));
-            }
-            break;
-        }
-
-        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = self.buf.drain(..=pos).collect();
-            let line = &line[..line.len() - 1];
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_slice::<Value>(line) {
-                Ok(v) => self.translate(&v, &mut out),
-                Err(e) => out.push(PiEvent::Notice(format!("bad rpc json: {e}"))),
-            }
-        }
-        out
-    }
-
-    fn translate(&mut self, v: &Value, out: &mut Vec<PiEvent>) {
-        match v["type"].as_str().unwrap_or("") {
-            "agent_start" => out.push(PiEvent::Start),
-            "agent_end" => out.push(PiEvent::End),
-            "message_update" => {
-                let ev = &v["assistantMessageEvent"];
-                if ev["type"] == "text_delta" {
-                    if let Some(d) = ev["delta"].as_str() {
-                        out.push(PiEvent::Delta(d.to_string()));
-                    }
-                }
-            }
-            "tool_execution_start" => {
-                let name = v["toolName"].as_str().unwrap_or("tool");
-                let arg = ["command", "path", "file_path", "pattern", "phrase", "id"]
-                    .iter()
-                    .find_map(|k| {
-                        let a = &v["args"][k];
-                        a.as_str().map(String::from).or_else(|| a.as_u64().map(|n| n.to_string()))
-                    })
-                    .unwrap_or_default();
-                let mut line = format!("[{name}] {arg}");
-                line.truncate(120);
-                out.push(PiEvent::Notice(line));
-            }
-            "auto_retry_start" => {
-                out.push(PiEvent::Notice("[retrying after transient error]".into()));
-            }
-            "extension_error" => {
-                let e = v["error"].as_str().unwrap_or("?");
-                out.push(PiEvent::Notice(format!("[extension error: {e}]")));
-            }
-            "extension_ui_request" => {
-                let method = v["method"].as_str().unwrap_or("");
-                if matches!(method, "select" | "confirm" | "input" | "editor") {
-                    self.dismiss_dialog(&v["id"]);
-                    let title = v["title"].as_str().unwrap_or(method);
-                    out.push(PiEvent::Notice(format!("[dismissed dialog: {title}]")));
-                } else if method == "notify" {
-                    let m = v["message"].as_str().unwrap_or("");
-                    out.push(PiEvent::Notice(format!("[{m}]")));
-                }
-            }
-            "response" => {
-                if v["success"] == false {
-                    let e = v["error"].as_str().unwrap_or("unknown error");
-                    out.push(PiEvent::Notice(format!("[pi error: {e}]")));
-                }
-            }
-            _ => {} /* turn_*, message_start/end, queue_update, compaction_* */
-        }
-    }
-}
-
-impl Drop for Pi {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}

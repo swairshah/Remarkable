@@ -33,10 +33,10 @@ pub use libreink_display::{display, qtfb, rm2fb};
 pub use libreink_input::{palm, pen, power, touch};
 pub use libreink_hershey as hershey;
 pub use libreink_svg as svg_ink;
+pub use libreink_pi::ipc;
 pub use libreink_text as text;
 
 mod ink;
-mod ipc;
 mod library;
 mod live;
 mod md_view;
@@ -48,7 +48,7 @@ use fb::{Framebuffer, SCREEN_H as FB_H, SCREEN_W as FB_W};
 use ink::{Notebook, Page, Pt, Rect, RenderExt, Stroke};
 use ipc::IpcServer;
 use pen::{Pen, PenPhase};
-use pi_rpc::{Pi, PiEvent};
+use pi_rpc::{Pi, PiEvent, SendPage};
 use qtfb::{Event, Phase};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -1612,7 +1612,7 @@ impl App {
         if self.pi.is_none() {
             if let Some(at) = self.pi_respawn_at {
                 if Instant::now() >= at {
-                    match Pi::spawn(&self.sock) {
+                    match pi_rpc::spawn(&self.sock) {
                         Ok(p) => {
                             self.pi = Some(p);
                             self.pi_respawn_at = None;
@@ -1875,10 +1875,10 @@ fn main() -> std::process::ExitCode {
     install_signal_handlers();
 
     let sock = sock_path();
-    let ipc = IpcServer::open(&sock)
+    let ipc = IpcServer::open(APP, &sock)
         .map_err(|e| eprintln!("notebook: tool socket: {e} — pi gets no drawing tools"))
         .ok();
-    let pi = match Pi::spawn(&sock) {
+    let pi = match pi_rpc::spawn(&sock) {
         Ok(p) => Some(p),
         Err(e) => {
             eprintln!("notebook: could not start pi: {e}");

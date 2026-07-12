@@ -93,6 +93,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "libreink-pi"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "libreink-core",
+ "serde_json",
+]
+
+[[package]]
 name = "libreink-svg"
 version = "0.1.0"
 dependencies = [
@@ -126,6 +135,7 @@ dependencies = [
  "libreink-hershey",
  "libreink-input",
  "libreink-page",
+ "libreink-pi",
  "libreink-svg",
  "libreink-text",
  "serde_json",

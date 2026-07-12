@@ -41,6 +41,7 @@ pub use libreink_display::{display, qtfb, rm2fb};
 pub use libreink_input::{palm, pen, power, touch};
 pub use libreink_hershey as hershey;
 pub use libreink_svg as svg_ink;
+pub use libreink_pi::ipc;
 pub use libreink_text as text;
 pub use libreink_page as ink;
 
@@ -49,8 +50,6 @@ mod doc;
 mod home;
 #[allow(dead_code)] /* selection APIs wire in with the lasso (M4) */
 mod icons;
-#[allow(dead_code)] /* wired in with pi (M5) */
-mod ipc;
 mod kb;
 #[allow(dead_code)] /* wired in with pi (M5) */
 mod pi_rpc;
@@ -1914,7 +1913,7 @@ impl App {
         }
         if self.pi.is_none() && self.pi_respawn_at.is_some_and(|at| Instant::now() >= at) {
             self.pi_respawn_at = None;
-            match Pi::spawn(&sock_path()) {
+            match pi_rpc::spawn(&sock_path()) {
                 Ok(p) => {
                     self.pi = Some(p);
                     self.pi_alive_at = Instant::now();
@@ -2756,10 +2755,10 @@ fn main() -> std::process::ExitCode {
     let mut last_activity = Instant::now();
 
     let sock = sock_path();
-    let ipc = IpcServer::open(&sock)
+    let ipc = IpcServer::open(APP, &sock)
         .map_err(|e| eprintln!("paper: tool socket: {e} — pi gets no tools"))
         .ok();
-    let pi = match Pi::spawn(&sock) {
+    let pi = match pi_rpc::spawn(&sock) {
         Ok(p) => Some(p),
         Err(e) => {
             eprintln!("paper: could not start pi: {e}");

@@ -134,6 +134,13 @@ libreink-svg — plain `cargo test` on the host.
    geometry-invariant tests in libreink-svg (hatching, viewBox remap,
    Garamond runs, math glyphs). All previews pixel-identical.
 4. Bucket D: libreink-page (superset, evict Notebook), libreink-pi (transport only).
+   **libreink-pi DONE 2026-07-12**: Pi (spawn/JSONL/PiEvent/kill) + ipc
+   (tool socket) extracted with PiConfig{app,name,session_dir,system_prompt};
+   standing_instructions() helper for AGENT.md bootstrap. Apps keep shim
+   pi_rpc.rs files: SYSTEM_PROMPT + prompt composition + session_dir;
+   notebook keeps send_page as a SendPage trait. Bin-override env
+   standardized to {PREFIX}_PI_BIN (nb/rd fake-qtfb.py updated). All
+   previews pass. THE EXTRACTION IS COMPLETE — all 8 crates exist.
    **libreink-page DONE 2026-07-12**: alt-ui's ink.rs verbatim (superset with
    TextRun/undo/ids). Notebook keeps a shim ink.rs: the `Notebook` container
    + a `RenderExt` trait (fill-white + stamp_region, the old render_region/

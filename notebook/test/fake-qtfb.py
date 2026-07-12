@@ -3,7 +3,7 @@
 
 Plays the server side of the qtfb protocol (see src/qtfb.rs): backs the
 framebuffer with /dev/shm, launches the app under qemu with a FAKE pi
-(test/fake-pi.py) wired in via NOTEBOOK_BIN, scripts some handwriting,
+(test/fake-pi.py) wired in via NOTEBOOK_PI_BIN, scripts some handwriting,
 waits for the pause trigger -> fake pi draws two patches over the tool
 socket and erases one -> screenshots. Then flips to page 2 and back to
 prove persistence + full re-render.
@@ -102,7 +102,7 @@ def main():
         f.write(SAMPLE_MD)
     env = dict(os.environ,
                QTFB_KEY="12345",
-               NOTEBOOK_BIN=os.path.join(here, "fake-pi.py"),
+               NOTEBOOK_PI_BIN=os.path.join(here, "fake-pi.py"),
                NOTEBOOK_DATA_DIR="/tmp/nb-pages",
                NOTEBOOK_LIBRARY="/tmp/nb-lib",
                NOTEBOOK_SOCK="/tmp/nb.sock",
