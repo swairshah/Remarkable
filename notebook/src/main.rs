@@ -23,35 +23,29 @@
 //!   pi_rpc.rs   the pi child process (JSONL RPC)
 //!   png.rs      grayscale PNG encoder + base64 (page snapshots)
 
-mod display;
-#[allow(dead_code)] /* library module from collab; not all used */
-mod draw;
-mod fb;
-mod font;
-#[allow(dead_code)] /* small API surface; not every metric is used yet */
-mod hershey;
-mod hershey_data;
+/* The pixel substrate now lives in the shared libreink-core crate
+ * (../../libreink); re-exported here so crate::fb etc. keep resolving.
+ * APP is this app's identity in those crates: log prefix + env-var prefix. */
+pub const APP: libreink_core::app::AppId =
+    libreink_core::app::AppId { name: "notebook", env_prefix: "NOTEBOOK" };
+pub use libreink_core::{draw, fb, font, png};
+pub use libreink_display::{display, qtfb, rm2fb};
+pub use libreink_input::{palm, pen, power, touch};
+pub use libreink_hershey as hershey;
+pub use libreink_svg as svg_ink;
+pub use libreink_text as text;
+
 mod ink;
 mod ipc;
 mod library;
 mod live;
 mod md_view;
-mod pen;
 mod pi_rpc;
-#[allow(dead_code)] /* library module from collab; not all used */
-mod png;
-mod power;
-mod qtfb;
-mod rm2fb;
-mod svg_ink;
-#[allow(dead_code)] /* library module from collab; not all used */
-mod text;
-mod touch;
 
 use display::{Display, Wave};
 use draw::{text_width, BLACK, WHITE};
 use fb::{Framebuffer, SCREEN_H as FB_H, SCREEN_W as FB_W};
-use ink::{Notebook, Page, Pt, Rect, Stroke};
+use ink::{Notebook, Page, Pt, Rect, RenderExt, Stroke};
 use ipc::IpcServer;
 use pen::{Pen, PenPhase};
 use pi_rpc::{Pi, PiEvent};
@@ -177,7 +171,7 @@ fn save_settings(scale: f32, quiet: bool, font: hershey::Face) {
         serde_json::to_vec(&json!({
             "text_scale": scale,
             "quiet": quiet,
-            "pi_font": hershey::face_name(font),
+            "pi_font": font.key(),
         }))
         .unwrap_or_default(),
     );
@@ -285,7 +279,7 @@ struct App {
     cur_stroke: Option<Stroke>,
     ink_dirty: Option<Rect>,
     last_ink_flush: Instant,
-    last_pen: Option<Instant>,     /* any pen sign of life (incl. hover) */
+    palm: palm::PalmGuard,     /* any pen sign of life (incl. hover) */
     last_contact: Option<Instant>, /* actual glass contact */
     contact_changed: bool,         /* this contact wrote or erased something */
 
@@ -482,7 +476,7 @@ impl App {
                     SbRow::PiFont => (
                         format!(
                             "PI FONT: {}",
-                            hershey::face_name(self.pi_font).to_uppercase()
+                            self.pi_font.key().to_uppercase()
                         ),
                         false,
                     ),
@@ -605,11 +599,14 @@ impl App {
                 self.paint_sidebar(); /* stays open: shows the new state */
             }
             SbRow::PiFont => {
-                let i = hershey::FACE_ORDER.iter().position(|f| *f == self.pi_font).unwrap_or(0);
-                self.pi_font = hershey::FACE_ORDER[(i + 1) % hershey::FACE_ORDER.len()];
-                hershey::set_default_face(self.pi_font);
+                /* notebook's toggle order (serif first); parse() takes the
+                 * face directly now, so no global override to update */
+                const FACE_ORDER: [hershey::Face; 3] =
+                    [hershey::Face::Serif, hershey::Face::Script, hershey::Face::Sans];
+                let i = FACE_ORDER.iter().position(|f| *f == self.pi_font).unwrap_or(0);
+                self.pi_font = FACE_ORDER[(i + 1) % FACE_ORDER.len()];
                 save_settings(self.text_scale, self.quiet, self.pi_font);
-                println!("notebook: pi font -> {}", hershey::face_name(self.pi_font));
+                println!("notebook: pi font -> {}", self.pi_font.key());
                 self.paint_sidebar(); /* stays open for repeated taps */
             }
             SbRow::Quiet => {
@@ -1107,7 +1104,7 @@ impl App {
     /* -- pen -- */
 
     fn pen_point(&mut self, phase: PenPhase, x: i32, y: i32, pressure: i32, rubber: bool) {
-        self.last_pen = Some(Instant::now());
+        self.palm.arm();
         /* the sidebar swallows the pen entirely: a press picks a row (or
          * dismisses), moves/releases never ink */
         if self.sidebar.is_some() {
@@ -1192,7 +1189,7 @@ impl App {
             }
             _ => {
                 /* Press, or Move with no open stroke (e.g. after an erase) */
-                self.cur_stroke = Some(Stroke { pts: vec![p], gray: ink::USER_GRAY });
+                self.cur_stroke = Some(Stroke { id: 0, pts: vec![p], gray: ink::USER_GRAY });
                 self.live.pen_break();
                 p
             }
@@ -1218,7 +1215,7 @@ impl App {
     }
 
     fn erase_pass(&mut self, x: f32, y: f32) {
-        if let Some(gone) = self.nb.page.erase_at(x, y, ERASER_R) {
+        if let Some((gone, _)) = self.nb.page.erase_at(x, y, ERASER_R) {
             self.contact_changed = true;
             self.last_activity_page = self.nb.current;
             self.live.rub(x, y);
@@ -1249,7 +1246,7 @@ impl App {
     /* -- touch: page flips, CLOSE -- */
 
     fn touch(&mut self, phase: Phase, x: i32, y: i32) {
-        if self.last_pen.is_some_and(|t| t.elapsed() < PEN_TIMEOUT) {
+        if self.palm.within(PEN_TIMEOUT) {
             return; /* palm rejection */
         }
         if self.sidebar.is_some() {
@@ -1438,7 +1435,9 @@ impl App {
         let Some(svg) = req["svg"].as_str() else {
             return json!({ "ok": false, "error": "missing 'svg'" });
         };
-        let (strokes, notes) = match svg_ink::parse(svg, self.text_scale) {
+        /* _texts: typeset Garamond runs — this app draws plotter strokes only */
+        let (strokes, _texts, notes) =
+            match svg_ink::parse(svg, self.text_scale, svg_ink::PiFont::from(self.pi_font)) {
             Ok(v) => v,
             Err(e) => return json!({ "ok": false, "error": e }),
         };
@@ -1447,7 +1446,7 @@ impl App {
         }
         let idx = self.req_page(req);
         if idx == self.nb.current {
-            let id = self.nb.page.add_patch(strokes);
+            let id = self.nb.page.add_patch(strokes, Vec::new());
             let patch = self.nb.page.patches.last().unwrap();
             let bbox = ink::patch_bbox(patch).map(|b| b.clamp_screen());
             let n_strokes = patch.strokes.len();
@@ -1488,7 +1487,7 @@ impl App {
             let Some(mut p) = Page::load(&path) else {
                 return json!({ "ok": false, "error": "page file unreadable" });
             };
-            let id = p.add_patch(strokes);
+            let id = p.add_patch(strokes, Vec::new());
             let bbox = ink::patch_bbox(p.patches.last().unwrap()).map(|b| b.clamp_screen());
             if let Err(e) = p.save(&path) {
                 return json!({ "ok": false, "error": format!("save: {e}") });
@@ -1824,7 +1823,7 @@ fn sleep_cycle(
     /* flush local changes to the VM while the sleep page settles — sync is
      * event-driven (edit / sleep / wake), not timer-driven, to keep the
      * radio quiet; bounded so a dead network can't stall sleep */
-    power::sync_flush(Duration::from_secs(45));
+    power::sync_flush(APP, Duration::from_secs(45));
     let count0 = power::suspend_count();
     let mut attempts = 0;
     'sleeping: loop {
@@ -1861,7 +1860,7 @@ fn sleep_cycle(
 /* ---- main ---------------------------------------------------------------- */
 
 fn main() -> std::process::ExitCode {
-    let (disp, fb) = match Display::open() {
+    let (disp, fb) = match Display::open(APP) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("notebook: {e}");
@@ -1887,7 +1886,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let mut pen = Pen::open();
+    let mut pen = Pen::open(APP);
     let direct_pen = pen.is_some();
     if takeover {
         if let Some(p) = pen.as_ref() {
@@ -1895,14 +1894,14 @@ fn main() -> std::process::ExitCode {
         }
     }
     let mut touchdev = if takeover {
-        touch::TouchDevice::open()
+        touch::TouchDevice::open(APP)
             .map_err(|e| eprintln!("notebook: no touch device ({e}) — page flips disabled"))
             .ok()
     } else {
         None
     };
     let mut powerdev = if takeover {
-        power::PowerButton::open()
+        power::PowerButton::open(APP)
             .map_err(|e| eprintln!("notebook: no power button ({e})"))
             .ok()
     } else {
@@ -1924,8 +1923,7 @@ fn main() -> std::process::ExitCode {
 
     let now = Instant::now();
     let (text_scale, quiet, saved_font) = load_settings();
-    let pi_font = saved_font.unwrap_or_else(hershey::default_face);
-    hershey::set_default_face(pi_font);
+    let pi_font = saved_font.unwrap_or_else(|| hershey::default_face(APP));
     let mut app = App {
         fb,
         disp,
@@ -1936,7 +1934,7 @@ fn main() -> std::process::ExitCode {
         cur_stroke: None,
         ink_dirty: None,
         last_ink_flush: now,
-        last_pen: None,
+        palm: palm::PalmGuard::default(),
         last_contact: None,
         contact_changed: false,
         page_changed: false,
@@ -2016,7 +2014,7 @@ fn main() -> std::process::ExitCode {
                     frames.push((phase, p.sx, p.sy, p.pressure, p.rubber));
                 });
                 if seen {
-                    app.last_pen = Some(Instant::now());
+                    app.palm.arm();
                     last_activity = Instant::now();
                 }
                 if direct_pen {
@@ -2053,7 +2051,7 @@ fn main() -> std::process::ExitCode {
                     Event::Interrupted => continue,
                     Event::Touch { phase, x, y, .. } => app.touch(phase, x, y),
                     Event::Pen { phase, x, y, .. } => {
-                        app.last_pen = Some(Instant::now());
+                        app.palm.arm();
                         if !direct_pen {
                             let ph = match phase {
                                 Phase::Press => PenPhase::Press,

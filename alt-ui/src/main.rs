@@ -31,43 +31,34 @@
 //! closing a document drops all of it by construction. Modal dialogs are
 //! one `Option<Dialog>` overlay that swallows input while open.
 
-mod display;
-#[allow(dead_code)] /* library module from collab; not all used */
-mod draw;
+/* The pixel substrate now lives in the shared libreink-core crate
+ * (../../libreink); re-exported here so crate::fb etc. keep resolving.
+ * APP is this app's identity in those crates: log prefix + env-var prefix. */
+pub const APP: libreink_core::app::AppId =
+    libreink_core::app::AppId { name: "paper", env_prefix: "PAPER" };
+pub use libreink_core::{draw, fb, font, png, png_dec};
+pub use libreink_display::{display, qtfb, rm2fb};
+pub use libreink_input::{palm, pen, power, touch};
+pub use libreink_hershey as hershey;
+pub use libreink_svg as svg_ink;
+pub use libreink_text as text;
+pub use libreink_page as ink;
+
 #[allow(dead_code)] /* words/snapshot/underline wire in with pi (M5) */
 mod doc;
-mod fb;
-mod font;
-#[allow(dead_code)] /* wired in with pi (M5) */
-mod hershey;
-mod hershey_data;
 mod home;
 #[allow(dead_code)] /* selection APIs wire in with the lasso (M4) */
 mod icons;
-#[allow(dead_code)] /* patches/snapshot wire in with pi (M5), bands too */
-mod ink;
 #[allow(dead_code)] /* wired in with pi (M5) */
 mod ipc;
 mod kb;
-mod pen;
 #[allow(dead_code)] /* wired in with pi (M5) */
 mod pi_rpc;
-#[allow(dead_code)] /* library module from collab; not all used */
-mod png;
-mod png_dec;
-mod power;
-mod qtfb;
-mod rm2fb;
 mod select;
 mod statusbar;
 mod store;
-#[allow(dead_code)] /* wired in with pi (M5) */
-mod svg_ink;
-#[allow(dead_code)] /* library module from collab; not all used */
-mod text;
 mod thumbs;
 mod toolbar;
-mod touch;
 #[allow(dead_code)] /* MoveStrokes wires in with the lasso (M4) */
 mod undo;
 
@@ -362,7 +353,7 @@ struct App {
     clipboard: Option<Vec<Stroke>>,
 
     /* cross-cutting input state */
-    last_pen: Option<Instant>,
+    palm: palm::PalmGuard,
     /// Set when a pen PRESS is consumed by chrome or navigation (a toolbar
     /// button, a dialog, the top bar, or opening a doc from the home grid).
     /// The rest of that physical contact (its Move/Release) is then ignored,
@@ -737,7 +728,7 @@ impl App {
     /* -- pen -- */
 
     fn route_pen(&mut self, phase: PenPhase, x: i32, y: i32, pressure: i32, rubber: bool) {
-        self.last_pen = Some(Instant::now());
+        self.palm.arm();
         /* A chrome/nav press consumed this contact — ignore the rest of it
          * (Move/Release) so it can't fall through and ink the page. Every
          * fresh Press starts a clean contact (so a missed Release can't wedge
@@ -1387,7 +1378,7 @@ impl App {
     /* -- touch: taps, holds, flips, scrolls, the top bar -- */
 
     fn route_touch(&mut self, phase: Phase, x: i32, y: i32) {
-        if self.last_pen.is_some_and(|t| t.elapsed() < PEN_TIMEOUT) {
+        if self.palm.within(PEN_TIMEOUT) {
             return; /* palm rejection */
         }
         if self.dialog.is_some() {
@@ -2669,7 +2660,7 @@ fn sleep_cycle(
     /* flush local changes to the VM while the sleep page settles — sync is
      * event-driven (edit / sleep / wake), not timer-driven, to keep the
      * radio quiet; bounded so a dead network can't stall sleep */
-    power::sync_flush(Duration::from_secs(45));
+    power::sync_flush(APP, Duration::from_secs(45));
     let count0 = power::suspend_count();
     let mut attempts = 0;
     'sleeping: loop {
@@ -2713,7 +2704,7 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
 
-    let (disp, fb) = match Display::open() {
+    let (disp, fb) = match Display::open(APP) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("paper: {e}");
@@ -2729,7 +2720,7 @@ fn main() -> std::process::ExitCode {
 
     store::import_legacy();
 
-    let mut pen = Pen::open();
+    let mut pen = Pen::open(APP);
     let direct_pen = pen.is_some();
     if takeover {
         if let Some(p) = pen.as_ref() {
@@ -2737,14 +2728,14 @@ fn main() -> std::process::ExitCode {
         }
     }
     let mut touchdev = if takeover {
-        touch::TouchDevice::open()
+        touch::TouchDevice::open(APP)
             .map_err(|e| eprintln!("paper: no touch device ({e}) — page flips disabled"))
             .ok()
     } else {
         None
     };
     let mut powerdev = if takeover {
-        power::PowerButton::open()
+        power::PowerButton::open(APP)
             .map_err(|e| eprintln!("paper: no power button ({e})"))
             .ok()
     } else {
@@ -2809,7 +2800,7 @@ fn main() -> std::process::ExitCode {
         ink_flush: if takeover { INK_FLUSH_TAKEOVER } else { INK_FLUSH_QTFB },
         last_ink_flush: now,
         clipboard: None,
-        last_pen: None,
+        palm: palm::PalmGuard::default(),
         pen_swallow: false,
         touch_start: None,
         touch_t0: None,
@@ -2905,7 +2896,7 @@ fn main() -> std::process::ExitCode {
                     Event::Interrupted => continue,
                     Event::Touch { phase, x, y, .. } => app.route_touch(phase, x, y),
                     Event::Pen { phase, x, y, .. } => {
-                        app.last_pen = Some(Instant::now());
+                        app.palm.arm();
                         if !direct_pen {
                             let ph = match phase {
                                 Phase::Press => PenPhase::Press,
@@ -2972,7 +2963,7 @@ fn main() -> std::process::ExitCode {
             if let Some(at) = dv.ink_settle_at {
                 if Instant::now() >= at {
                     if dv.cur_stroke.is_some()
-                        || app.last_pen.is_some_and(|t| t.elapsed() < Duration::from_millis(500))
+                        || app.palm.within(Duration::from_millis(500))
                     {
                         dv.ink_settle_at = Some(Instant::now() + Duration::from_millis(400));
                     } else {
@@ -2990,7 +2981,7 @@ fn main() -> std::process::ExitCode {
             if let Some(at) = dv.deghost_at {
                 if Instant::now() >= at {
                     if dv.cur_stroke.is_some()
-                        || app.last_pen.is_some_and(|t| t.elapsed() < Duration::from_millis(700))
+                        || app.palm.within(Duration::from_millis(700))
                     {
                         dv.deghost_at = Some(Instant::now() + Duration::from_millis(600));
                     } else {

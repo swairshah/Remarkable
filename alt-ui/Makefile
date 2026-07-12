@@ -58,9 +58,11 @@ build:
 	file $(BUILT)
 
 # Host-arch tests (the .cargo config pins builds to armv7, so tests need an
-# explicit native target; the PNG decoder test shells out to python3).
+# explicit native target). The PNG decoder test moved to libreink-core with
+# the extraction; run the shared crates' suite too so this stays one command.
 test-host:
 	cargo test --target $$(rustc -vV | sed -n 's/^host: //p')
+	cd ../../libreink && cargo test
 
 # A tiny synthetic 2-page PDF -> a real book bundle, for the preview.
 testbook:

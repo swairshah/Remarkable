@@ -547,7 +547,7 @@ pub fn underline_strokes(words: &[Word], picked: &[usize]) -> Vec<crate::ink::St
                 r: 1.7,
             });
         }
-        out.push(Stroke { pts, gray: crate::ink::AI_GRAY });
+        out.push(Stroke { id: 0, pts, gray: crate::ink::AI_GRAY });
     }
     out
 }

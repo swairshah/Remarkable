@@ -26,31 +26,24 @@
 //!   pi_rpc.rs   the pi child process (JSONL RPC)
 //!   png.rs      grayscale PNG encoder + base64 (page snapshots)
 
+/* The pixel substrate now lives in the shared libreink-core crate
+ * (../../libreink); re-exported here so crate::fb etc. keep resolving.
+ * APP is this app's identity in those crates: log prefix + env-var prefix. */
+pub const APP: libreink_core::app::AppId =
+    libreink_core::app::AppId { name: "reader", env_prefix: "READER" };
+pub use libreink_core::{draw, fb, font, png, png_dec};
+pub use libreink_display::{display, qtfb, rm2fb};
+pub use libreink_input::{palm, pen, power, touch};
+pub use libreink_hershey as hershey;
+pub use libreink_svg as svg_ink;
+pub use libreink_text as text;
+pub use libreink_page as ink;
+
 mod book;
-mod display;
-#[allow(dead_code)] /* library module from collab; not all used */
-mod draw;
-mod fb;
-mod font;
 mod import;
 mod xochitl;
-#[allow(dead_code)] /* small API surface; not every metric is used yet */
-mod hershey;
-mod hershey_data;
-mod ink;
 mod ipc;
-mod pen;
 mod pi_rpc;
-#[allow(dead_code)] /* library module from collab; not all used */
-mod png;
-mod png_dec;
-mod power;
-mod qtfb;
-mod rm2fb;
-mod svg_ink;
-#[allow(dead_code)] /* library module from collab; not all used */
-mod text;
-mod touch;
 
 use book::{Book, Entry};
 use display::{Display, Wave};
@@ -284,7 +277,7 @@ struct App {
     cur_stroke: Option<Stroke>,
     ink_dirty: Option<Rect>,
     last_ink_flush: Instant,
-    last_pen: Option<Instant>,     /* any pen sign of life (incl. hover) */
+    palm: palm::PalmGuard,     /* any pen sign of life (incl. hover) */
     last_contact: Option<Instant>, /* actual glass contact */
     contact_changed: bool,         /* this contact wrote or erased something */
 
@@ -1377,7 +1370,7 @@ impl App {
     /* -- pen -- */
 
     fn pen_point(&mut self, phase: PenPhase, x: i32, y: i32, pressure: i32, rubber: bool) {
-        self.last_pen = Some(Instant::now());
+        self.palm.arm();
         /* the sidebar swallows the pen entirely: a press picks a row (or
          * dismisses), moves/releases never ink */
         if self.sidebar.is_some() {
@@ -1468,7 +1461,7 @@ impl App {
             }
             _ => {
                 /* Press, or Move with no open stroke (e.g. after an erase) */
-                self.cur_stroke = Some(Stroke { pts: vec![p], gray: ink::USER_GRAY });
+                self.cur_stroke = Some(Stroke { id: 0, pts: vec![p], gray: ink::USER_GRAY });
                 p
             }
         };
@@ -1505,7 +1498,7 @@ impl App {
 
     fn erase_pass(&mut self, x: f32, y: f32) {
         let Some(b) = self.book.as_mut() else { return };
-        if let Some(gone) = b.page.erase_at(x, y, ERASER_R) {
+        if let Some((gone, _)) = b.page.erase_at(x, y, ERASER_R) {
             self.contact_changed = true;
             self.last_activity_page = b.current;
             /* DU-erased black ink ghosts badly; flash once the scrubbing
@@ -1535,7 +1528,7 @@ impl App {
     /* -- touch: page flips, CLOSE -- */
 
     fn touch(&mut self, phase: Phase, x: i32, y: i32) {
-        if self.last_pen.is_some_and(|t| t.elapsed() < PEN_TIMEOUT) {
+        if self.palm.within(PEN_TIMEOUT) {
             return; /* palm rejection */
         }
         if self.sidebar.is_some() {
@@ -1794,7 +1787,7 @@ impl App {
             return Err(json!({ "ok": false, "error": format!("no page {} (book has {})", idx + 1, b.count()) }));
         }
         if idx == b.current {
-            let id = b.page.add_patch(strokes);
+            let id = b.page.add_patch(strokes, Vec::new());
             let patch = b.page.patches.last().unwrap();
             let bbox = ink::patch_bbox(patch).map(|bb| bb.clamp_screen());
             /* queue the ghost-hand animation — unless another view owns the
@@ -1823,7 +1816,7 @@ impl App {
                 return Err(json!({ "ok": false, "error": "no such page" }));
             };
             let mut p = b.load_ink(e);
-            let id = p.add_patch(strokes);
+            let id = p.add_patch(strokes, Vec::new());
             let bbox = ink::patch_bbox(p.patches.last().unwrap()).map(|bb| bb.clamp_screen());
             let path = match e {
                 Entry::Pdf(n) => format!("{}/ink/pdf-{:04}.json", b.dir, n + 1),
@@ -1840,7 +1833,9 @@ impl App {
         let Some(svg) = req["svg"].as_str() else {
             return json!({ "ok": false, "error": "missing 'svg'" });
         };
-        let (strokes, notes) = match svg_ink::parse(svg, self.text_scale) {
+        /* _texts: typeset Garamond runs — this app draws plotter strokes only */
+        let (strokes, _texts, notes) =
+            match svg_ink::parse(svg, self.text_scale, svg_ink::PiFont::from(hershey::default_face(APP))) {
             Ok(v) => v,
             Err(e) => return json!({ "ok": false, "error": e }),
         };
@@ -2291,7 +2286,7 @@ fn sleep_cycle(
     /* flush local changes to the VM while the sleep page settles — sync is
      * event-driven (edit / sleep / wake), not timer-driven, to keep the
      * radio quiet; bounded so a dead network can't stall sleep */
-    power::sync_flush(Duration::from_secs(45));
+    power::sync_flush(APP, Duration::from_secs(45));
     let count0 = power::suspend_count();
     let mut attempts = 0;
     'sleeping: loop {
@@ -2381,7 +2376,7 @@ fn main() -> std::process::ExitCode {
         };
         return import_cli(frag);
     }
-    let (disp, fb) = match Display::open() {
+    let (disp, fb) = match Display::open(APP) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("reader: {e}");
@@ -2407,7 +2402,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let mut pen = Pen::open();
+    let mut pen = Pen::open(APP);
     let direct_pen = pen.is_some();
     if takeover {
         if let Some(p) = pen.as_ref() {
@@ -2415,14 +2410,14 @@ fn main() -> std::process::ExitCode {
         }
     }
     let mut touchdev = if takeover {
-        touch::TouchDevice::open()
+        touch::TouchDevice::open(APP)
             .map_err(|e| eprintln!("reader: no touch device ({e}) — page flips disabled"))
             .ok()
     } else {
         None
     };
     let mut powerdev = if takeover {
-        power::PowerButton::open()
+        power::PowerButton::open(APP)
             .map_err(|e| eprintln!("reader: no power button ({e})"))
             .ok()
     } else {
@@ -2461,7 +2456,7 @@ fn main() -> std::process::ExitCode {
         cur_stroke: None,
         ink_dirty: None,
         last_ink_flush: now,
-        last_pen: None,
+        palm: palm::PalmGuard::default(),
         last_contact: None,
         contact_changed: false,
         page_changed: false,
@@ -2539,7 +2534,7 @@ fn main() -> std::process::ExitCode {
                     frames.push((phase, p.sx, p.sy, p.pressure, p.rubber));
                 });
                 if seen {
-                    app.last_pen = Some(Instant::now());
+                    app.palm.arm();
                     last_activity = Instant::now();
                 }
                 if direct_pen {
@@ -2576,7 +2571,7 @@ fn main() -> std::process::ExitCode {
                     Event::Interrupted => continue,
                     Event::Touch { phase, x, y, .. } => app.touch(phase, x, y),
                     Event::Pen { phase, x, y, .. } => {
-                        app.last_pen = Some(Instant::now());
+                        app.palm.arm();
                         if !direct_pen {
                             let ph = match phase {
                                 Phase::Press => PenPhase::Press,
