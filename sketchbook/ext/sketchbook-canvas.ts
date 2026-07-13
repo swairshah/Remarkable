@@ -196,21 +196,9 @@ function autocontrast(gray: Buffer): Buffer {
 
 /* ---- Gemini image generation --------------------------------------------- */
 
-async function generate(sketchPngB64: string, subject: string, style: string): Promise<Buffer> {
-  const prompt =
-    "This is a rough freehand sketch drawn with a stylus on an e-ink tablet. " +
-    `It depicts: ${subject}.\n` +
-    "Redraw it, keeping the same composition, pose, framing and personality — it " +
-    "must clearly read as a polished version of THIS drawing, not a different " +
-    `picture. Render it as ${style}. ` +
-    "The subject fills the frame the same way the sketch does.";
+async function callImageModel(parts: unknown[]): Promise<Buffer> {
   const body = {
-    contents: [{
-      parts: [
-        { text: prompt },
-        { inline_data: { mime_type: "image/png", data: sketchPngB64 } },
-      ],
-    }],
+    contents: [{ parts }],
     generationConfig: { responseModalities: ["IMAGE"] },
   };
   const url =
@@ -233,6 +221,52 @@ async function generate(sketchPngB64: string, subject: string, style: string): P
   throw new Error("gemini returned no image: " + JSON.stringify(data).slice(0, 300));
 }
 
+/** Fresh render: the sketch + pi's subject line + a style. */
+function generate(sketchPngB64: string, subject: string, style: string): Promise<Buffer> {
+  const prompt =
+    "This is a rough freehand sketch drawn with a stylus on an e-ink tablet. " +
+    `It depicts: ${subject}.\n` +
+    "Redraw it, keeping the same composition, pose, framing and personality — it " +
+    "must clearly read as a polished version of THIS drawing, not a different " +
+    `picture. Render it as ${style}. ` +
+    "The subject fills the frame the same way the sketch does.";
+  return callImageModel([
+    { text: prompt },
+    { inline_data: { mime_type: "image/png", data: sketchPngB64 } },
+  ]);
+}
+
+/** Edit: the previous render + the current sketch panel + an instruction.
+ *  The model updates the SAME image — iterative refinement, not a redo. */
+function edit(
+  prevRenderB64: string,
+  sketchPngB64: string | null,
+  instruction: string,
+): Promise<Buffer> {
+  const parts: unknown[] = [
+    {
+      text:
+        "The first image is a pencil rendition you drew earlier of an artist's " +
+        "sketch. Apply this instruction to it, changing NOTHING else about the " +
+        `drawing — same subject, same composition, same strokes elsewhere:\n` +
+        `${instruction}\n` +
+        "Keep it pure monochrome graphite pencil on plain white paper, no color, " +
+        "no frame, no text." +
+        (sketchPngB64
+          ? " The second image is the artist's current sketch panel for " +
+            "reference — it may contain annotation marks or handwritten notes " +
+            "pointing at what to change; follow them, but do not copy any " +
+            "handwriting or annotation marks into the drawing."
+          : ""),
+    },
+    { inline_data: { mime_type: "image/png", data: prevRenderB64 } },
+  ];
+  if (sketchPngB64) {
+    parts.push({ inline_data: { mime_type: "image/png", data: sketchPngB64 } });
+  }
+  return callImageModel(parts);
+}
+
 /* ---- tools ----------------------------------------------------------------- */
 
 export default function (pi: ExtensionAPI) {
@@ -248,13 +282,24 @@ export default function (pi: ExtensionAPI) {
       "specific about pose, orientation, expression: the image model uses it to " +
       "disambiguate rough strokes). Optional `style` replaces the default graphite-pencil " +
       "look — use it only when the user asked for a style in writing. Replaces any " +
-      "previous render on the page. Takes ~10-30s.",
+      "previous render on the page. EDIT MODE: when a render already exists and the user " +
+      "asks for a CHANGE to it ('darker', 'remove the background shading', an annotation " +
+      "arrow pointing at a part) — pass `instruction` instead of `subject`: the model " +
+      "then UPDATES the existing render in place (same image, same strokes elsewhere) " +
+      "instead of redrawing from the sketch. It also sees the sketch panel, so " +
+      "annotations the user drew there guide the edit. Takes ~10-30s.",
     parameters: {
       type: "object",
       properties: {
         subject: {
           type: "string",
-          description: "What the sketch depicts, one careful line",
+          description: "Fresh render: what the sketch depicts, one careful line",
+        },
+        instruction: {
+          type: "string",
+          description:
+            "Edit mode: the change to apply to the EXISTING render (mutually " +
+            "exclusive with subject; requires a render on the page)",
         },
         style: {
           type: "string",
@@ -265,18 +310,33 @@ export default function (pi: ExtensionAPI) {
           description: "1-based page number; omit for the spread on screen",
         },
       },
-      required: ["subject"],
     },
     async execute(_id: string, params: any) {
       if (!API_KEY) return textResult("render failed: GEMINI_API_KEY is not set on the device", true);
+      if (!params.subject && !params.instruction) {
+        return textResult("render failed: pass `subject` (fresh render) or `instruction` (edit)", true);
+      }
       try {
-        const s = await call({ cmd: "sketch", page: params.page });
-        if (!s.ok) return textResult(`render failed: ${s.error}`, true);
-        const img = await generate(
-          s.png_base64,
-          params.subject,
-          params.style?.trim() || DEFAULT_STYLE,
-        );
+        let img: Buffer;
+        if (params.instruction) {
+          /* edit the existing render in place */
+          const prev = await call({ cmd: "render_get", page: params.page });
+          if (!prev.ok) return textResult(`edit failed: ${prev.error} — use subject for a fresh render`, true);
+          const s = await call({ cmd: "sketch", page: params.page }).catch(() => null);
+          img = await edit(
+            prev.png_base64,
+            s?.ok ? s.png_base64 : null,
+            params.instruction,
+          );
+        } else {
+          const s = await call({ cmd: "sketch", page: params.page });
+          if (!s.ok) return textResult(`render failed: ${s.error}`, true);
+          img = await generate(
+            s.png_base64,
+            params.subject,
+            params.style?.trim() || DEFAULT_STYLE,
+          );
+        }
         const { w, h, gray } = imageToGray(img);
         const normalized = autocontrast(gray);
         const r = await call(
@@ -291,8 +351,11 @@ export default function (pi: ExtensionAPI) {
         );
         if (!r.ok) return textResult(`render failed: ${r.error}`, true);
         const [px, py, pw, ph] = r.placed ?? [];
+        const what = params.instruction
+          ? `Edited the render ("${params.instruction}")`
+          : `Rendered "${params.subject}"`;
         return textResult(
-          `Rendered "${params.subject}" onto page ${r.page}'s right panel ` +
+          `${what} onto page ${r.page}'s right panel ` +
             `(${pw}x${ph} at ${px},${py}). The user's rubber can wipe it; a new ` +
             `sketchbook_render replaces it.`,
         );

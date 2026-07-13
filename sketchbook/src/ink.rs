@@ -47,8 +47,8 @@ impl RenderLayer {
         for y in y0..=y1 {
             let row = ((y - self.y0) * self.w) as usize;
             for x in x0..=x1 {
-                let g = gray16(self.gray[row + (x - self.x0) as usize]);
-                fb.px(x, y, gray_to_565(g));
+                let g = grain_px(self.gray[row + (x - self.x0) as usize], x, y);
+                fb.px(x, y, gray_to_565(gray16(g)));
             }
         }
     }
@@ -67,7 +67,7 @@ impl RenderLayer {
                 if x < self.x0 || x >= self.x0 + self.w {
                     continue;
                 }
-                let g = self.gray[row + (x - self.x0) as usize];
+                let g = grain_px(self.gray[row + (x - self.x0) as usize], x, y);
                 let idx = (by * bw + bx) as usize;
                 if g < buf[idx] {
                     buf[idx] = g;
@@ -157,30 +157,46 @@ fn value_noise(x: f32, y: f32, seed: u32) -> f32 {
     a * (1.0 - tx) * (1.0 - ty) + b * tx * (1.0 - ty) + c * (1.0 - tx) * ty + d * tx * ty
 }
 
-/// Graphite tooth for the render layer: perturb midtones with paper-grain
+/// Graphite tooth, one pixel at a time: perturb midtones with paper-grain
 /// value noise (a fine and a medium octave) so the 16-level quantize
 /// renders granular pencil texture instead of flat posterized bands — the
-/// reMarkable pencil-brush look. Strength peaks in the midtones and
-/// vanishes at paper white (stays clean) and solid black (lines stay
-/// crisp). Apply AFTER resizing: grain lives at panel pixel scale.
-pub fn pencil_grain(gray: &mut [u8], w: i32, h: i32) {
-    for y in 0..h {
-        for x in 0..w {
-            let i = (y * w + x) as usize;
-            let g = gray[i] as f32;
-            if g >= 250.0 {
-                continue; /* paper */
-            }
-            let (fx, fy) = (x as f32, y as f32);
-            /* two octaves, centered on 0, typical spread ≈ ±0.2 */
-            let n = 0.6 * value_noise(fx / 2.0, fy / 2.0, 7)
-                + 0.4 * value_noise(fx / 5.0, fy / 5.0, 13)
-                - 0.5;
-            let k = (g * (255.0 - g)) / (127.5 * 127.5);
-            let v = g + n * 135.0 * k;
-            gray[i] = v.clamp(0.0, 255.0) as u8;
-        }
+/// reMarkable pencil-brush look. Strength peaks in the midtones (^0.7
+/// widens the toothy band into lights and darks) and vanishes at paper
+/// white (stays clean) and solid black (lines stay crisp).
+///
+/// (x, y) are PAGE coordinates: the noise field is deterministic, so
+/// partial repaints tile seamlessly with earlier blits. The STORED raster
+/// stays clean — grain exists only on the panel and in snapshots — so
+/// edit-mode round trips (render_get → model → render) never compound it.
+pub fn grain_px(g: u8, x: i32, y: i32) -> u8 {
+    let strength = grain_strength();
+    if strength <= 0.0 {
+        return g;
     }
+    let g = g as f32;
+    if g >= 250.0 {
+        return g as u8; /* paper */
+    }
+    let (fx, fy) = (x as f32, y as f32);
+    /* two octaves, centered on 0, typical spread ≈ ±0.2 */
+    let n = 0.6 * value_noise(fx / 2.0, fy / 2.0, 7)
+        + 0.4 * value_noise(fx / 5.0, fy / 5.0, 13)
+        - 0.5;
+    let k = ((g * (255.0 - g)) / (127.5 * 127.5)).powf(0.7);
+    (g + n * strength * k).clamp(0.0, 255.0) as u8
+}
+
+/// SKETCHBOOK_GRAIN: 0 disables, 1.0 is the default 175-amplitude tooth,
+/// other values scale it (e.g. 1.4 for even grittier).
+fn grain_strength() -> f32 {
+    static S: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *S.get_or_init(|| {
+        std::env::var("SKETCHBOOK_GRAIN")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .map(|v| v * 175.0)
+            .unwrap_or(175.0)
+    })
 }
 
 /// Minimal base64 decode (standard alphabet, padding optional).

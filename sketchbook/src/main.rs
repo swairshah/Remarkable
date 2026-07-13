@@ -1427,6 +1427,7 @@ impl App {
             "goto" => self.ipc_goto(req),
             "sketch" => self.ipc_sketch(req),
             "render" => self.ipc_render(req),
+            "render_get" => self.ipc_render_get(req),
             other => json!({ "ok": false, "error": format!("unknown cmd '{other}'") }),
         }
     }
@@ -1574,11 +1575,9 @@ impl App {
         let max_h = dy1 - dy0;
         let scale = (max_w as f32 / w as f32).min(max_h as f32 / h as f32);
         let (dw, dh) = (((w as f32 * scale) as i32).max(1), ((h as f32 * scale) as i32).max(1));
-        let mut gray = ink::resize_gray(&raw, w, h, dw, dh);
-        /* graphite tooth (SKETCHBOOK_GRAIN=0 disables) */
-        if std::env::var("SKETCHBOOK_GRAIN").map(|v| v != "0").unwrap_or(true) {
-            ink::pencil_grain(&mut gray, dw, dh);
-        }
+        /* stored clean; graphite tooth is applied at blit/snapshot time
+         * (deterministic page-coordinate noise — see ink::grain_px) */
+        let gray = ink::resize_gray(&raw, w, h, dw, dh);
         let rl = ink::RenderLayer {
             x0: ink::PANEL_W + MARGIN + (max_w - dw) / 2,
             y0: dy0 + (max_h - dh) / 2,
@@ -1599,6 +1598,35 @@ impl App {
         self.last_activity_page = idx;
         println!("sketchbook: render {dw}x{dh} placed on page {}", idx + 1);
         json!({ "ok": true, "page": idx + 1, "placed": [ink::PANEL_W + MARGIN + (max_w - dw) / 2, dy0 + (max_h - dh) / 2, dw, dh] })
+    }
+
+    /// Hand back the page's current render layer as PNG — the input for an
+    /// edit-mode regeneration ("remove the background", "darker").
+    fn ipc_render_get(&mut self, req: &Value) -> Value {
+        let idx = self.req_page(req);
+        if idx >= self.nb.count {
+            return json!({ "ok": false, "error": format!("no page {} (sketchbook has {})", idx + 1, self.nb.count) });
+        }
+        let loaded;
+        let rl: &ink::RenderLayer = if idx == self.nb.current {
+            match self.nb.render.as_ref() {
+                Some(r) => r,
+                None => return json!({ "ok": false, "error": "this page has no render yet" }),
+            }
+        } else {
+            match ink::RenderLayer::load(&self.nb.render_path(idx)) {
+                Some(r) => { loaded = r; &loaded }
+                None => return json!({ "ok": false, "error": "this page has no render yet" }),
+            }
+        };
+        let png = png::encode_gray(rl.w as u32, rl.h as u32, &rl.gray);
+        json!({
+            "ok": true,
+            "page": idx + 1,
+            "png_base64": png::base64(&png),
+            "width": rl.w,
+            "height": rl.h,
+        })
     }
 
     /// Repaint the right panel from the model with the 16-level waveform
