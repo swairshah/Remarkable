@@ -99,6 +99,21 @@ material thoroughly. Requirements:
   that fail to download.
 - No raw HTML. No hyperlink-only "see also" dumps. Keep external links
   sparse and inline as plain [text](url) — the reader is offline.
+- Exercises: if the document includes exercises or practice problems
+  (because the user asked, or they genuinely fit), give EACH exercise
+  its OWN PAGE — the reader works them in ink directly on the tablet,
+  so the rest of the page must stay blank as writing room. Start every
+  exercise by emitting exactly this fenced div on its own lines,
+  immediately before the exercise heading:
+
+  ::: {.page-break}
+  :::
+
+  Then a short heading ("### Exercise 3") and ONLY the problem
+  statement. Never put two exercises on one page, and never let prose
+  continue after an exercise statement. If you include solutions, put
+  them in a final "Solutions" section that also starts with a
+  page-break div (solutions may share pages with each other).
 - End with a short "Sources" section listing what you actually read
   (title + URL, one line each).
 - Length: substantial but not bloated. Match the depth the instructions

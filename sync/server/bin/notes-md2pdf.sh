@@ -211,6 +211,18 @@ $code_font_css
     word-break: break-word;
   }
 
+  /* Hard page break: authored in markdown as a fenced div
+     (::: {.page-break} / :::). Compose uses it to give each exercise its
+     own page — statement on top, the rest of the page blank as writing
+     room on the tablet. */
+  .page-break {
+    page-break-after: always;
+    break-after: page;
+    height: 0;
+    margin: 0;
+    padding: 0;
+  }
+
   /* Title block produced by pandoc --standalone */
   header#title-block-header { margin: 0 0 $title_gap 0; padding-bottom: 10pt; border-bottom: 1.5pt solid var(--rule); }
   h1.title {
