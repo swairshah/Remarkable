@@ -449,11 +449,13 @@ function openEditor() {
   if (state.open && state.open.meta.kind === 'book') openMarginEditor(state.open);
 }
 /* Full PDF.js viewer app (self-hosted at /paper/pdfjs/): proper zoom, smooth
- * scroll, text search/selection, thumbnails, outline. Reads the same cached
- * source-pdf URL as the inline reader. Note: shows the clean PDF — ink
- * annotations live in the inline reader. */
+ * scroll, text search/selection, thumbnails, outline. Books with a retained
+ * source get the real PDF; the rest get a server-derived PDF built from the
+ * bundle (raster pages + invisible text layer, so search still works).
+ * Note: shows the clean PDF — ink annotations live in the inline reader. */
 function openPdfViewer(d) {
-  const url = API + 'source-pdf?id=' + encodeURIComponent(d.id) + (d.srcVersion ? '&v=' + d.srcVersion : '');
+  const v = d.hasSource ? d.srcVersion : d.version;
+  const url = API + 'source-pdf?id=' + encodeURIComponent(d.id) + (v ? '&v=' + v : '');
   $('pv-title').textContent = d.meta.title || d.id;
   $('pv-frame').src = '/paper/pdfjs/web/viewer.html?file=' + encodeURIComponent(url);
   $('pv').classList.add('show');
@@ -481,7 +483,7 @@ function buildSidebar(d) {
   };
   side.appendChild(mk('‹', 'My files', 'esc', goFiles));
   if (d.meta.kind === 'book') side.appendChild(mk('▦', 'Adjust margins', '', openEditor));
-  if (d.meta.kind === 'book' && d.hasSource) side.appendChild(mk('⤡', 'PDF viewer', '', () => openPdfViewer(d)));
+  if (d.meta.kind === 'book') side.appendChild(mk('⤡', 'PDF viewer', '', () => openPdfViewer(d)));
   const ai = mk('✦', 'AI ink', '', null, state.aiBlue);
   ai.onclick = () => { state.aiBlue = !state.aiBlue; ai.classList.toggle('active', state.aiBlue); redrawOpenPages(); };
   side.appendChild(ai);
@@ -507,12 +509,10 @@ async function openDoc(d) {
     btn.textContent = '⌸  Adjust margins';
     btn.onclick = () => openMarginEditor(d);
     bar.appendChild(btn);
-    if (d.hasSource) {
-      const pvb = document.createElement('button'); pvb.className = 'addbtn';
-      pvb.textContent = '⤡  PDF viewer';
-      pvb.onclick = () => openPdfViewer(d);
-      bar.appendChild(pvb);
-    }
+    const pvb = document.createElement('button'); pvb.className = 'addbtn';
+    pvb.textContent = '⤡  PDF viewer';
+    pvb.onclick = () => openPdfViewer(d);
+    bar.appendChild(pvb);
     $view.appendChild(bar);
   }
   const wrap = document.createElement('div'); wrap.className = 'pages';

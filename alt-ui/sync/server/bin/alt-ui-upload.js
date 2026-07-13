@@ -46,12 +46,14 @@ const SOURCES = path.join(BACKUP, 'alt-ui-sources');   // retained PDFs: <id>.pd
 const PREVIEWS = path.join(BACKUP, 'alt-ui-previews'); // cached raw pages: <id>/<n>.png
 const COVERS = path.join(BACKUP, 'alt-ui-covers');     // small web covers, keyed by source+doc version
 const COMPOSE = path.join(BACKUP, 'alt-ui-compose');   // compose job workdirs
+const DERIVED = path.join(BACKUP, 'alt-ui-derived-pdf'); // PDFs built from bundles (no retained source)
 const RENDER = process.env.ALT_UI_RENDER || '/home/exedev/bin/alt-ui-render.sh';
+const MAKE_PDF_PY = '/home/exedev/bin/alt-ui-make-pdf.py';
 const COMPOSE_SH = process.env.ALT_UI_COMPOSE || '/home/exedev/bin/alt-ui-compose.sh';
 const PREVIEW_PY = '/home/exedev/bin/alt-ui-preview-page.py';
 const PY = '/home/exedev/alt-ui-venv/bin/python3';
 const PORT = Number(process.env.ALT_UI_PORT || 8093);
-[INCOMING, DOCS, SOURCES, PREVIEWS, COVERS, COMPOSE].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+[INCOMING, DOCS, SOURCES, PREVIEWS, COVERS, COMPOSE, DERIVED].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
 const MAX_BYTES = 200 * 1024 * 1024;
 const DEFAULT_CROP = [0, 0, 1, 1];   // whole page (fractions 0..1)
@@ -196,22 +198,68 @@ function handleSourceStatus(res, id) {
 // One request for the whole document: the viewer renders it locally with
 // PDF.js instead of fetching one full-page PNG per page. When ?v= (source
 // mtime token) is present the response is immutable in the browser.
-function handleSourcePdf(req, res, id, v) {
-  if (!safeId(id)) { res.writeHead(400); res.end('bad id'); return; }
-  const src = sourcePdf(id);
-  fs.stat(src, (err, st) => {
-    if (err) { res.writeHead(404); res.end('no source pdf'); return; }
+//
+// Books WITHOUT a retained source (desk-rendered, pre-retention uploads)
+// still get the full viewer: a PDF is DERIVED from the bundle itself
+// (pages/*.png + an invisible text layer from text/*.json word boxes,
+// so search/selection work), cached in DERIVED keyed by doc version.
+const derivedBuilds = new Map();   // id -> Promise<pdfPath>, de-dupes concurrent requests
+
+function docDirOf(id) {
+  for (const base of [path.join(DOCS, id), path.join(MIRROR, id)]) {
+    if (fs.existsSync(path.join(base, 'meta.json'))) return base;
+  }
+  return null;
+}
+function docVersionToken(docDir) {
+  const mt = (f) => { try { return fs.statSync(f).mtimeMs; } catch (_) { return 0; } };
+  const v = Math.max(mt(path.join(docDir, 'meta.json')), mt(path.join(docDir, 'pages')), mt(docDir));
+  return Math.trunc(v).toString(36);
+}
+function buildDerivedPdf(id, docDir) {
+  if (derivedBuilds.has(id)) return derivedBuilds.get(id);
+  const out = path.join(DERIVED, `${id}-${docVersionToken(docDir)}.pdf`);
+  if (fs.existsSync(out)) return Promise.resolve(out);
+  const meta = readMeta(id) || {};
+  const p = new Promise((resolve, reject) => {
+    const tmp = out + '.tmp';
+    execFile(PY, [MAKE_PDF_PY, docDir, tmp, meta.title || id], { timeout: 300000 }, (err, so, se) => {
+      if (err) { fs.rm(tmp, { force: true }, () => {}); reject(new Error(String(se || err.message).slice(0, 400))); return; }
+      // stale cache housekeeping: older versions of this doc
+      for (const f of fs.readdirSync(DERIVED)) {
+        if (f.startsWith(id + '-') && f.endsWith('.pdf') && path.join(DERIVED, f) !== out) fs.rm(path.join(DERIVED, f), { force: true }, () => {});
+      }
+      fs.renameSync(tmp, out);
+      resolve(out);
+    });
+  });
+  derivedBuilds.set(id, p);
+  p.finally(() => derivedBuilds.delete(id));
+  return p;
+}
+function streamPdf(req, res, file, immutable) {
+  fs.stat(file, (err, st) => {
+    if (err) { res.writeHead(404); res.end('no pdf'); return; }
     const headers = {
       'Content-Type': 'application/pdf',
       'Content-Length': st.size,
-      'Cache-Control': /^[a-z0-9]+$/.test(v || '')
-        ? 'private, max-age=31536000, immutable'
-        : 'no-cache',
+      'Cache-Control': immutable ? 'private, max-age=31536000, immutable' : 'no-cache',
     };
     if (req.method === 'HEAD') { res.writeHead(200, headers); res.end(); return; }
     res.writeHead(200, headers);
-    fs.createReadStream(src).pipe(res);
+    fs.createReadStream(file).pipe(res);
   });
+}
+function handleSourcePdf(req, res, id, v) {
+  if (!safeId(id)) { res.writeHead(400); res.end('bad id'); return; }
+  const immutable = /^[a-z0-9]+$/.test(v || '');
+  const src = sourcePdf(id);
+  if (fs.existsSync(src)) return streamPdf(req, res, src, immutable);
+  const docDir = docDirOf(id);
+  if (!docDir) { res.writeHead(404); res.end('unknown doc'); return; }
+  buildDerivedPdf(id, docDir)
+    .then((file) => streamPdf(req, res, file, immutable))
+    .catch((err) => { console.error('derived pdf failed for', id, err.message); res.writeHead(500); res.end('pdf build failed'); });
 }
 
 /* ---- GET /preview?id=&page= (raw page, cached) ----------------------- */
@@ -360,6 +408,29 @@ function handleRenderStatus(res, id) {
   if (!/^[a-f0-9]{20}$/.test(id || '') || !renderJobs.has(id)) return json(res, 404, { ok: false, error: 'unknown render job' });
   json(res, 200, renderJobs.get(id));
 }
+
+// Pre-warm derived PDFs (serially, low priority) so the first "PDF viewer"
+// click on a big desk-rendered book doesn't wait minutes on the build — a
+// 383-page book takes ~3 minutes. Runs at startup and every 6h to cover
+// books that arrive via sync.
+async function warmDerivedPdfs() {
+  const ids = new Set();
+  for (const root of [MIRROR, DOCS]) {
+    try { for (const e of fs.readdirSync(root)) ids.add(e); } catch (_) {}
+  }
+  for (const id of ids) {
+    if (!safeId(id) || fs.existsSync(sourcePdf(id))) continue;
+    const docDir = docDirOf(id);
+    if (!docDir) continue;
+    const meta = readMeta(id);
+    if (!meta || !(meta.pages > 0)) continue;
+    if (fs.existsSync(path.join(DERIVED, `${id}-${docVersionToken(docDir)}.pdf`))) continue;
+    try { await buildDerivedPdf(id, docDir); console.log('pre-warmed derived pdf for', id); }
+    catch (err) { console.error('derived pre-warm failed for', id, err.message); }
+  }
+}
+setTimeout(warmDerivedPdfs, 15000);
+setInterval(warmDerivedPdfs, 6 * 3600000);
 
 /* ---- agentic compose --------------------------------------------------- */
 // POST /compose {instructions, title?} -> {ok, job}. A detached-ish pipeline:
