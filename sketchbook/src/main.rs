@@ -2469,13 +2469,23 @@ impl App {
             let dst = (y * cw) as usize;
             crop[dst..dst + cw as usize].copy_from_slice(&gray[src..src + cw as usize]);
         }
-        let png = png::encode_gray(cw as u32, ch as u32, &crop);
+        /* image models downscale internally anyway — full page resolution
+         * is pure payload. Cap the long side (pi can override with max_px). */
+        let max_px = req["max_px"].as_i64().unwrap_or(1000).clamp(256, 1872) as i32;
+        let (ow, oh, out) = if cw.max(ch) > max_px {
+            let s = max_px as f32 / cw.max(ch) as f32;
+            let (sw, sh) = (((cw as f32 * s) as i32).max(1), ((ch as f32 * s) as i32).max(1));
+            (sw, sh, ink::resize_gray(&crop, cw, ch, sw, sh))
+        } else {
+            (cw, ch, crop)
+        };
+        let png = png::encode_gray(ow as u32, oh as u32, &out);
         json!({
             "ok": true,
             "page": idx + 1,
             "png_base64": png::base64(&png),
-            "width": cw,
-            "height": ch,
+            "width": ow,
+            "height": oh,
             "rect": [r.x0, r.y0, r.x1, r.y1],
         })
     }
@@ -2596,14 +2606,26 @@ impl App {
         let Some(rl) = rl else {
             return json!({ "ok": false, "error": "no such raster on this page" });
         };
-        let png = png::encode_gray(rl.w as u32, rl.h as u32, &rl.gray);
+        /* same cap as crop: the model re-draws it, it doesn't need pixels */
+        let max_px = req["max_px"].as_i64().unwrap_or(1000).clamp(256, 1872) as i32;
+        let (ow, oh, out);
+        if rl.w.max(rl.h) > max_px {
+            let s = max_px as f32 / rl.w.max(rl.h) as f32;
+            let (sw, sh) = (((rl.w as f32 * s) as i32).max(1), ((rl.h as f32 * s) as i32).max(1));
+            out = ink::resize_gray(&rl.gray, rl.w, rl.h, sw, sh);
+            (ow, oh) = (sw, sh);
+        } else {
+            out = rl.gray.clone();
+            (ow, oh) = (rl.w, rl.h);
+        }
+        let png = png::encode_gray(ow as u32, oh as u32, &out);
         json!({
             "ok": true,
             "page": idx + 1,
             "id": rl.id,
             "png_base64": png::base64(&png),
-            "width": rl.w,
-            "height": rl.h,
+            "width": ow,
+            "height": oh,
             "rect": [rl.x0, rl.y0, rl.x0 + rl.w - 1, rl.y0 + rl.h - 1],
         })
     }

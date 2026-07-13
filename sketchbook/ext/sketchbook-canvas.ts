@@ -168,6 +168,30 @@ function imageToGray(buf: Buffer): { w: number; h: number; gray: Buffer } {
   throw new Error("model returned an unrecognized image format");
 }
 
+/** Downscale gray to fit maxSide (2x2 box averaging per halving step,
+ *  bilinear-free but plenty for a final on-page size of ~600px). The
+ *  model returns 1-2K images; shipping those raw over the socket costs
+ *  megabytes of base64 that the app immediately shrinks anyway. */
+function downscaleGray(gray: Buffer, w: number, h: number, maxSide: number): { w: number; h: number; gray: Buffer } {
+  while (Math.max(w, h) > maxSide) {
+    const nw = Math.max(1, w >> 1);
+    const nh = Math.max(1, h >> 1);
+    const out = Buffer.alloc(nw * nh);
+    for (let y = 0; y < nh; y++) {
+      const y0 = y * 2, y1 = Math.min(y * 2 + 1, h - 1);
+      for (let x = 0; x < nw; x++) {
+        const x0 = x * 2, x1 = Math.min(x * 2 + 1, w - 1);
+        out[y * nw + x] =
+          (gray[y0 * w + x0] + gray[y0 * w + x1] + gray[y1 * w + x0] + gray[y1 * w + x1] + 2) >> 2;
+      }
+    }
+    gray = out;
+    w = nw;
+    h = nh;
+  }
+  return { w, h, gray };
+}
+
 /** Normalize tones for e-ink: stretch so the paper reads as true white
  *  (models return ~245-250 backgrounds, which would render as visible
  *  gray wash on the panel) and the darkest marks as true black. */
@@ -346,7 +370,10 @@ export default function (pi: ExtensionAPI) {
         }
 
         const img = await generateImage(prompt, cropB64, baseB64);
-        const { w, h, gray } = imageToGray(img);
+        const decoded = imageToGray(img);
+        /* the app aspect-fits into dest (≤ page size) — 1400px is already
+         * more than any destination rect can use */
+        const { w, h, gray } = downscaleGray(decoded.gray, decoded.w, decoded.h, 1400);
         const normalized = autocontrast(gray);
         const r = await call(
           {
