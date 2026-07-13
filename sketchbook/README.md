@@ -68,6 +68,9 @@ graphite tooth (0 off, 1 default, 1.4 grittier).
 | Do this | And |
 |---------|-----|
 | Sketch or write anywhere | Pausing ~3s offers the page to pi |
+| Tap the ⊙ button (top-right) | Unfold the toolbar: lasso select, eraser mode, generate now, pi watch on/off, refresh |
+| Toolbar → lasso, circle things, drag | Select strokes AND pi's outputs; drag the marquee to move them |
+| Toolbar → eraser icon (tap to cycle) | OBJECT: whole strokes · PIXEL: splits strokes where you rub, erases raster pixels · REGION: circle with the rubber, lift deletes everything inside |
 | Flip the marker, rub your ink | Erase (whole strokes) |
 | Flip the marker, rub one of pi's outputs (empty space) | Wipe that output (your ink survives) |
 | Write feedback next to an output | pi edits it in place on the next pause |

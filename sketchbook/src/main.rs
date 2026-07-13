@@ -28,7 +28,7 @@
  * APP is this app's identity in those crates: log prefix + env-var prefix. */
 pub const APP: libreink_core::app::AppId =
     libreink_core::app::AppId { name: "sketchbook", env_prefix: "SKETCHBOOK" };
-pub use libreink_core::{draw, fb, font, png};
+pub use libreink_core::{draw, fb, font, png, toolbar};
 pub use libreink_display::{display, qtfb, rm2fb};
 pub use libreink_input::{palm, pen, power, touch};
 pub use libreink_hershey as hershey;
@@ -80,6 +80,62 @@ const SNAP_DIV: i32 = 2;
 /// blinking into existence.
 const FADE_STEPS: u32 = 4;
 const FADE_STEP: Duration = Duration::from_millis(320);
+
+/* the right-edge toolbar (stock-reMarkable style): item ids */
+const TB_SELECT: u32 = 1;
+const TB_GENERATE: u32 = 2;
+const TB_QUIET: u32 = 3;
+const TB_REFRESH: u32 = 4;
+const TB_ERASER: u32 = 5;
+
+/// What the marker's rubber end does.
+#[derive(Clone, Copy, PartialEq)]
+enum EraserMode {
+    /// Whole strokes vanish at a touch (the quick-sheets default).
+    Object,
+    /// Only what the rubber actually covers: strokes are SPLIT at the rub
+    /// (the vector model keeps the remainders), raster pixels go white.
+    Pixel,
+    /// Circle a region with the rubber; on lift everything inside goes.
+    Region,
+}
+
+impl EraserMode {
+    fn key(self) -> &'static str {
+        match self {
+            EraserMode::Object => "object",
+            EraserMode::Pixel => "pixel",
+            EraserMode::Region => "region",
+        }
+    }
+    fn from_key(s: &str) -> EraserMode {
+        match s {
+            "pixel" => EraserMode::Pixel,
+            "region" => EraserMode::Region,
+            _ => EraserMode::Object,
+        }
+    }
+    fn next(self) -> EraserMode {
+        match self {
+            EraserMode::Object => EraserMode::Pixel,
+            EraserMode::Pixel => EraserMode::Region,
+            EraserMode::Region => EraserMode::Object,
+        }
+    }
+    fn icon(self) -> toolbar::Icon {
+        match self {
+            EraserMode::Object => toolbar::Icon::Eraser,
+            EraserMode::Pixel => toolbar::Icon::EraserPixel,
+            EraserMode::Region => toolbar::Icon::EraserRegion,
+        }
+    }
+}
+
+/// Lasso selection: majority of a stroke's points must fall inside the
+/// loop for the stroke to join the selection.
+const SEL_INSIDE: f32 = 0.6;
+/// Drag preview repaint throttle.
+const DRAG_TICK: Duration = Duration::from_millis(45);
 
 const ERASER_R: f32 = 22.0;
 
@@ -154,7 +210,7 @@ fn settings_path() -> String {
 
 /// (text_scale, quiet, pi_font) from settings.json; all optional in the
 /// file. pi_font None = no override (fall back to $SKETCHBOOK_FONT).
-fn load_settings() -> (f32, bool, Option<hershey::Face>) {
+fn load_settings() -> (f32, bool, Option<hershey::Face>, EraserMode) {
     let v = std::fs::read(settings_path())
         .ok()
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
@@ -168,10 +224,13 @@ fn load_settings() -> (f32, bool, Option<hershey::Face>) {
         .as_ref()
         .and_then(|v| v["pi_font"].as_str())
         .and_then(hershey::face_from_name);
-    (scale, quiet, font)
+    let eraser = EraserMode::from_key(
+        v.as_ref().and_then(|v| v["eraser"].as_str()).unwrap_or("object"),
+    );
+    (scale, quiet, font, eraser)
 }
 
-fn save_settings(scale: f32, quiet: bool, font: hershey::Face) {
+fn save_settings(scale: f32, quiet: bool, font: hershey::Face, eraser: EraserMode) {
     let p = settings_path();
     if let Some(dir) = std::path::Path::new(&p).parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -182,6 +241,7 @@ fn save_settings(scale: f32, quiet: bool, font: hershey::Face) {
             "text_scale": scale,
             "quiet": quiet,
             "pi_font": font.key(),
+            "eraser": eraser.key(),
         }))
         .unwrap_or_default(),
     );
@@ -250,6 +310,82 @@ fn in_rect(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
     x >= rx && x < rx + rw && y >= ry && y < ry + rh
 }
 
+fn in_rect_r(r: Rect, x: i32, y: i32) -> bool {
+    x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1
+}
+
+fn offset_rect(r: Rect, dx: i32, dy: i32) -> Rect {
+    Rect { x0: r.x0 + dx, y0: r.y0 + dy, x1: r.x1 + dx, y1: r.y1 + dy }
+}
+
+fn lasso_bbox(pts: &[(f32, f32)]) -> Option<Rect> {
+    if pts.is_empty() {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for &(x, y) in pts {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    }
+    Some(Rect { x0: x0 as i32 - 3, y0: y0 as i32 - 3, x1: x1 as i32 + 3, y1: y1 as i32 + 3 })
+}
+
+/// Split every stroke the rubber disc touches into the fragments that
+/// survive OUTSIDE the disc — the pixel eraser's core. Returns true when
+/// anything changed; `dirty` accumulates the affected area.
+fn split_strokes(list: &mut Vec<Stroke>, x: f32, y: f32, r: f32, dirty: &mut Option<Rect>) -> bool {
+    let inside = |p: &Pt| {
+        let (dx, dy) = (p.x - x, p.y - y);
+        let rr = r + p.r;
+        dx * dx + dy * dy <= rr * rr
+    };
+    let mut changed = false;
+    let mut out: Vec<Stroke> = Vec::with_capacity(list.len());
+    for s in list.drain(..) {
+        if !s.pts.iter().any(inside) {
+            out.push(s);
+            continue;
+        }
+        changed = true;
+        if let Some(b) = ink::stroke_bbox(&s) {
+            *dirty = Some(dirty.map_or(b, |d| d.union(b)));
+        }
+        let mut run: Vec<Pt> = Vec::new();
+        for p in &s.pts {
+            if inside(p) {
+                if !run.is_empty() {
+                    out.push(Stroke { id: s.id, gray: s.gray, pts: std::mem::take(&mut run) });
+                }
+            } else {
+                run.push(*p);
+            }
+        }
+        if !run.is_empty() {
+            out.push(Stroke { id: s.id, gray: s.gray, pts: run });
+        }
+    }
+    *list = out;
+    changed
+}
+
+/// Ray-cast point-in-polygon (the lasso loop, implicitly closed).
+fn point_in_poly(pts: &[(f32, f32)], x: f32, y: f32) -> bool {
+    let mut inside = false;
+    let n = pts.len();
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = pts[i];
+        let (xj, yj) = pts[j];
+        if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 fn sock_path() -> String {
     std::env::var("SKETCHBOOK_SOCK").unwrap_or_else(|_| "/tmp/sketchbook-ctl.sock".into())
 }
@@ -272,6 +408,25 @@ struct AnimStroke {
     remaining: VecDeque<Pt>,
     last: Option<Pt>,
     bbox: Rect,
+}
+
+/// What the lasso caught: indices into the page model (valid until any
+/// other mutation — every IPC mutation cancels the selection) plus raster
+/// ids, and the union bbox the dashed marquee is drawn around.
+#[derive(Clone)]
+struct Selection {
+    strokes: Vec<usize>,
+    patch_strokes: Vec<(usize, usize)>,
+    rasters: Vec<u64>,
+    bbox: Rect,
+}
+
+/// The select tool's state machine (armed by the toolbar's lasso item).
+enum Sel {
+    Armed,
+    Lasso { pts: Vec<(f32, f32)> },
+    Have { sel: Selection },
+    Drag { sel: Selection, sx: i32, sy: i32, lx: i32, ly: i32, drawn: Option<Rect>, last_tick: Instant },
 }
 
 /// A raster edit mid-crossfade: region-sized gray composites of the old
@@ -322,6 +477,15 @@ struct App {
 
     /* raster edit crossfade */
     fade: Option<RasterFade>,
+
+    /* the right-edge toolbar + the lasso select tool it arms */
+    tb: toolbar::EdgeToolbar,
+    sel: Option<Sel>,
+    pen_chrome: bool, /* this pen contact began on the toolbar: swallow it */
+
+    /* the rubber's mode + the region-eraser's in-flight loop */
+    eraser: EraserMode,
+    rub_loop: Option<Vec<(f32, f32)>>,
 
     /* AI ink animation */
     anim: VecDeque<AnimStroke>,
@@ -427,6 +591,7 @@ impl App {
     /* -- the sidebar -- */
 
     fn show_sidebar(&mut self) {
+        self.drop_selection(); /* menus repaint the whole screen */
         self.sidebar = Some(Sb { numpad: false, entry: String::new() });
         self.cur_stroke = None;
         self.paint_sidebar();
@@ -569,6 +734,7 @@ impl App {
             self.nb.page.render_full(&mut self.fb, &self.nb.rasters);
             self.disp.full_refresh();
             self.draw_menu_icon();
+            self.draw_toolbar();
             self.show_page_indicator();
         }
     }
@@ -630,13 +796,13 @@ impl App {
                     [hershey::Face::Serif, hershey::Face::Script, hershey::Face::Sans];
                 let i = FACE_ORDER.iter().position(|f| *f == self.pi_font).unwrap_or(0);
                 self.pi_font = FACE_ORDER[(i + 1) % FACE_ORDER.len()];
-                save_settings(self.text_scale, self.quiet, self.pi_font);
+                save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser);
                 println!("sketchbook: pi font -> {}", self.pi_font.key());
                 self.paint_sidebar(); /* stays open for repeated taps */
             }
             SbRow::Quiet => {
                 self.quiet = !self.quiet;
-                save_settings(self.text_scale, self.quiet, self.pi_font);
+                save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser);
                 println!("sketchbook: pi {}", if self.quiet { "quiet" } else { "auto" });
                 if !self.quiet && self.page_changed {
                     /* back to AUTO: offer the accumulated page soon */
@@ -655,7 +821,7 @@ impl App {
                 };
                 let new = (new * 10.0).round() / 10.0;
                 self.text_scale = new.clamp(TEXT_SCALE_MIN, TEXT_SCALE_MAX);
-                save_settings(self.text_scale, self.quiet, self.pi_font);
+                save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser);
                 self.paint_sidebar(); /* stays open for repeated taps */
             }
             SbRow::Refresh => {
@@ -736,6 +902,7 @@ impl App {
     /* -- the library browser -- */
 
     fn open_library(&mut self) {
+        self.drop_selection(); /* menus repaint the whole screen */
         self.agent_page = None;
         self.anim.clear();
         self.anim_settle = None;
@@ -753,6 +920,7 @@ impl App {
         self.nb.page.render_full(&mut self.fb, &self.nb.rasters);
         self.disp.full_refresh();
         self.draw_menu_icon();
+        self.draw_toolbar();
         if self.streaming {
             self.working = false;
             self.set_working(true);
@@ -920,6 +1088,7 @@ impl App {
     /* -- the AGENT.md page -- */
 
     fn open_agent_page(&mut self) {
+        self.drop_selection(); /* menus repaint the whole screen */
         self.lib_view = None;
         self.anim.clear();
         self.anim_settle = None; /* model strokes reappear via render_full later */
@@ -938,6 +1107,7 @@ impl App {
         self.nb.page.render_full(&mut self.fb, &self.nb.rasters);
         self.disp.full_refresh();
         self.draw_menu_icon();
+        self.draw_toolbar();
         if self.streaming {
             self.working = false;
             self.set_working(true);
@@ -1079,6 +1249,359 @@ impl App {
         if r.x0 < MENU_HOT && r.y0 < MENU_HOT {
             self.draw_menu_icon();
         }
+        let t = self.tb.rect();
+        if r.x1 >= t.x0 && r.x0 <= t.x1 && r.y1 >= t.y0 && r.y0 <= t.y1 {
+            self.draw_toolbar();
+        }
+        /* the selection marquee is fb-only chrome too */
+        if let Some(Sel::Have { sel }) = &self.sel {
+            let b = sel.bbox.pad(8);
+            if r.x1 >= b.x0 && r.x0 <= b.x1 && r.y1 >= b.y0 && r.y0 <= b.y1 {
+                let b = sel.bbox;
+                self.draw_marquee(b);
+            }
+        }
+    }
+
+    /* -- the right-edge toolbar (stock-reMarkable style) -- */
+
+    fn draw_toolbar(&mut self) {
+        if self.sidebar.is_some() || self.agent_page.is_some() || self.lib_view.is_some() {
+            return;
+        }
+        self.tb.draw(&mut self.fb);
+        let r = self.tb.rect();
+        self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
+    }
+
+    /// A toolbar press (pen or finger). Returns true when consumed.
+    fn toolbar_press(&mut self, x: i32, y: i32) -> bool {
+        if self.sidebar.is_some() || self.agent_page.is_some() || self.lib_view.is_some() {
+            return false;
+        }
+        let Some(hit) = self.tb.hit(x, y) else { return false };
+        match hit {
+            toolbar::Hit::Toggle => {
+                let was = self.tb.rect();
+                self.tb.open = !self.tb.open;
+                if !self.tb.open {
+                    /* fold: restore the page under the strip */
+                    let had_gray = self.nb.page.render_region(&mut self.fb, was, &self.nb.rasters);
+                    self.disp.update(was.x0, was.y0, was.w(), was.h(), if had_gray { Wave::Text } else { Wave::Ink });
+                    self.restore_chrome_over(was);
+                }
+                self.draw_toolbar();
+            }
+            toolbar::Hit::Item(TB_SELECT) => {
+                if self.sel.is_some() {
+                    self.cancel_selection();
+                } else {
+                    self.sel = Some(Sel::Armed);
+                    self.set_tb_active(TB_SELECT, true);
+                }
+            }
+            toolbar::Hit::Item(TB_GENERATE) => {
+                /* offer the page to pi right now (quiet mode included) */
+                if !self.nb.page.is_empty() || !self.nb.rasters.is_empty() {
+                    self.page_changed = true;
+                    let quiet = self.quiet;
+                    self.quiet = false;
+                    self.idle_at = Some(Instant::now());
+                    self.maybe_send_page();
+                    self.quiet = quiet;
+                }
+            }
+            toolbar::Hit::Item(TB_QUIET) => {
+                self.quiet = !self.quiet;
+                save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser);
+                self.set_tb_active(TB_QUIET, !self.quiet);
+            }
+            toolbar::Hit::Item(TB_ERASER) => {
+                self.eraser = self.eraser.next();
+                save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser);
+                let (icon, active) = (self.eraser.icon(), self.eraser != EraserMode::Object);
+                for it in &mut self.tb.items {
+                    if it.id == TB_ERASER {
+                        it.icon = icon;
+                        it.active = active;
+                    }
+                }
+                self.draw_toolbar();
+            }
+            toolbar::Hit::Item(TB_REFRESH) => {
+                self.disp.full_refresh();
+            }
+            toolbar::Hit::Item(_) => {}
+        }
+        true
+    }
+
+    fn set_tb_active(&mut self, id: u32, active: bool) {
+        for it in &mut self.tb.items {
+            if it.id == id {
+                it.active = active;
+            }
+        }
+        self.draw_toolbar();
+    }
+
+    /* -- lasso select: circle objects, drag them around -- */
+
+    /// Drop the selection without repainting (a full repaint follows).
+    fn drop_selection(&mut self) {
+        if self.sel.take().is_some() {
+            for it in &mut self.tb.items {
+                if it.id == TB_SELECT {
+                    it.active = false;
+                }
+            }
+        }
+    }
+
+    fn cancel_selection(&mut self) {
+        if self.sel.is_none() {
+            return;
+        }
+        let repaint = match self.sel.take() {
+            Some(Sel::Lasso { pts }) => lasso_bbox(&pts),
+            Some(Sel::Have { sel }) => Some(sel.bbox.pad(8)),
+            Some(Sel::Drag { sel, drawn, .. }) => {
+                let mut r = sel.bbox.pad(8);
+                if let Some(d) = drawn {
+                    r = r.union(d.pad(8));
+                }
+                Some(r)
+            }
+            _ => None,
+        };
+        if let Some(r) = repaint {
+            let r = r.clamp_screen();
+            let had_gray = self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
+            self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
+            self.restore_chrome_over(r);
+        }
+        self.set_tb_active(TB_SELECT, false);
+    }
+
+    /// Pen events while the select tool is armed. Returns true if consumed.
+    fn select_pen(&mut self, phase: PenPhase, x: i32, y: i32) -> bool {
+        let Some(state) = self.sel.take() else { return false };
+        match (state, phase) {
+            /* start: a lasso, or a drag when pressing inside the marquee */
+            (Sel::Have { sel }, PenPhase::Press) => {
+                if in_rect_r(sel.bbox.pad(14), x, y) {
+                    self.sel = Some(Sel::Drag {
+                        sel,
+                        sx: x,
+                        sy: y,
+                        lx: x,
+                        ly: y,
+                        drawn: None,
+                        last_tick: Instant::now(),
+                    });
+                } else {
+                    /* press outside: drop the marquee, start a fresh lasso */
+                    let b = sel.bbox.pad(8).clamp_screen();
+                    let had_gray = self.nb.page.render_region(&mut self.fb, b, &self.nb.rasters);
+                    self.disp.update(b.x0, b.y0, b.w(), b.h(), if had_gray { Wave::Text } else { Wave::Ink });
+                    self.restore_chrome_over(b);
+                    self.sel = Some(Sel::Lasso { pts: vec![(x as f32, y as f32)] });
+                }
+            }
+            (Sel::Armed, PenPhase::Press) => {
+                self.sel = Some(Sel::Lasso { pts: vec![(x as f32, y as f32)] });
+            }
+            (Sel::Lasso { mut pts }, PenPhase::Move | PenPhase::Press) => {
+                let (px, py) = *pts.last().unwrap();
+                let (fx, fy) = (x as f32, y as f32);
+                if (fx - px).hypot(fy - py) >= 3.0 {
+                    let r = self.fb.stroke_segment(px as i32, py as i32, x, y, 0, draw::BLACK);
+                    self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
+                    pts.push((fx, fy));
+                }
+                self.sel = Some(Sel::Lasso { pts });
+            }
+            (Sel::Lasso { pts }, PenPhase::Release) => {
+                self.finish_lasso(pts);
+            }
+            (Sel::Drag { sel, sx, sy, lx: _, ly: _, drawn, mut last_tick }, PenPhase::Move) => {
+                let mut new_drawn = drawn;
+                if last_tick.elapsed() >= DRAG_TICK {
+                    last_tick = Instant::now();
+                    let target = offset_rect(sel.bbox, x - sx, y - sy).clamp_screen();
+                    if drawn != Some(target) {
+                        if let Some(d) = drawn {
+                            self.erase_marquee(d);
+                        }
+                        self.draw_marquee(target);
+                        new_drawn = Some(target);
+                    }
+                }
+                self.sel = Some(Sel::Drag { sel, sx, sy, lx: x, ly: y, drawn: new_drawn, last_tick });
+            }
+            (Sel::Drag { sel, sx, sy, lx, ly, drawn, .. }, PenPhase::Release) => {
+                let _ = (lx, ly);
+                self.apply_drag(sel, x - sx, y - sy, drawn);
+            }
+            (s, _) => self.sel = Some(s),
+        }
+        true
+    }
+
+    fn finish_lasso(&mut self, pts: Vec<(f32, f32)>) {
+        let trail = lasso_bbox(&pts);
+        /* wipe the lasso trail (it is fb-only chrome) */
+        if let Some(r) = trail {
+            let r = r.clamp_screen();
+            let had_gray = self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
+            self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
+            self.restore_chrome_over(r);
+        }
+        if pts.len() < 8 {
+            self.sel = Some(Sel::Armed);
+            return;
+        }
+        let inside = |px: f32, py: f32| point_in_poly(&pts, px, py);
+        let stroke_caught = |s: &Stroke| {
+            if s.pts.is_empty() {
+                return false;
+            }
+            let step = (s.pts.len() / 24).max(1);
+            let sampled: Vec<&Pt> = s.pts.iter().step_by(step).collect();
+            let hit = sampled.iter().filter(|p| inside(p.x, p.y)).count();
+            hit as f32 / sampled.len() as f32 >= SEL_INSIDE
+        };
+        let mut sel = Selection { strokes: Vec::new(), patch_strokes: Vec::new(), rasters: Vec::new(), bbox: Rect { x0: 0, y0: 0, x1: -1, y1: -1 } };
+        let mut bbox: Option<Rect> = None;
+        let add_bbox = |b: Option<Rect>, acc: &mut Option<Rect>| {
+            if let Some(b) = b {
+                *acc = Some(acc.map_or(b, |a| a.union(b)));
+            }
+        };
+        for (i, s) in self.nb.page.strokes.iter().enumerate() {
+            if stroke_caught(s) {
+                sel.strokes.push(i);
+                add_bbox(ink::stroke_bbox(s), &mut bbox);
+            }
+        }
+        for (pi_idx, p) in self.nb.page.patches.iter().enumerate() {
+            for (si, s) in p.strokes.iter().enumerate() {
+                if stroke_caught(s) {
+                    sel.patch_strokes.push((pi_idx, si));
+                    add_bbox(ink::stroke_bbox(s), &mut bbox);
+                }
+            }
+        }
+        for rl in &self.nb.rasters {
+            let (cx, cy) = (rl.x0 as f32 + rl.w as f32 / 2.0, rl.y0 as f32 + rl.h as f32 / 2.0);
+            if inside(cx, cy) {
+                sel.rasters.push(rl.id);
+                add_bbox(Some(rl.rect()), &mut bbox);
+            }
+        }
+        match bbox {
+            Some(b) if !sel.strokes.is_empty() || !sel.patch_strokes.is_empty() || !sel.rasters.is_empty() => {
+                sel.bbox = b;
+                self.draw_marquee(b);
+                self.sel = Some(Sel::Have { sel });
+            }
+            _ => {
+                self.sel = Some(Sel::Armed);
+            }
+        }
+    }
+
+    fn apply_drag(&mut self, sel: Selection, dx: i32, dy: i32, drawn: Option<Rect>) {
+        /* wipe the preview marquee */
+        if let Some(d) = drawn {
+            self.erase_marquee(d);
+        }
+        if dx == 0 && dy == 0 {
+            self.draw_marquee(sel.bbox);
+            self.sel = Some(Sel::Have { sel });
+            return;
+        }
+        let (fdx, fdy) = (dx as f32, dy as f32);
+        for &i in &sel.strokes {
+            if let Some(s) = self.nb.page.strokes.get_mut(i) {
+                for p in &mut s.pts {
+                    p.x += fdx;
+                    p.y += fdy;
+                }
+            }
+        }
+        for &(pi_idx, si) in &sel.patch_strokes {
+            if let Some(s) = self.nb.page.patches.get_mut(pi_idx).and_then(|p| p.strokes.get_mut(si)) {
+                for p in &mut s.pts {
+                    p.x += fdx;
+                    p.y += fdy;
+                }
+            }
+        }
+        for id in &sel.rasters {
+            if let Some(rl) = self.nb.rasters.iter_mut().find(|r| r.id == *id) {
+                rl.x0 += dx;
+                rl.y0 += dy;
+            }
+        }
+        self.nb.page.dirty = true;
+        if !sel.rasters.is_empty() {
+            self.nb.rasters_dirty = true;
+        }
+        self.nb.save_current();
+        self.page_changed = true;
+        self.last_activity_page = self.nb.current;
+
+        let new_bbox = offset_rect(sel.bbox, dx, dy);
+        let r = sel.bbox.union(new_bbox).pad(8).clamp_screen();
+        let had_gray = self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
+        self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
+        self.restore_chrome_over(r);
+
+        let moved = Selection { bbox: new_bbox.clamp_screen(), ..sel };
+        self.draw_marquee(moved.bbox);
+        self.sel = Some(Sel::Have { sel: moved });
+        println!("sketchbook: selection moved by ({dx},{dy})");
+    }
+
+    /// The dashed selection rectangle (fb-only chrome).
+    fn draw_marquee(&mut self, b: Rect) {
+        let b = b.pad(6).clamp_screen();
+        let dash = 14;
+        let gap = 10;
+        let mut x = b.x0;
+        while x < b.x1 {
+            let e = (x + dash).min(b.x1);
+            self.fb.stroke_segment(x, b.y0, e, b.y0, 0, draw::BLACK);
+            self.fb.stroke_segment(x, b.y1, e, b.y1, 0, draw::BLACK);
+            x += dash + gap;
+        }
+        let mut y = b.y0;
+        while y < b.y1 {
+            let e = (y + dash).min(b.y1);
+            self.fb.stroke_segment(b.x0, y, b.x0, e, 0, draw::BLACK);
+            self.fb.stroke_segment(b.x1, y, b.x1, e, 0, draw::BLACK);
+            y += dash + gap;
+        }
+        let r = b.pad(2);
+        self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
+    }
+
+    /// Restore the page under a marquee's four edges (thin strips — cheap).
+    fn erase_marquee(&mut self, b: Rect) {
+        let b = b.pad(6).clamp_screen();
+        let t = 4;
+        let strips = [
+            Rect { x0: b.x0 - t, y0: b.y0 - t, x1: b.x1 + t, y1: b.y0 + t },
+            Rect { x0: b.x0 - t, y0: b.y1 - t, x1: b.x1 + t, y1: b.y1 + t },
+            Rect { x0: b.x0 - t, y0: b.y0 - t, x1: b.x0 + t, y1: b.y1 + t },
+            Rect { x0: b.x1 - t, y0: b.y0 - t, x1: b.x1 + t, y1: b.y1 + t },
+        ];
+        for s in strips {
+            let s = s.clamp_screen();
+            self.nb.page.render_region(&mut self.fb, s, &self.nb.rasters);
+            self.disp.update(s.x0, s.y0, s.w(), s.h(), Wave::Ink);
+        }
     }
 
     /* -- page turning -- */
@@ -1107,6 +1630,7 @@ impl App {
         self.anim.clear();
         self.anim_settle = None;
         self.anim_dirty = None;
+        self.drop_selection(); /* selection indices are per-page */
         if !self.nb.flip(delta) {
             self.show_page_indicator(); /* at the edge: just show where we are */
             return;
@@ -1127,6 +1651,7 @@ impl App {
             self.set_working(true);
         }
         self.draw_menu_icon();
+        self.draw_toolbar();
         self.show_page_indicator();
         self.live.page(self.nb.current);
         println!("sketchbook: page {} / {}", self.nb.current + 1, self.nb.count);
@@ -1156,6 +1681,29 @@ impl App {
             }
             return;
         }
+        /* a contact that began on the toolbar never inks */
+        if self.pen_chrome {
+            if phase == PenPhase::Release {
+                self.pen_chrome = false;
+            }
+            return;
+        }
+        if phase == PenPhase::Press && self.toolbar_press(x, y) {
+            self.pen_chrome = true;
+            return;
+        }
+        /* the select tool owns the pen while armed (the rubber still
+         * erases: flipping the marker cancels the selection first) */
+        if self.sel.is_some() && self.agent_page.is_none() {
+            if rubber {
+                self.cancel_selection();
+            } else {
+                self.last_contact = Some(Instant::now());
+                if self.select_pen(phase, x, y) {
+                    return;
+                }
+            }
+        }
         match phase {
             PenPhase::Press | PenPhase::Move => {
                 if phase == PenPhase::Press {
@@ -1169,10 +1717,16 @@ impl App {
                      * so what's on the glass is what's in the model */
                     self.commit_open_stroke();
                     if self.agent_page.is_none() {
-                        /* raster wipe ONLY on the initial press on a clean
-                         * spot: scrubbing strokes off a raster must never
-                         * cascade into wiping the raster itself */
-                        self.erase_pass(x as f32, y as f32, phase == PenPhase::Press);
+                        match self.eraser {
+                            /* raster wipe ONLY on the initial press on a
+                             * clean spot: scrubbing strokes off a raster
+                             * must never cascade into wiping it */
+                            EraserMode::Object => {
+                                self.erase_pass(x as f32, y as f32, phase == PenPhase::Press)
+                            }
+                            EraserMode::Pixel => self.pixel_erase_pass(x as f32, y as f32),
+                            EraserMode::Region => self.region_erase_pen(phase, x, y),
+                        }
                     } /* no eraser on the AGENT.md page — annotate instead */
                 } else {
                     self.ink_pass(phase, x, y, pressure);
@@ -1180,6 +1734,9 @@ impl App {
             }
             PenPhase::Release => {
                 self.last_contact = Some(Instant::now());
+                if self.rub_loop.is_some() {
+                    self.finish_rub_loop(); /* region eraser: the lift deletes */
+                }
                 self.commit_open_stroke();
                 if self.contact_changed {
                     if self.agent_page.is_none() {
@@ -1266,6 +1823,164 @@ impl App {
         true
     }
 
+    /// PIXEL eraser: strokes are SPLIT where the rubber covers them (the
+    /// vector model keeps the rest intact) and raster pixels go white.
+    fn pixel_erase_pass(&mut self, x: f32, y: f32) {
+        let r = ERASER_R;
+        let mut dirty: Option<Rect> = None;
+        let mut changed = split_strokes(&mut self.nb.page.strokes, x, y, r, &mut dirty);
+        for p in &mut self.nb.page.patches {
+            changed |= split_strokes(&mut p.strokes, x, y, r, &mut dirty);
+        }
+        self.nb.page.patches.retain(|p| !p.strokes.is_empty() || !p.texts.is_empty());
+
+        /* raster pixels under the disc go white */
+        let disc = Rect {
+            x0: (x - r) as i32,
+            y0: (y - r) as i32,
+            x1: (x + r).ceil() as i32,
+            y1: (y + r).ceil() as i32,
+        };
+        for rl in &mut self.nb.rasters {
+            let rr = rl.rect();
+            if disc.x1 < rr.x0 || disc.x0 > rr.x1 || disc.y1 < rr.y0 || disc.y0 > rr.y1 {
+                continue;
+            }
+            let mut any = false;
+            for py in disc.y0.max(rr.y0)..=disc.y1.min(rr.y1) {
+                for px in disc.x0.max(rr.x0)..=disc.x1.min(rr.x1) {
+                    let (dx, dy) = (px as f32 - x, py as f32 - y);
+                    if dx * dx + dy * dy <= r * r {
+                        let i = ((py - rl.y0) * rl.w + (px - rl.x0)) as usize;
+                        if rl.gray[i] != 255 {
+                            rl.gray[i] = 255;
+                            any = true;
+                        }
+                    }
+                }
+            }
+            if any {
+                changed = true;
+                self.nb.rasters_dirty = true;
+                dirty = Some(dirty.map_or(disc, |d| d.union(disc)));
+            }
+        }
+
+        if !changed {
+            return;
+        }
+        self.nb.page.dirty = true;
+        self.contact_changed = true;
+        self.last_activity_page = self.nb.current;
+        self.live.rub(x, y);
+        self.deghost_at = Some(Instant::now() + Duration::from_millis(1100));
+        let d = dirty.unwrap_or(disc).pad(4).clamp_screen();
+        let had_gray = self.nb.page.render_region(&mut self.fb, d, &self.nb.rasters);
+        self.disp.update(d.x0, d.y0, d.w(), d.h(), if had_gray { Wave::Text } else { Wave::Ink });
+        self.restore_chrome_over(d);
+    }
+
+    /// REGION eraser: the rubber draws a loop; collect it (thin trail).
+    fn region_erase_pen(&mut self, phase: PenPhase, x: i32, y: i32) {
+        match phase {
+            PenPhase::Press => {
+                self.rub_loop = Some(vec![(x as f32, y as f32)]);
+            }
+            PenPhase::Move => {
+                let Some(pts) = self.rub_loop.as_mut() else {
+                    self.rub_loop = Some(vec![(x as f32, y as f32)]);
+                    return;
+                };
+                let (px, py) = *pts.last().unwrap();
+                let (fx, fy) = (x as f32, y as f32);
+                if (fx - px).hypot(fy - py) >= 3.0 {
+                    pts.push((fx, fy));
+                    let r = self.fb.stroke_segment(px as i32, py as i32, x, y, 0, draw::BLACK);
+                    self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
+                }
+            }
+            PenPhase::Release => self.finish_rub_loop(),
+        }
+    }
+
+    /// The region-eraser loop closed: delete everything inside it.
+    fn finish_rub_loop(&mut self) {
+        let Some(pts) = self.rub_loop.take() else { return };
+        let trail = lasso_bbox(&pts);
+        let mut dirty = trail;
+        let mut changed = false;
+        if pts.len() >= 8 {
+            let caught = |s: &Stroke| {
+                if s.pts.is_empty() {
+                    return false;
+                }
+                let step = (s.pts.len() / 24).max(1);
+                let sampled: Vec<&Pt> = s.pts.iter().step_by(step).collect();
+                let hit = sampled.iter().filter(|p| point_in_poly(&pts, p.x, p.y)).count();
+                hit as f32 / sampled.len() as f32 >= SEL_INSIDE
+            };
+            let add = |b: Option<Rect>, acc: &mut Option<Rect>| {
+                if let Some(b) = b {
+                    *acc = Some(acc.map_or(b, |a| a.union(b)));
+                }
+            };
+            let before = self.nb.page.strokes.len();
+            let mut kept = Vec::with_capacity(before);
+            for s in self.nb.page.strokes.drain(..) {
+                if caught(&s) {
+                    add(ink::stroke_bbox(&s), &mut dirty);
+                } else {
+                    kept.push(s);
+                }
+            }
+            changed |= kept.len() != before;
+            self.nb.page.strokes = kept;
+            for p in &mut self.nb.page.patches {
+                let n = p.strokes.len();
+                let mut kept = Vec::with_capacity(n);
+                for s in p.strokes.drain(..) {
+                    if caught(&s) {
+                        add(ink::stroke_bbox(&s), &mut dirty);
+                    } else {
+                        kept.push(s);
+                    }
+                }
+                changed |= kept.len() != n;
+                p.strokes = kept;
+            }
+            self.nb.page.patches.retain(|p| !p.strokes.is_empty() || !p.texts.is_empty());
+            let nr = self.nb.rasters.len();
+            let mut kept_r = Vec::with_capacity(nr);
+            for rl in self.nb.rasters.drain(..) {
+                let (cx, cy) = (rl.x0 as f32 + rl.w as f32 / 2.0, rl.y0 as f32 + rl.h as f32 / 2.0);
+                if point_in_poly(&pts, cx, cy) {
+                    add(Some(rl.rect()), &mut dirty);
+                } else {
+                    kept_r.push(rl);
+                }
+            }
+            if kept_r.len() != nr {
+                changed = true;
+                self.nb.rasters_dirty = true;
+            }
+            self.nb.rasters = kept_r;
+        }
+        if changed {
+            self.nb.page.dirty = true;
+            self.contact_changed = true;
+            self.last_activity_page = self.nb.current;
+            self.nb.save_current();
+            self.deghost_at = Some(Instant::now() + Duration::from_millis(1100));
+            println!("sketchbook: region erase on page {}", self.nb.current + 1);
+        }
+        if let Some(d) = dirty {
+            let d = d.pad(4).clamp_screen();
+            let had_gray = self.nb.page.render_region(&mut self.fb, d, &self.nb.rasters);
+            self.disp.update(d.x0, d.y0, d.w(), d.h(), if had_gray { Wave::Text } else { Wave::Ink });
+            self.restore_chrome_over(d);
+        }
+    }
+
     fn erase_pass(&mut self, x: f32, y: f32, allow_raster_wipe: bool) {
         if let Some((gone, _)) = self.nb.page.erase_at(x, y, ERASER_R) {
             self.contact_changed = true;
@@ -1315,6 +2030,9 @@ impl App {
             Phase::Press => {
                 if x < MENU_HOT && y < MENU_HOT {
                     self.show_sidebar();
+                    return;
+                }
+                if self.toolbar_press(x, y) {
                     return;
                 }
                 self.touch_start = Some((x, y));
@@ -1446,6 +2164,13 @@ impl App {
     fn handle_ipc_request(&mut self, req: &Value) -> Value {
         if self.streaming {
             self.pi_alive_at = Some(Instant::now()); /* tool call = alive */
+        }
+        /* mutations invalidate the lasso selection's model indices */
+        if matches!(
+            req["cmd"].as_str().unwrap_or(""),
+            "draw" | "erase" | "place" | "raster_erase" | "erase_ink"
+        ) {
+            self.cancel_selection();
         }
         match req["cmd"].as_str().unwrap_or("") {
             "view" => self.ipc_view(req),
@@ -2354,7 +3079,7 @@ fn main() -> std::process::ExitCode {
     let mut last_activity = Instant::now();
 
     let now = Instant::now();
-    let (text_scale, quiet, saved_font) = load_settings();
+    let (text_scale, quiet, saved_font, eraser) = load_settings();
     let pi_font = saved_font.unwrap_or_else(|| hershey::default_face(APP));
     let mut app = App {
         fb,
@@ -2394,6 +3119,21 @@ fn main() -> std::process::ExitCode {
         pi_font,
         lib_view: None,
         fade: None,
+        tb: {
+            let mut tb = toolbar::EdgeToolbar::new(FB_W - 52, 96);
+            tb.items = vec![
+                toolbar::Item { id: TB_SELECT, icon: toolbar::Icon::Lasso, active: false },
+                toolbar::Item { id: TB_ERASER, icon: eraser.icon(), active: eraser != EraserMode::Object },
+                toolbar::Item { id: TB_GENERATE, icon: toolbar::Icon::Spark, active: false },
+                toolbar::Item { id: TB_QUIET, icon: toolbar::Icon::Eye, active: true },
+                toolbar::Item { id: TB_REFRESH, icon: toolbar::Icon::Refresh, active: false },
+            ];
+            tb
+        },
+        sel: None,
+        pen_chrome: false,
+        eraser,
+        rub_loop: None,
         deghost_at: None,
         live: live::Live::new(),
     };
@@ -2401,7 +3141,13 @@ fn main() -> std::process::ExitCode {
     /* first paint */
     app.nb.page.render_full(&mut app.fb, &app.nb.rasters);
     app.disp.full_refresh();
+    app.tb.items.iter_mut().for_each(|it| {
+        if it.id == TB_QUIET {
+            it.active = !app.quiet; /* eye open = watching */
+        }
+    });
     app.draw_menu_icon();
+    app.draw_toolbar();
     app.show_page_indicator();
 
     while RUNNING.load(Ordering::Relaxed) {

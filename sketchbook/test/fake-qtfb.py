@@ -109,6 +109,29 @@ def main():
         s.drain(10.0)
         write_png(out_png.replace(".png", "-back.png"))
 
+        # right-edge toolbar: unfold, arm the lasso, circle the sketch,
+        # then drag the selection down-right
+        s.pen_tap(1352, 96)             # toggle button: unfold
+        s.drain(1.5)
+        write_png(out_png.replace(".png", "-toolbar.png"))
+        s.pen_tap(1352, 182)            # first item: SELECT (lasso)
+        s.drain(1.0)
+        s.pen(PEN_PRESS, 350, 420)      # lasso around the circle sketch
+        for i in range(1, 40):
+            a = i / 40.0 * 2 * math.pi
+            s.pen(PEN_UPDATE, 350 + int(300 * math.sin(a)), 700 - int(300 * math.cos(a)))
+        s.pen(PEN_RELEASE, 350, 420)
+        s.drain(3.0)
+        write_png(out_png.replace(".png", "-selected.png"))
+        s.pen(PEN_PRESS, 350, 700)      # drag the selection
+        for i in range(1, 12):
+            s.pen(PEN_UPDATE, 350 + i * 20, 700 + i * 35)
+        s.pen(PEN_RELEASE, 350 + 11 * 20, 700 + 11 * 35)
+        s.drain(4.0)
+        write_png(out_png.replace(".png", "-moved.png"))
+        s.pen_tap(1352, 96)             # fold the toolbar away
+        s.drain(2.0)
+
         # sidebar -> LIBRARY -> first item: the markdown reader
         s.pen_tap(40, 40)               # corner tap: sidebar
         s.drain(1.0)
