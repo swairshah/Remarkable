@@ -37,9 +37,13 @@ const IMG_MODEL = process.env.SKETCHBOOK_IMG_MODEL || "gemini-3.1-flash-image";
 const API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_STUDIO_API_KEY || "";
 
 const DEFAULT_STYLE =
-  "a refined, confident artist's pencil sketch: pure monochrome graphite on white " +
-  "paper, clean confident linework, graphite shading, hatching and soft smudged " +
-  "tones, plain white background, no color, no paper texture, no frame, no text";
+  "a refined, confident artist's pencil sketch built from VISIBLE INDIVIDUAL " +
+  "GRAPHITE STROKES: grainy pencil texture with the tooth of the paper showing " +
+  "through the shading, energetic hatching and cross-hatching with slightly " +
+  "broken stroke edges, darker pressed accents where a real artist would bear " +
+  "down, soft smudged tone only where a finger would blend it — NEVER smooth " +
+  "airbrushed gradients. Pure monochrome graphite on white paper, plain white " +
+  "background, no color, no frame, no text";
 
 function call(cmd: Record<string, unknown>, timeoutMs = 30000): Promise<any> {
   return new Promise((resolve, reject) => {

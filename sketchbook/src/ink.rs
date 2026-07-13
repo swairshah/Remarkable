@@ -135,6 +135,54 @@ pub fn resize_gray(src: &[u8], sw: i32, sh: i32, dw: i32, dh: i32) -> Vec<u8> {
     out
 }
 
+/* ---- pencil grain ---------------------------------------------------------- */
+
+fn hash2(x: i32, y: i32, seed: u32) -> f32 {
+    let mut h = (x as u32)
+        .wrapping_mul(374_761_393)
+        ^ (y as u32).wrapping_mul(668_265_263)
+        ^ seed.wrapping_mul(2_246_822_519);
+    h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+    ((h ^ (h >> 16)) & 0xFFFF) as f32 / 65535.0
+}
+
+/// Bilinear value noise at (x, y), one octave, in [0, 1].
+fn value_noise(x: f32, y: f32, seed: u32) -> f32 {
+    let (x0, y0) = (x.floor() as i32, y.floor() as i32);
+    let (tx, ty) = (x - x0 as f32, y - y0 as f32);
+    let a = hash2(x0, y0, seed);
+    let b = hash2(x0 + 1, y0, seed);
+    let c = hash2(x0, y0 + 1, seed);
+    let d = hash2(x0 + 1, y0 + 1, seed);
+    a * (1.0 - tx) * (1.0 - ty) + b * tx * (1.0 - ty) + c * (1.0 - tx) * ty + d * tx * ty
+}
+
+/// Graphite tooth for the render layer: perturb midtones with paper-grain
+/// value noise (a fine and a medium octave) so the 16-level quantize
+/// renders granular pencil texture instead of flat posterized bands — the
+/// reMarkable pencil-brush look. Strength peaks in the midtones and
+/// vanishes at paper white (stays clean) and solid black (lines stay
+/// crisp). Apply AFTER resizing: grain lives at panel pixel scale.
+pub fn pencil_grain(gray: &mut [u8], w: i32, h: i32) {
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let g = gray[i] as f32;
+            if g >= 250.0 {
+                continue; /* paper */
+            }
+            let (fx, fy) = (x as f32, y as f32);
+            /* two octaves, centered on 0, typical spread ≈ ±0.2 */
+            let n = 0.6 * value_noise(fx / 2.0, fy / 2.0, 7)
+                + 0.4 * value_noise(fx / 5.0, fy / 5.0, 13)
+                - 0.5;
+            let k = (g * (255.0 - g)) / (127.5 * 127.5);
+            let v = g + n * 135.0 * k;
+            gray[i] = v.clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
 /// Minimal base64 decode (standard alphabet, padding optional).
 pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u32> {

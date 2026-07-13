@@ -1574,7 +1574,11 @@ impl App {
         let max_h = dy1 - dy0;
         let scale = (max_w as f32 / w as f32).min(max_h as f32 / h as f32);
         let (dw, dh) = (((w as f32 * scale) as i32).max(1), ((h as f32 * scale) as i32).max(1));
-        let gray = ink::resize_gray(&raw, w, h, dw, dh);
+        let mut gray = ink::resize_gray(&raw, w, h, dw, dh);
+        /* graphite tooth (SKETCHBOOK_GRAIN=0 disables) */
+        if std::env::var("SKETCHBOOK_GRAIN").map(|v| v != "0").unwrap_or(true) {
+            ink::pencil_grain(&mut gray, dw, dh);
+        }
         let rl = ink::RenderLayer {
             x0: ink::PANEL_W + MARGIN + (max_w - dw) / 2,
             y0: dy0 + (max_h - dh) / 2,
