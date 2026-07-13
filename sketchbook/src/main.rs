@@ -526,6 +526,10 @@ struct App {
     redo: Vec<UndoState>,
     pending_undo: Option<UndoState>,
 
+    /* implicit feedback: raster ids the USER wiped since pi's last look
+     * (reported in the next pause message so pi can learn from rejection) */
+    wiped_rasters: Vec<u64>,
+
     /* AI ink animation */
     anim: VecDeque<AnimStroke>,
     anim_dirty: Option<Rect>,
@@ -1951,6 +1955,7 @@ impl App {
         };
         let rl = self.nb.rasters.remove(pos);
         self.commit_pending_undo();
+        self.wiped_rasters.push(rl.id); /* rejection: pi hears about it */
         let r = rl.rect().pad(2).clamp_screen();
         self.nb.rasters_dirty = true;
         self.nb.save_current();
@@ -2096,6 +2101,7 @@ impl App {
                 let (cx, cy) = (rl.x0 as f32 + rl.w as f32 / 2.0, rl.y0 as f32 + rl.h as f32 / 2.0);
                 if point_in_poly(&pts, cx, cy) {
                     add(Some(rl.rect()), &mut dirty);
+                    self.wiped_rasters.push(rl.id); /* region-erased = rejected too */
                 } else {
                     kept_r.push(rl);
                 }
@@ -2227,11 +2233,21 @@ impl App {
         let Some(pi) = self.pi.as_mut() else { return };
         self.nb.save_current();
         let (w, h, gray) = ink::snapshot_with_rasters(&self.nb.page, &self.nb.rasters, SNAP_DIV);
-        let patches = format!(
+        let mut patches = format!(
             "{}; your raster outputs: {}",
             patch_summary(&self.nb.page),
             raster_summary(&self.nb.rasters),
         );
+        if !self.wiped_rasters.is_empty() {
+            let ids: Vec<String> =
+                self.wiped_rasters.drain(..).map(|i| format!("#{i}")).collect();
+            patches.push_str(&format!(
+                ". FEEDBACK: since your last look the user RUBBED OUT your output(s) {} \
+                 — a rejection. Consider what missed, and whether your standing \
+                 instructions file needs a note",
+                ids.join(", ")
+            ));
+        }
         let layout = layout_hints(&self.nb.page, self.text_scale);
         let streaming = self.streaming;
         match pi.send_page(
@@ -3297,6 +3313,7 @@ fn main() -> std::process::ExitCode {
         undo: Vec::new(),
         redo: Vec::new(),
         pending_undo: None,
+        wiped_rasters: Vec::new(),
         deghost_at: None,
         live: live::Live::new(),
     };

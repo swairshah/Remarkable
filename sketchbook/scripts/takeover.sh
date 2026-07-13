@@ -50,7 +50,11 @@ sleep 0.5
 [ -f /home/root/.config/sketchbook/env ] && . /home/root/.config/sketchbook/env
 
 cd /home/root
+# node's default old-space cap (~400MB on this arm build) is what pi's
+# session images kept hitting; give it headroom (the rM2 has 1GB, xochitl
+# is stopped while we run)
 HOME=/home/root PATH="/home/root/bin:/home/root/opt/node/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    NODE_OPTIONS="--max-old-space-size=640" \
     SKETCHBOOK_EXT="$HERE/sketchbook-canvas.ts" \
     SKETCHBOOK_FONT="${SKETCHBOOK_FONT:-serif}" \
     GEMINI_API_KEY="${GEMINI_API_KEY:-}" \
