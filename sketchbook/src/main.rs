@@ -129,6 +129,13 @@ impl EraserMode {
             EraserMode::Region => toolbar::Icon::EraserRegion,
         }
     }
+    fn label(self) -> &'static str {
+        match self {
+            EraserMode::Object => "ERASE",
+            EraserMode::Pixel => "PIXEL",
+            EraserMode::Region => "REGION",
+        }
+    }
 }
 
 /// Lasso selection: majority of a stroke's points must fall inside the
@@ -1314,15 +1321,23 @@ impl App {
             toolbar::Hit::Item(TB_QUIET) => {
                 self.quiet = !self.quiet;
                 save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser);
+                let label = if self.quiet { "QUIET" } else { "WATCH" };
+                for it in &mut self.tb.items {
+                    if it.id == TB_QUIET {
+                        it.label = label;
+                    }
+                }
                 self.set_tb_active(TB_QUIET, !self.quiet);
             }
             toolbar::Hit::Item(TB_ERASER) => {
                 self.eraser = self.eraser.next();
                 save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser);
-                let (icon, active) = (self.eraser.icon(), self.eraser != EraserMode::Object);
+                let (icon, label, active) =
+                    (self.eraser.icon(), self.eraser.label(), self.eraser != EraserMode::Object);
                 for it in &mut self.tb.items {
                     if it.id == TB_ERASER {
                         it.icon = icon;
+                        it.label = label;
                         it.active = active;
                     }
                 }
@@ -3122,11 +3137,11 @@ fn main() -> std::process::ExitCode {
         tb: {
             let mut tb = toolbar::EdgeToolbar::new(FB_W - 52, 96);
             tb.items = vec![
-                toolbar::Item { id: TB_SELECT, icon: toolbar::Icon::Lasso, active: false },
-                toolbar::Item { id: TB_ERASER, icon: eraser.icon(), active: eraser != EraserMode::Object },
-                toolbar::Item { id: TB_GENERATE, icon: toolbar::Icon::Spark, active: false },
-                toolbar::Item { id: TB_QUIET, icon: toolbar::Icon::Eye, active: true },
-                toolbar::Item { id: TB_REFRESH, icon: toolbar::Icon::Refresh, active: false },
+                toolbar::Item { id: TB_SELECT, icon: toolbar::Icon::Lasso, label: "SELECT", active: false },
+                toolbar::Item { id: TB_ERASER, icon: eraser.icon(), label: eraser.label(), active: eraser != EraserMode::Object },
+                toolbar::Item { id: TB_GENERATE, icon: toolbar::Icon::Spark, label: "RENDER", active: false },
+                toolbar::Item { id: TB_QUIET, icon: toolbar::Icon::Eye, label: "WATCH", active: true },
+                toolbar::Item { id: TB_REFRESH, icon: toolbar::Icon::Refresh, label: "CLEAN", active: false },
             ];
             tb
         },
