@@ -2464,7 +2464,11 @@ impl App {
         let (dw, dh) = (((w as f32 * scale) as i32).max(1), ((h as f32 * scale) as i32).max(1));
         /* stored clean; graphite tooth is applied at blit/snapshot time */
         let gray = ink::resize_gray(&raw, w, h, dw, dh);
-        let (px, py) = (dest.x0 + (dest.w() - dw) / 2, dest.y0 + (dest.h() - dh) / 2);
+        /* trim the paper margins: the stored rect hugs the actual drawing,
+         * so every later blit walks content, not acres of background */
+        let (gray, cw, chh, ox, oy) = ink::content_crop(gray, dw, dh);
+        let (px, py) = (dest.x0 + (dest.w() - dw) / 2 + ox, dest.y0 + (dest.h() - dh) / 2 + oy);
+        let (dw, dh) = (cw, chh);
 
         if idx == self.nb.current {
             self.checkpoint(true);
@@ -2622,8 +2626,12 @@ impl App {
             let row = ((y - region.y0) * rw) as usize;
             for x in region.x0..=region.x1 {
                 let i = row + (x - region.x0) as usize;
-                let a = f.from[i] as f32;
-                let b = f.to[i] as f32;
+                let (fa, fb_) = (f.from[i], f.to[i]);
+                if fa == 255 && fb_ == 255 {
+                    continue; /* paper on both sides of the fade */
+                }
+                let a = fa as f32;
+                let b = fb_ as f32;
                 let v = (a + (b - a) * t).round().clamp(0.0, 255.0) as u8;
                 self.fb.px(x, y, ink::grain_565(v, x, y));
             }

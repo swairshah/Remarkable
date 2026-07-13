@@ -50,7 +50,13 @@ impl RasterPatch {
         for y in y0..=y1 {
             let row = ((y - self.y0) * self.w) as usize;
             for x in x0..=x1 {
-                let g = grain_px(self.gray[row + (x - self.x0) as usize], x, y);
+                let raw = self.gray[row + (x - self.x0) as usize];
+                if raw == 255 {
+                    continue; /* paper: the fill underneath is already white —
+                               * most of a render is background, skip it all
+                               * (no grain math, no write) */
+                }
+                let g = grain_px(raw, x, y);
                 fb.px(x, y, gray_to_565(gray16(g)));
             }
         }
@@ -70,7 +76,11 @@ impl RasterPatch {
                 if x < self.x0 || x >= self.x0 + self.w {
                     continue;
                 }
-                let g = grain_px(self.gray[row + (x - self.x0) as usize], x, y);
+                let raw = self.gray[row + (x - self.x0) as usize];
+                if raw == 255 {
+                    continue; /* paper never wins darkest-wins */
+                }
+                let g = grain_px(raw, x, y);
                 let idx = (by * bw + bx) as usize;
                 if g < buf[idx] {
                     buf[idx] = g;
@@ -134,6 +144,40 @@ fn gray16(g: u8) -> u8 {
 fn gray_to_565(g: u8) -> u16 {
     let g = g as u16;
     ((g >> 3) << 11) | ((g >> 2) << 5) | (g >> 3)
+}
+
+/// Crop a grayscale buffer to its non-white content (plus a small pad).
+/// Renders arrive with large paper margins; storing them means every
+/// later blit walks (and grains) acres of background for nothing.
+pub fn content_crop(gray: Vec<u8>, w: i32, h: i32) -> (Vec<u8>, i32, i32, i32, i32) {
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, -1i32, -1i32);
+    for y in 0..h {
+        let row = (y * w) as usize;
+        for x in 0..w {
+            if gray[row + x as usize] < 250 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if x1 < 0 {
+        return (gray, w, h, 0, 0); /* blank image: keep as-is */
+    }
+    let (x0, y0) = ((x0 - 2).max(0), (y0 - 2).max(0));
+    let (x1, y1) = ((x1 + 2).min(w - 1), (y1 + 2).min(h - 1));
+    let (cw, ch) = (x1 - x0 + 1, y1 - y0 + 1);
+    if cw == w && ch == h {
+        return (gray, w, h, 0, 0);
+    }
+    let mut out = vec![255u8; (cw * ch) as usize];
+    for y in 0..ch {
+        let src = ((y0 + y) * w + x0) as usize;
+        let dst = (y * cw) as usize;
+        out[dst..dst + cw as usize].copy_from_slice(&gray[src..src + cw as usize]);
+    }
+    (out, cw, ch, x0, y0)
 }
 
 /// Bilinear-resize a grayscale image to (dw, dh).
