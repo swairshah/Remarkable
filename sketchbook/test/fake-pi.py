@@ -127,6 +127,10 @@ for line in sys.stdin:
                         "raw_base64": base64.b64encode(raw2).decode(),
                         "rect": rg.get("rect"), "replace": rid})
         print(f"fake-pi: place(replace) -> {r2}", file=sys.stderr)
+        # "instruction acted on": remove the user's circle strokes (stands in
+        # for handwriting cleanup — exercises erase_ink + region re-render)
+        ei = tool_call({"cmd": "erase_ink", "rect": [100, 430, 720, 970]})
+        print(f"fake-pi: erase_ink -> {ei}", file=sys.stderr)
     else:
         emit({"type": "message_update",
               "assistantMessageEvent": {"type": "text_delta", "delta": "pass"}})

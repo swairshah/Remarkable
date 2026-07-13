@@ -211,6 +211,12 @@ pub fn grain_px(g: u8, x: i32, y: i32) -> u8 {
     (g + n * strength * k).clamp(0.0, 255.0) as u8
 }
 
+/// Grain + 16-level quantize + RGB565, in one step — for painting raster
+/// tones outside RasterPatch::blit (the edit crossfade frames).
+pub fn grain_565(g: u8, x: i32, y: i32) -> u16 {
+    gray_to_565(gray16(grain_px(g, x, y)))
+}
+
 /// SKETCHBOOK_GRAIN: 0 disables, 1.0 is the default 175-amplitude tooth,
 /// other values scale it (e.g. 1.4 for even grittier).
 fn grain_strength() -> f32 {
@@ -251,6 +257,32 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// Composite a set of raster patches over white into a region-sized gray
+/// buffer (row-major, region.w() x region.h()) — the crossfade endpoints.
+pub fn raster_composite(rasters: &[&RasterPatch], region: Rect) -> Vec<u8> {
+    let (rw, rh) = (region.w(), region.h());
+    let mut buf = vec![255u8; (rw * rh) as usize];
+    for rl in rasters {
+        let rr = rl.rect();
+        let x0 = region.x0.max(rr.x0);
+        let y0 = region.y0.max(rr.y0);
+        let x1 = region.x1.min(rr.x1);
+        let y1 = region.y1.min(rr.y1);
+        for y in y0..=y1 {
+            let src = ((y - rl.y0) * rl.w) as usize;
+            let dst = ((y - region.y0) * rw) as usize;
+            for x in x0..=x1 {
+                let g = rl.gray[src + (x - rl.x0) as usize];
+                let d = dst + (x - region.x0) as usize;
+                if g < buf[d] {
+                    buf[d] = g;
+                }
+            }
+        }
+    }
+    buf
 }
 
 /* ---- re-render helpers ----------------------------------------------------- */

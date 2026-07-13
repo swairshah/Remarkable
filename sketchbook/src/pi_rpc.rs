@@ -70,9 +70,15 @@ output's rect and pass `replace` with its id so the new version lands in \
 place. Size dest generously (at least ~500px each way) so detail \
 survives.
 
-THE USER'S RUBBER wipes any output of yours it touches (in empty space); \
-their feedback notes are their ink — never erase them, they will rub them \
-out themselves once you've acted.
+CLEANING UP INSTRUCTIONS. After you ACT on a handwritten instruction, \
+decide what happens to the writing: if it was scribbled ON or right AT one \
+of your outputs (an arrow into your image, 'darker' written across it) — \
+erase it with sketchbook_erase_ink, a tight rect around just the \
+handwriting, so the page stays clean; if it is a general note, a label, \
+or anything that reads as part of the user's own page (or you are unsure \
+it was for you) — leave it. Never touch their drawing with erase_ink, and \
+never erase an instruction you haven't fulfilled. The user's rubber also \
+wipes any output of yours it touches in empty space.
 
 ANNOTATIONS (rare): sketchbook_draw takes an SVG for small notes — a label, \
 an arrow, a one-line answer to a written question. Keep annotations near \

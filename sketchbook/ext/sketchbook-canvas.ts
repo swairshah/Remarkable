@@ -414,6 +414,43 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "sketchbook_erase_ink",
+    label: "sketchbook: erase the user's handwriting",
+    description:
+      "Remove the USER'S handwritten strokes that lie fully inside a rect — for cleaning " +
+      "up an instruction they wrote to you AFTER you have acted on it (e.g. 'darker' " +
+      "scribbled on your output, now applied). Only strokes entirely inside the rect are " +
+      "removed, so frame the handwriting tightly. NEVER use this on their drawing, and " +
+      "only erase notes that were clearly addressed to you and are now done. When in " +
+      "doubt, leave their ink alone — they can rub it out themselves.",
+    parameters: {
+      type: "object",
+      properties: {
+        rect: {
+          type: "array",
+          items: { type: "number" },
+          description: "Tight page rect [x0,y0,x1,y1] around the handwriting to remove",
+        },
+        page: {
+          type: "number",
+          description: "1-based page number; omit for the page currently on screen",
+        },
+      },
+      required: ["rect"],
+    },
+    async execute(_id: string, params: any) {
+      try {
+        const r = await call({ cmd: "erase_ink", rect: params.rect, page: params.page });
+        return r.ok
+          ? textResult(`Removed ${r.removed} handwritten strokes on page ${r.page}.`)
+          : textResult(`erase_ink failed: ${r.error}`, true);
+      } catch (e: any) {
+        return textResult(`erase_ink failed: ${e.message}`, true);
+      }
+    },
+  });
+
+  pi.registerTool({
     name: "sketchbook_erase",
     label: "sketchbook: erase one of your patches",
     description:

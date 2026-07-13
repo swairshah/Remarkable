@@ -76,6 +76,11 @@ const ANIM_BUDGET: f32 = 48.0;
 /// Page snapshots for pi are half scale (702x936).
 const SNAP_DIV: i32 = 2;
 
+/// Raster edit crossfade: old → new over a few 16-level frames instead of
+/// blinking into existence.
+const FADE_STEPS: u32 = 4;
+const FADE_STEP: Duration = Duration::from_millis(320);
+
 const ERASER_R: f32 = 22.0;
 
 /* pi watchdog: total silence (no stdout, no tool calls) this long while a
@@ -269,6 +274,17 @@ struct AnimStroke {
     bbox: Rect,
 }
 
+/// A raster edit mid-crossfade: region-sized gray composites of the old
+/// and new states, blended step by step with the 16-level waveform.
+struct RasterFade {
+    page: usize,
+    region: Rect,
+    from: Vec<u8>,
+    to: Vec<u8>,
+    step: u32, /* next step to paint, 1..=FADE_STEPS */
+    next_at: Instant,
+}
+
 /* ---- app ------------------------------------------------------------------ */
 
 struct App {
@@ -303,6 +319,9 @@ struct App {
     pi_alive_at: Option<Instant>,
     pi_respawn_at: Option<Instant>,
     pi_stall: Duration,
+
+    /* raster edit crossfade */
+    fade: Option<RasterFade>,
 
     /* AI ink animation */
     anim: VecDeque<AnimStroke>,
@@ -1150,7 +1169,10 @@ impl App {
                      * so what's on the glass is what's in the model */
                     self.commit_open_stroke();
                     if self.agent_page.is_none() {
-                        self.erase_pass(x as f32, y as f32);
+                        /* raster wipe ONLY on the initial press on a clean
+                         * spot: scrubbing strokes off a raster must never
+                         * cascade into wiping the raster itself */
+                        self.erase_pass(x as f32, y as f32, phase == PenPhase::Press);
                     } /* no eraser on the AGENT.md page — annotate instead */
                 } else {
                     self.ink_pass(phase, x, y, pressure);
@@ -1244,7 +1266,7 @@ impl App {
         true
     }
 
-    fn erase_pass(&mut self, x: f32, y: f32) {
+    fn erase_pass(&mut self, x: f32, y: f32, allow_raster_wipe: bool) {
         if let Some((gone, _)) = self.nb.page.erase_at(x, y, ERASER_R) {
             self.contact_changed = true;
             self.last_activity_page = self.nb.current;
@@ -1270,9 +1292,9 @@ impl App {
             let had_gray = self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
             self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
             self.restore_chrome_over(r);
-        } else {
-            /* no strokes under the rubber: maybe the user is wiping one of
-             * pi's raster outputs */
+        } else if allow_raster_wipe {
+            /* nothing under the rubber at first contact: maybe the user is
+             * wiping one of pi's raster outputs */
             self.wipe_raster_at(x as i32, y as i32);
         }
     }
@@ -1434,6 +1456,7 @@ impl App {
             "place" => self.ipc_place(req),
             "raster_get" => self.ipc_raster_get(req),
             "raster_erase" => self.ipc_raster_erase(req),
+            "erase_ink" => self.ipc_erase_ink(req),
             other => json!({ "ok": false, "error": format!("unknown cmd '{other}'") }),
         }
     }
@@ -1577,17 +1600,39 @@ impl App {
 
         if idx == self.nb.current {
             let mut repaint = Rect { x0: px, y0: py, x1: px + dw - 1, y1: py + dh - 1 };
+            let mut old: Option<ink::RasterPatch> = None;
             if let Some(rid) = replace {
                 if let Some(pos) = self.nb.rasters.iter().position(|r| r.id == rid) {
-                    repaint = repaint.union(self.nb.rasters.remove(pos).rect());
+                    let o = self.nb.rasters.remove(pos);
+                    repaint = repaint.union(o.rect());
+                    old = Some(o);
                 }
             }
             let id = self.nb.next_raster;
             self.nb.next_raster += 1;
-            self.nb.rasters.push(ink::RasterPatch { id, x0: px, y0: py, w: dw, h: dh, gray });
+            let new = ink::RasterPatch { id, x0: px, y0: py, w: dw, h: dh, gray };
+            /* an EDIT (replace) crossfades old → new instead of blinking;
+             * a fresh placement appears in one 16-level pass */
+            let can_fade = old.is_some() && self.agent_page.is_none() && self.lib_view.is_none();
+            if can_fade {
+                let region = repaint.pad(2).clamp_screen();
+                let from = ink::raster_composite(&[old.as_ref().unwrap()], region);
+                let to = ink::raster_composite(&[&new], region);
+                self.fade = Some(RasterFade {
+                    page: idx,
+                    region,
+                    from,
+                    to,
+                    step: 1,
+                    next_at: Instant::now(),
+                });
+            }
+            self.nb.rasters.push(new);
             self.nb.rasters_dirty = true;
             self.nb.save_current();
-            self.repaint_raster_rect(repaint.pad(2));
+            if !can_fade {
+                self.repaint_raster_rect(repaint.pad(2));
+            }
             self.live.status("render");
             self.last_activity_page = idx;
             println!("sketchbook: raster #{id} {dw}x{dh} placed at ({px},{py}) on page {}", idx + 1);
@@ -1671,6 +1716,103 @@ impl App {
                 return json!({ "ok": false, "error": format!("save rasters: {e}") });
             }
             json!({ "ok": true, "page": idx + 1 })
+        }
+    }
+
+    /// One crossfade frame: blend old→new composites, stamp strokes over,
+    /// push with the 16-level waveform. The deterministic grain field keeps
+    /// the tooth stable across frames, so the morph reads as the drawing
+    /// changing — not as noise crawling.
+    fn fade_tick(&mut self) {
+        let Some(mut f) = self.fade.take() else { return };
+        if Instant::now() < f.next_at {
+            self.fade = Some(f);
+            return;
+        }
+        /* never fight the writer; menus repaint on close anyway */
+        if self.cur_stroke.is_some()
+            || self.last_contact.is_some_and(|t| t.elapsed() < Duration::from_millis(350))
+        {
+            f.next_at = Instant::now() + Duration::from_millis(200);
+            self.fade = Some(f);
+            return;
+        }
+        if f.page != self.nb.current || self.agent_page.is_some() || self.lib_view.is_some() {
+            return; /* page turned / view changed: model is truth, fade dropped */
+        }
+        if f.step >= FADE_STEPS {
+            /* final frame = the model itself (strokes included) */
+            self.repaint_raster_rect(f.region);
+            return;
+        }
+        let t = f.step as f32 / FADE_STEPS as f32;
+        let region = f.region;
+        let rw = region.w();
+        for y in region.y0..=region.y1 {
+            let row = ((y - region.y0) * rw) as usize;
+            for x in region.x0..=region.x1 {
+                let i = row + (x - region.x0) as usize;
+                let a = f.from[i] as f32;
+                let b = f.to[i] as f32;
+                let v = (a + (b - a) * t).round().clamp(0.0, 255.0) as u8;
+                self.fb.px(x, y, ink::grain_565(v, x, y));
+            }
+        }
+        self.nb.page.stamp_region(&mut self.fb, region);
+        self.disp.update(region.x0, region.y0, region.w(), region.h(), Wave::Text);
+        f.step += 1;
+        f.next_at = Instant::now() + FADE_STEP;
+        self.fade = Some(f);
+    }
+
+    /// Remove USER strokes that lie fully inside a rect — the agent
+    /// cleaning up handwritten instructions it has acted on. Fully-inside
+    /// keeps a sloppy rect from chopping the user's drawing.
+    fn ipc_erase_ink(&mut self, req: &Value) -> Value {
+        let idx = self.req_page(req);
+        if idx >= self.nb.count {
+            return json!({ "ok": false, "error": format!("no page {} (sketchbook has {})", idx + 1, self.nb.count) });
+        }
+        let Some(rect) = req_rect(req, "rect") else {
+            return json!({ "ok": false, "error": "missing 'rect' [x0,y0,x1,y1]" });
+        };
+        let r = rect.clamp_screen();
+        let inside = |b: &Rect| b.x0 >= r.x0 && b.x1 <= r.x1 && b.y0 >= r.y0 && b.y1 <= r.y1;
+
+        if idx == self.nb.current {
+            let before = self.nb.page.strokes.len();
+            self.nb.page.strokes.retain(|s| !ink::stroke_bbox(s).as_ref().is_some_and(inside));
+            let removed = before - self.nb.page.strokes.len();
+            if removed == 0 {
+                return json!({ "ok": false, "error": "no user strokes lie fully inside that rect" });
+            }
+            self.nb.page.dirty = true;
+            self.nb.save_current();
+            let rr = r.pad(4).clamp_screen();
+            if self.agent_page.is_none() && self.lib_view.is_none() {
+                let had_gray = self.nb.page.render_region(&mut self.fb, rr, &self.nb.rasters);
+                self.disp.update(rr.x0, rr.y0, rr.w(), rr.h(), if had_gray { Wave::Text } else { Wave::Ink });
+                self.deghost_at = Some(Instant::now() + Duration::from_millis(900));
+                self.restore_chrome_over(rr);
+            }
+            println!("sketchbook: erased {removed} user strokes in rect on page {}", idx + 1);
+            json!({ "ok": true, "page": idx + 1, "removed": removed })
+        } else {
+            let path = self.nb.page_path(idx);
+            let Some(mut p) = Page::load(&path) else {
+                return json!({ "ok": false, "error": "page file unreadable" });
+            };
+            let before = p.strokes.len();
+            p.strokes.retain(|s| !ink::stroke_bbox(s).as_ref().is_some_and(inside));
+            let removed = before - p.strokes.len();
+            if removed == 0 {
+                return json!({ "ok": false, "error": "no user strokes lie fully inside that rect" });
+            }
+            p.dirty = true;
+            if let Err(e) = p.save(&path) {
+                return json!({ "ok": false, "error": format!("save: {e}") });
+            }
+            json!({ "ok": true, "page": idx + 1, "removed": removed })
         }
     }
 
@@ -2251,6 +2393,7 @@ fn main() -> std::process::ExitCode {
         quiet,
         pi_font,
         lib_view: None,
+        fade: None,
         deghost_at: None,
         live: live::Live::new(),
     };
@@ -2396,6 +2539,7 @@ fn main() -> std::process::ExitCode {
         if !app.anim.is_empty() && app.last_anim.elapsed() >= ANIM_TICK {
             app.anim_tick();
         }
+        app.fade_tick();
         app.maybe_send_page();
         app.live.tick(app.nb.current);
         app.check_pi_health();
@@ -2461,6 +2605,9 @@ fn next_timeout(app: &App) -> i32 {
     }
     if let Some(at) = app.deghost_at {
         soonest(at.saturating_duration_since(Instant::now()));
+    }
+    if let Some(f) = &app.fade {
+        soonest(f.next_at.saturating_duration_since(Instant::now()));
     }
     if app.live.enabled {
         /* batch flushes + reconnect checks while streaming */
