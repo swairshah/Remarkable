@@ -19,6 +19,7 @@ pub use libreink_page::*;
 /// One grayscale raster the agent placed on the page. Stored at final
 /// on-page size; (x0,y0) is its top-left in page coordinates. Id-tracked
 /// like ink patches so the agent (or the rubber) can remove or replace it.
+#[derive(Clone)]
 pub struct RasterPatch {
     pub id: u64,
     pub x0: i32,

@@ -87,6 +87,12 @@ const TB_GENERATE: u32 = 2;
 const TB_QUIET: u32 = 3;
 const TB_REFRESH: u32 = 4;
 const TB_ERASER: u32 = 5;
+const TB_UNDO: u32 = 6;
+const TB_REDO: u32 = 7;
+
+/// Undo depth (each entry clones the page's vectors; raster buffers are
+/// cloned only when the op touched them).
+const UNDO_CAP: usize = 16;
 
 /// What the marker's rubber end does.
 #[derive(Clone, Copy, PartialEq)]
@@ -142,7 +148,16 @@ impl EraserMode {
 /// loop for the stroke to join the selection.
 const SEL_INSIDE: f32 = 0.6;
 /// Drag preview repaint throttle.
-const DRAG_TICK: Duration = Duration::from_millis(45);
+const DRAG_TICK: Duration = Duration::from_millis(70);
+
+/// One undo step: the page's vector content, plus the rasters when the
+/// recorded operation touched them (None = "rasters were not changed by
+/// this op", so undoing it must not roll them back).
+struct UndoState {
+    strokes: Vec<Stroke>,
+    patches: Vec<ink::Patch>,
+    rasters: Option<Vec<ink::RasterPatch>>,
+}
 
 const ERASER_R: f32 = 22.0;
 
@@ -433,7 +448,18 @@ enum Sel {
     Armed,
     Lasso { pts: Vec<(f32, f32)> },
     Have { sel: Selection },
-    Drag { sel: Selection, sx: i32, sy: i32, lx: i32, ly: i32, drawn: Option<Rect>, last_tick: Instant },
+    Drag {
+        sel: Selection,
+        sx: i32,
+        sy: i32,
+        lx: i32,
+        ly: i32,
+        drawn: Option<Rect>,
+        /// Save-under: the fb band beneath the preview marquee — erasing
+        /// it is a memcpy, not a model re-render (the drag stays snappy).
+        saved: Option<(i32, Vec<u16>)>,
+        last_tick: Instant,
+    },
 }
 
 /// A raster edit mid-crossfade: region-sized gray composites of the old
@@ -493,6 +519,12 @@ struct App {
     /* the rubber's mode + the region-eraser's in-flight loop */
     eraser: EraserMode,
     rub_loop: Option<Vec<(f32, f32)>>,
+
+    /* undo/redo: current-page states; a pending checkpoint is committed
+     * only when the rubber contact actually changes something */
+    undo: Vec<UndoState>,
+    redo: Vec<UndoState>,
+    pending_undo: Option<UndoState>,
 
     /* AI ink animation */
     anim: VecDeque<AnimStroke>,
@@ -1321,7 +1353,7 @@ impl App {
             toolbar::Hit::Item(TB_QUIET) => {
                 self.quiet = !self.quiet;
                 save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser);
-                let label = if self.quiet { "QUIET" } else { "WATCH" };
+                let label = if self.quiet { "OFF" } else { "AUTO" };
                 for it in &mut self.tb.items {
                     if it.id == TB_QUIET {
                         it.label = label;
@@ -1343,6 +1375,8 @@ impl App {
                 }
                 self.draw_toolbar();
             }
+            toolbar::Hit::Item(TB_UNDO) => self.do_undo(),
+            toolbar::Hit::Item(TB_REDO) => self.do_redo(),
             toolbar::Hit::Item(TB_REFRESH) => {
                 self.disp.full_refresh();
             }
@@ -1358,6 +1392,92 @@ impl App {
             }
         }
         self.draw_toolbar();
+    }
+
+    /* -- undo / redo -- */
+
+    fn snapshot_state(&self, with_rasters: bool) -> UndoState {
+        UndoState {
+            strokes: self.nb.page.strokes.clone(),
+            patches: self.nb.page.patches.clone(),
+            rasters: with_rasters.then(|| self.nb.rasters.clone()),
+        }
+    }
+
+    /// Record an undo step NOW (the mutation follows immediately).
+    fn checkpoint(&mut self, with_rasters: bool) {
+        let st = self.snapshot_state(with_rasters);
+        self.undo.push(st);
+        if self.undo.len() > UNDO_CAP {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        self.pending_undo = None;
+    }
+
+    /// Stash a checkpoint that only becomes an undo step if the contact
+    /// actually changes something (a dry rubber pass costs nothing).
+    fn checkpoint_pending(&mut self, with_rasters: bool) {
+        self.pending_undo = Some(self.snapshot_state(with_rasters));
+    }
+
+    fn commit_pending_undo(&mut self) {
+        if let Some(st) = self.pending_undo.take() {
+            self.push_undo(st);
+        }
+    }
+
+    fn push_undo(&mut self, st: UndoState) {
+        self.undo.push(st);
+        if self.undo.len() > UNDO_CAP {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    fn do_undo(&mut self) {
+        let Some(prev) = self.undo.pop() else { return };
+        let cur = self.snapshot_state(prev.rasters.is_some());
+        self.redo.push(cur);
+        self.apply_state(prev);
+        println!("sketchbook: undo ({} left)", self.undo.len());
+    }
+
+    fn do_redo(&mut self) {
+        let Some(next) = self.redo.pop() else { return };
+        let cur = self.snapshot_state(next.rasters.is_some());
+        self.undo.push(cur);
+        self.apply_state(next);
+        println!("sketchbook: redo ({} left)", self.redo.len());
+    }
+
+    fn apply_state(&mut self, st: UndoState) {
+        self.drop_selection();
+        self.rub_loop = None;
+        self.pending_undo = None;
+        self.anim.clear();
+        self.anim_dirty = None;
+        self.anim_settle = None;
+        self.fade = None;
+        self.nb.page.strokes = st.strokes;
+        self.nb.page.patches = st.patches;
+        let max_patch = self.nb.page.patches.iter().map(|p| p.id + 1).max().unwrap_or(0);
+        self.nb.page.next_patch = self.nb.page.next_patch.max(max_patch);
+        if let Some(r) = st.rasters {
+            let max_raster = r.iter().map(|x| x.id + 1).max().unwrap_or(1);
+            self.nb.next_raster = self.nb.next_raster.max(max_raster);
+            self.nb.rasters = r;
+            self.nb.rasters_dirty = true;
+        }
+        self.nb.page.dirty = true;
+        self.nb.save_current();
+        self.page_changed = true;
+        if self.sidebar.is_none() && self.agent_page.is_none() && self.lib_view.is_none() {
+            self.nb.page.render_full(&mut self.fb, &self.nb.rasters);
+            self.disp.update(0, 0, FB_W, FB_H, Wave::Page);
+            self.draw_menu_icon();
+            self.draw_toolbar();
+        }
     }
 
     /* -- lasso select: circle objects, drag them around -- */
@@ -1412,6 +1532,7 @@ impl App {
                         lx: x,
                         ly: y,
                         drawn: None,
+                        saved: None,
                         last_tick: Instant::now(),
                     });
                 } else {
@@ -1439,24 +1560,36 @@ impl App {
             (Sel::Lasso { pts }, PenPhase::Release) => {
                 self.finish_lasso(pts);
             }
-            (Sel::Drag { sel, sx, sy, lx: _, ly: _, drawn, mut last_tick }, PenPhase::Move) => {
+            (Sel::Drag { sel, sx, sy, lx: _, ly: _, drawn, mut saved, mut last_tick }, PenPhase::Move) => {
                 let mut new_drawn = drawn;
                 if last_tick.elapsed() >= DRAG_TICK {
                     last_tick = Instant::now();
                     let target = offset_rect(sel.bbox, x - sx, y - sy).clamp_screen();
                     if drawn != Some(target) {
-                        if let Some(d) = drawn {
-                            self.erase_marquee(d);
+                        /* erase the old preview by pasting the saved band
+                         * back — a memcpy, no model re-render, no lag */
+                        if let (Some(d), Some((y0, band))) = (drawn, saved.take()) {
+                            self.fb.paste_band(y0, &band);
+                            let d = d.pad(8).clamp_screen();
+                            self.disp.update(d.x0, d.y0, d.w(), d.h(), Wave::Ink);
                         }
+                        let keep = target.pad(9).clamp_screen();
+                        saved = Some((keep.y0, self.fb.copy_band(keep.y0, keep.y1 + 1)));
                         self.draw_marquee(target);
                         new_drawn = Some(target);
                     }
                 }
-                self.sel = Some(Sel::Drag { sel, sx, sy, lx: x, ly: y, drawn: new_drawn, last_tick });
+                self.sel = Some(Sel::Drag { sel, sx, sy, lx: x, ly: y, drawn: new_drawn, saved, last_tick });
             }
-            (Sel::Drag { sel, sx, sy, lx, ly, drawn, .. }, PenPhase::Release) => {
+            (Sel::Drag { sel, sx, sy, lx, ly, drawn, saved, .. }, PenPhase::Release) => {
                 let _ = (lx, ly);
-                self.apply_drag(sel, x - sx, y - sy, drawn);
+                /* restore under the last preview before the real move */
+                if let (Some(d), Some((y0, band))) = (drawn, saved) {
+                    self.fb.paste_band(y0, &band);
+                    let d = d.pad(8).clamp_screen();
+                    self.disp.update(d.x0, d.y0, d.w(), d.h(), Wave::Ink);
+                }
+                self.apply_drag(sel, x - sx, y - sy);
             }
             (s, _) => self.sel = Some(s),
         }
@@ -1526,16 +1659,13 @@ impl App {
         }
     }
 
-    fn apply_drag(&mut self, sel: Selection, dx: i32, dy: i32, drawn: Option<Rect>) {
-        /* wipe the preview marquee */
-        if let Some(d) = drawn {
-            self.erase_marquee(d);
-        }
+    fn apply_drag(&mut self, sel: Selection, dx: i32, dy: i32) {
         if dx == 0 && dy == 0 {
             self.draw_marquee(sel.bbox);
             self.sel = Some(Sel::Have { sel });
             return;
         }
+        self.checkpoint(!sel.rasters.is_empty());
         let (fdx, fdy) = (dx as f32, dy as f32);
         for &i in &sel.strokes {
             if let Some(s) = self.nb.page.strokes.get_mut(i) {
@@ -1602,22 +1732,7 @@ impl App {
         self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
     }
 
-    /// Restore the page under a marquee's four edges (thin strips — cheap).
-    fn erase_marquee(&mut self, b: Rect) {
-        let b = b.pad(6).clamp_screen();
-        let t = 4;
-        let strips = [
-            Rect { x0: b.x0 - t, y0: b.y0 - t, x1: b.x1 + t, y1: b.y0 + t },
-            Rect { x0: b.x0 - t, y0: b.y1 - t, x1: b.x1 + t, y1: b.y1 + t },
-            Rect { x0: b.x0 - t, y0: b.y0 - t, x1: b.x0 + t, y1: b.y1 + t },
-            Rect { x0: b.x1 - t, y0: b.y0 - t, x1: b.x1 + t, y1: b.y1 + t },
-        ];
-        for s in strips {
-            let s = s.clamp_screen();
-            self.nb.page.render_region(&mut self.fb, s, &self.nb.rasters);
-            self.disp.update(s.x0, s.y0, s.w(), s.h(), Wave::Ink);
-        }
-    }
+
 
     /* -- page turning -- */
 
@@ -1646,6 +1761,9 @@ impl App {
         self.anim_settle = None;
         self.anim_dirty = None;
         self.drop_selection(); /* selection indices are per-page */
+        self.undo.clear(); /* undo history is per page-state */
+        self.redo.clear();
+        self.pending_undo = None;
         if !self.nb.flip(delta) {
             self.show_page_indicator(); /* at the edge: just show where we are */
             return;
@@ -1731,6 +1849,10 @@ impl App {
                     /* commit any open stroke before switching to the rubber,
                      * so what's on the glass is what's in the model */
                     self.commit_open_stroke();
+                    if phase == PenPhase::Press {
+                        /* becomes an undo step only if the rub changes something */
+                        self.checkpoint_pending(true);
+                    }
                     if self.agent_page.is_none() {
                         match self.eraser {
                             /* raster wipe ONLY on the initial press on a
@@ -1752,6 +1874,7 @@ impl App {
                 if self.rub_loop.is_some() {
                     self.finish_rub_loop(); /* region eraser: the lift deletes */
                 }
+                self.pending_undo = None; /* dry rubber contact: no undo step */
                 self.commit_open_stroke();
                 if self.contact_changed {
                     if self.agent_page.is_none() {
@@ -1777,6 +1900,7 @@ impl App {
                 self.contact_changed = true;
             }
             None => {
+                self.checkpoint(false); /* one undo step per stroke */
                 self.nb.page.strokes.push(s);
                 self.nb.page.dirty = true;
                 self.contact_changed = true;
@@ -1826,6 +1950,7 @@ impl App {
             return false;
         };
         let rl = self.nb.rasters.remove(pos);
+        self.commit_pending_undo();
         let r = rl.rect().pad(2).clamp_screen();
         self.nb.rasters_dirty = true;
         self.nb.save_current();
@@ -1884,6 +2009,7 @@ impl App {
         if !changed {
             return;
         }
+        self.commit_pending_undo();
         self.nb.page.dirty = true;
         self.contact_changed = true;
         self.last_activity_page = self.nb.current;
@@ -1981,6 +2107,7 @@ impl App {
             self.nb.rasters = kept_r;
         }
         if changed {
+            self.commit_pending_undo();
             self.nb.page.dirty = true;
             self.contact_changed = true;
             self.last_activity_page = self.nb.current;
@@ -1998,6 +2125,7 @@ impl App {
 
     fn erase_pass(&mut self, x: f32, y: f32, allow_raster_wipe: bool) {
         if let Some((gone, _)) = self.nb.page.erase_at(x, y, ERASER_R) {
+            self.commit_pending_undo();
             self.contact_changed = true;
             self.last_activity_page = self.nb.current;
             self.live.rub(x, y);
@@ -2339,6 +2467,7 @@ impl App {
         let (px, py) = (dest.x0 + (dest.w() - dw) / 2, dest.y0 + (dest.h() - dh) / 2);
 
         if idx == self.nb.current {
+            self.checkpoint(true);
             let mut repaint = Rect { x0: px, y0: py, x1: px + dw - 1, y1: py + dh - 1 };
             let mut old: Option<ink::RasterPatch> = None;
             if let Some(rid) = replace {
@@ -2439,6 +2568,7 @@ impl App {
             let Some(pos) = self.nb.rasters.iter().position(|r| r.id == id) else {
                 return json!({ "ok": false, "error": format!("no raster #{id} on page {}", idx + 1) });
             };
+            self.checkpoint(true);
             let rl = self.nb.rasters.remove(pos);
             self.nb.rasters_dirty = true;
             self.nb.save_current();
@@ -2520,12 +2650,14 @@ impl App {
         let inside = |b: &Rect| b.x0 >= r.x0 && b.x1 <= r.x1 && b.y0 >= r.y0 && b.y1 <= r.y1;
 
         if idx == self.nb.current {
+            let st = self.snapshot_state(false);
             let before = self.nb.page.strokes.len();
             self.nb.page.strokes.retain(|s| !ink::stroke_bbox(s).as_ref().is_some_and(inside));
             let removed = before - self.nb.page.strokes.len();
             if removed == 0 {
                 return json!({ "ok": false, "error": "no user strokes lie fully inside that rect" });
             }
+            self.push_undo(st);
             self.nb.page.dirty = true;
             self.nb.save_current();
             let rr = r.pad(4).clamp_screen();
@@ -2584,6 +2716,7 @@ impl App {
         }
         let idx = self.req_page(req);
         if idx == self.nb.current {
+            self.checkpoint(false);
             let id = self.nb.page.add_patch(strokes, Vec::new());
             let patch = self.nb.page.patches.last().unwrap();
             let bbox = ink::patch_bbox(patch).map(|b| b.clamp_screen());
@@ -2655,8 +2788,10 @@ impl App {
                     true
                 }
             });
+            let st = self.snapshot_state(false);
             match self.nb.page.remove_patch(id) {
                 Some(b) => {
+                    self.push_undo(st);
                     if self.agent_page.is_none() && self.sidebar.is_none() && self.lib_view.is_none() {
                         let r = region.map_or(b, |r| r.union(b)).pad(4).clamp_screen();
                         let had_gray = self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
@@ -3137,10 +3272,12 @@ fn main() -> std::process::ExitCode {
         tb: {
             let mut tb = toolbar::EdgeToolbar::new(FB_W - 52, 96);
             tb.items = vec![
+                toolbar::Item { id: TB_UNDO, icon: toolbar::Icon::Undo, label: "UNDO", active: false },
+                toolbar::Item { id: TB_REDO, icon: toolbar::Icon::Redo, label: "REDO", active: false },
                 toolbar::Item { id: TB_SELECT, icon: toolbar::Icon::Lasso, label: "SELECT", active: false },
                 toolbar::Item { id: TB_ERASER, icon: eraser.icon(), label: eraser.label(), active: eraser != EraserMode::Object },
-                toolbar::Item { id: TB_GENERATE, icon: toolbar::Icon::Spark, label: "RENDER", active: false },
-                toolbar::Item { id: TB_QUIET, icon: toolbar::Icon::Eye, label: "WATCH", active: true },
+                toolbar::Item { id: TB_GENERATE, icon: toolbar::Icon::Squiggle, label: "RENDER", active: false },
+                toolbar::Item { id: TB_QUIET, icon: toolbar::Icon::Pi, label: if quiet { "OFF" } else { "AUTO" }, active: !quiet },
                 toolbar::Item { id: TB_REFRESH, icon: toolbar::Icon::Refresh, label: "CLEAN", active: false },
             ];
             tb
@@ -3149,6 +3286,9 @@ fn main() -> std::process::ExitCode {
         pen_chrome: false,
         eraser,
         rub_loop: None,
+        undo: Vec::new(),
+        redo: Vec::new(),
+        pending_undo: None,
         deghost_at: None,
         live: live::Live::new(),
     };
