@@ -1,28 +1,26 @@
 //! The page model lives in libreink-page; this module re-exports it and
 //! keeps what is genuinely this app's: the `Sketchbook` page container,
-//! the per-page AI RENDER LAYER (a grayscale raster the agent generates
-//! from the user's sketch, blitted under the strokes on the right panel),
-//! and the fill-then-stamp re-render helpers.
+//! the per-page RASTER PATCHES (grayscale images the agent generates and
+//! places anywhere on the page, blitted UNDER the strokes), and the
+//! fill-then-stamp re-render helpers.
 //!
-//! A sketchbook page is a SPREAD: the left panel (x < PANEL_W) is the
-//! user's sketch — vector pen strokes, erasable — and the right panel is
-//! the agent's rendered version of it, a 16-gray raster. Re-rendering a
-//! region paints white, blits the raster where it applies, then stamps
-//! strokes on top, so erasing ink never damages the render and vice versa.
+//! The whole page is a shared canvas: the user's vector pen strokes and
+//! the agent's raster outputs interleave. Re-rendering a region paints
+//! white, blits every intersecting raster, then stamps strokes on top —
+//! so erasing ink never damages a render, and wiping a render (rubber on
+//! it, away from ink) never touches the ink.
 
 use libreink_core::fb::{Framebuffer, SCREEN_H, SCREEN_W};
 
 pub use libreink_page::*;
 
-/// The divider: left of it the user sketches, right of it the agent renders.
-pub const PANEL_W: i32 = SCREEN_W / 2;
+/* ---- raster patches -------------------------------------------------------- */
 
-/* ---- the AI render layer -------------------------------------------------- */
-
-/// One grayscale raster placed on the page (the agent's render of the
-/// sketch). Stored at final on-page size; (x0,y0) is its top-left in page
-/// coordinates.
-pub struct RenderLayer {
+/// One grayscale raster the agent placed on the page. Stored at final
+/// on-page size; (x0,y0) is its top-left in page coordinates. Id-tracked
+/// like ink patches so the agent (or the rubber) can remove or replace it.
+pub struct RasterPatch {
+    pub id: u64,
     pub x0: i32,
     pub y0: i32,
     pub w: i32,
@@ -30,11 +28,15 @@ pub struct RenderLayer {
     pub gray: Vec<u8>, /* w*h, row-major, 0=black 255=white */
 }
 
-const RENDER_MAGIC: &[u8; 4] = b"SKR1";
+const RASTER_MAGIC: &[u8; 4] = b"SKR2";
 
-impl RenderLayer {
+impl RasterPatch {
     pub fn rect(&self) -> Rect {
         Rect { x0: self.x0, y0: self.y0, x1: self.x0 + self.w - 1, y1: self.y0 + self.h - 1 }
+    }
+
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x0 && x < self.x0 + self.w && y >= self.y0 && y < self.y0 + self.h
     }
 
     /// Paint the raster's intersection with `clip` into the framebuffer.
@@ -76,28 +78,51 @@ impl RenderLayer {
         }
     }
 
-    pub fn save(&self, path: &str) -> std::io::Result<()> {
-        let mut out = Vec::with_capacity(20 + self.gray.len());
-        out.extend_from_slice(RENDER_MAGIC);
-        for v in [self.x0, self.y0, self.w, self.h] {
+}
+
+/// Save every raster patch of a page into one file ("SKR2": count, then
+/// per patch id/x0/y0/w/h + bytes). An empty list removes the file.
+pub fn save_rasters(path: &str, rasters: &[RasterPatch]) -> std::io::Result<()> {
+    if rasters.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return Ok(());
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(RASTER_MAGIC);
+    out.extend_from_slice(&(rasters.len() as u32).to_le_bytes());
+    for r in rasters {
+        out.extend_from_slice(&r.id.to_le_bytes());
+        for v in [r.x0, r.y0, r.w, r.h] {
             out.extend_from_slice(&v.to_le_bytes());
         }
-        out.extend_from_slice(&self.gray);
-        std::fs::write(path, out)
+        out.extend_from_slice(&r.gray);
     }
+    std::fs::write(path, out)
+}
 
-    pub fn load(path: &str) -> Option<RenderLayer> {
-        let b = std::fs::read(path).ok()?;
-        if b.len() < 20 || &b[0..4] != RENDER_MAGIC {
-            return None;
-        }
-        let rd = |i: usize| i32::from_le_bytes(b[i..i + 4].try_into().unwrap());
-        let (x0, y0, w, h) = (rd(4), rd(8), rd(12), rd(16));
-        if w <= 0 || h <= 0 || b.len() < 20 + (w * h) as usize {
-            return None;
-        }
-        Some(RenderLayer { x0, y0, w, h, gray: b[20..20 + (w * h) as usize].to_vec() })
+pub fn load_rasters(path: &str) -> Vec<RasterPatch> {
+    let Some(b) = std::fs::read(path).ok() else { return Vec::new() };
+    if b.len() < 8 || &b[0..4] != RASTER_MAGIC {
+        return Vec::new();
     }
+    let count = u32::from_le_bytes(b[4..8].try_into().unwrap()) as usize;
+    let mut out = Vec::with_capacity(count);
+    let mut pos = 8usize;
+    for _ in 0..count {
+        if pos + 24 > b.len() {
+            break;
+        }
+        let id = u64::from_le_bytes(b[pos..pos + 8].try_into().unwrap());
+        let rd = |i: usize| i32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+        let (x0, y0, w, h) = (rd(pos + 8), rd(pos + 12), rd(pos + 16), rd(pos + 20));
+        pos += 24;
+        if w <= 0 || h <= 0 || pos + (w * h) as usize > b.len() {
+            break;
+        }
+        out.push(RasterPatch { id, x0, y0, w, h, gray: b[pos..pos + (w * h) as usize].to_vec() });
+        pos += (w * h) as usize;
+    }
+    out
 }
 
 /// Snap an 8-bit gray to the 16 levels GC16 can actually show.
@@ -230,28 +255,20 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 /* ---- re-render helpers ----------------------------------------------------- */
 
-/// Fill-white, blit the render layer, stamp strokes, redraw the divider.
+/// Fill-white, blit every intersecting raster patch, stamp strokes.
 /// The bool is "prefer the 16-level waveform" — true when the region
-/// touches the gray raster (DU would posterize it).
+/// touches gray raster (DU would posterize it).
 pub trait RenderExt {
-    fn render_region(&self, fb: &mut Framebuffer, r: Rect, render: Option<&RenderLayer>) -> bool;
-    fn render_full(&self, fb: &mut Framebuffer, render: Option<&RenderLayer>);
-}
-
-fn draw_divider(fb: &mut Framebuffer, r: Rect) {
-    if r.x0 <= PANEL_W && r.x1 >= PANEL_W - 1 {
-        let y0 = r.y0.max(0);
-        let y1 = r.y1.min(SCREEN_H - 1);
-        fb.fill_rect(PANEL_W - 1, y0, 2, y1 - y0 + 1, crate::draw::BLACK);
-    }
+    fn render_region(&self, fb: &mut Framebuffer, r: Rect, rasters: &[RasterPatch]) -> bool;
+    fn render_full(&self, fb: &mut Framebuffer, rasters: &[RasterPatch]);
 }
 
 impl RenderExt for Page {
-    fn render_region(&self, fb: &mut Framebuffer, r: Rect, render: Option<&RenderLayer>) -> bool {
+    fn render_region(&self, fb: &mut Framebuffer, r: Rect, rasters: &[RasterPatch]) -> bool {
         let r = r.clamp_screen();
         fb.fill_rect(r.x0, r.y0, r.w(), r.h(), crate::draw::WHITE);
         let mut had_gray = false;
-        if let Some(rl) = render {
+        for rl in rasters {
             let rr = rl.rect();
             if rr.x1 >= r.x0 && rr.x0 <= r.x1 && rr.y1 >= r.y0 && rr.y0 <= r.y1 {
                 rl.blit(fb, r);
@@ -259,29 +276,23 @@ impl RenderExt for Page {
             }
         }
         self.stamp_region(fb, r);
-        draw_divider(fb, r);
         had_gray
     }
-    fn render_full(&self, fb: &mut Framebuffer, render: Option<&RenderLayer>) {
+    fn render_full(&self, fb: &mut Framebuffer, rasters: &[RasterPatch]) {
         self.render_region(
             fb,
             Rect { x0: 0, y0: 0, x1: SCREEN_W - 1, y1: SCREEN_H - 1 },
-            render,
+            rasters,
         );
     }
 }
 
-/// Snapshot with the render layer underneath the strokes (what pi sees).
-pub fn snapshot_with_render(page: &Page, render: Option<&RenderLayer>, div: i32) -> (i32, i32, Vec<u8>) {
+/// Snapshot with the raster patches underneath the strokes (what pi sees).
+pub fn snapshot_with_rasters(page: &Page, rasters: &[RasterPatch], div: i32) -> (i32, i32, Vec<u8>) {
     let (w, h) = (SCREEN_W / div, SCREEN_H / div);
     let mut buf = vec![255u8; (w * h) as usize];
-    if let Some(rl) = render {
+    for rl in rasters {
         rl.blit_snapshot(&mut buf, div);
-    }
-    /* the divider, so pi sees the spread structure */
-    let dx = (PANEL_W / div).min(w - 1);
-    for y in 0..h {
-        buf[(y * w + dx) as usize] = 0;
     }
     page.snapshot_into(&mut buf, div);
     (w, h, buf)
@@ -294,8 +305,9 @@ pub struct Sketchbook {
     pub current: usize,
     pub count: usize,
     pub page: Page,
-    pub render: Option<RenderLayer>,
-    pub render_dirty: bool,
+    pub rasters: Vec<RasterPatch>,
+    pub rasters_dirty: bool,
+    pub next_raster: u64,
 }
 
 fn data_dir() -> String {
@@ -321,9 +333,10 @@ impl Sketchbook {
             count = 1;
             Page::default()
         };
-        let render = RenderLayer::load(&Self::render_path_of(&dir, current));
+        let rasters = load_rasters(&Self::render_path_of(&dir, current));
+        let next_raster = rasters.iter().map(|r| r.id + 1).max().unwrap_or(1);
         println!("sketchbook: data dir {dir} ({count} pages, opening page {})", current + 1);
-        Sketchbook { dir, current, count, page, render, render_dirty: false }
+        Sketchbook { dir, current, count, page, rasters, rasters_dirty: false, next_raster }
     }
 
     fn path_of(dir: &str, i: usize) -> String {
@@ -349,19 +362,12 @@ impl Sketchbook {
                 eprintln!("sketchbook: save {path}: {e}");
             }
         }
-        if self.render_dirty {
+        if self.rasters_dirty {
             let path = Self::render_path_of(&self.dir, self.current);
-            match &self.render {
-                Some(rl) => {
-                    if let Err(e) = rl.save(&path) {
-                        eprintln!("sketchbook: save render {path}: {e}");
-                    }
-                }
-                None => {
-                    let _ = std::fs::remove_file(&path);
-                }
+            if let Err(e) = save_rasters(&path, &self.rasters) {
+                eprintln!("sketchbook: save rasters {path}: {e}");
             }
-            self.render_dirty = false;
+            self.rasters_dirty = false;
         }
     }
 
@@ -375,22 +381,24 @@ impl Sketchbook {
         }
         let target = target as usize;
         if target >= self.count {
-            if self.page.is_empty() && self.render.is_none() {
+            if self.page.is_empty() && self.rasters.is_empty() {
                 return false; /* don't stack empty pages */
             }
             self.save_current();
             self.count += 1;
             self.current = self.count - 1;
             self.page = Page::default();
-            self.render = None;
-            self.render_dirty = false;
+            self.rasters = Vec::new();
+            self.rasters_dirty = false;
+            self.next_raster = 1;
             return true;
         }
         self.save_current();
         self.current = target;
         self.page = Page::load(&Self::path_of(&self.dir, target)).unwrap_or_default();
-        self.render = RenderLayer::load(&Self::render_path_of(&self.dir, target));
-        self.render_dirty = false;
+        self.rasters = load_rasters(&Self::render_path_of(&self.dir, target));
+        self.next_raster = self.rasters.iter().map(|r| r.id + 1).max().unwrap_or(1);
+        self.rasters_dirty = false;
         true
     }
 }

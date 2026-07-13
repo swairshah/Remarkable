@@ -371,7 +371,7 @@ impl App {
     fn clear_page_indicator(&mut self) {
         self.indicator_until = None;
         let r = self.indicator_rect();
-        let had_gray = self.nb.page.render_region(&mut self.fb, r, self.nb.render.as_ref());
+        let had_gray = self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
         self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
     }
 
@@ -390,7 +390,7 @@ impl App {
             self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
             return;
         }
-        let had_gray = self.nb.page.render_region(&mut self.fb, r, self.nb.render.as_ref());
+        let had_gray = self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
         self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
     }
 
@@ -529,7 +529,7 @@ impl App {
             return;
         }
         let r = Rect { x0: 0, y0: 0, x1: SB_W - 1, y1: FB_H - 1 };
-        let had_gray = self.nb.page.render_region(&mut self.fb, r, self.nb.render.as_ref());
+        let had_gray = self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
         self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
         self.draw_menu_icon();
         self.restore_chrome_over(r);
@@ -547,7 +547,7 @@ impl App {
         if delta != 0 {
             self.flip(delta);
         } else {
-            self.nb.page.render_full(&mut self.fb, self.nb.render.as_ref());
+            self.nb.page.render_full(&mut self.fb, &self.nb.rasters);
             self.disp.full_refresh();
             self.draw_menu_icon();
             self.show_page_indicator();
@@ -731,7 +731,7 @@ impl App {
 
     fn close_library(&mut self) {
         self.lib_view = None;
-        self.nb.page.render_full(&mut self.fb, self.nb.render.as_ref());
+        self.nb.page.render_full(&mut self.fb, &self.nb.rasters);
         self.disp.full_refresh();
         self.draw_menu_icon();
         if self.streaming {
@@ -916,7 +916,7 @@ impl App {
     fn close_agent_page(&mut self) {
         self.agent_page = None;
         self.cur_stroke = None;
-        self.nb.page.render_full(&mut self.fb, self.nb.render.as_ref());
+        self.nb.page.render_full(&mut self.fb, &self.nb.rasters);
         self.disp.full_refresh();
         self.draw_menu_icon();
         if self.streaming {
@@ -1095,7 +1095,7 @@ impl App {
         self.cur_stroke = None;
         self.page_changed = false;
         self.idle_at = None;
-        self.nb.page.render_full(&mut self.fb, self.nb.render.as_ref());
+        self.nb.page.render_full(&mut self.fb, &self.nb.rasters);
         self.flips_since_flash += 1;
         if self.flips_since_flash >= FLIP_DEGHOST_EVERY {
             self.flips_since_flash = 0;
@@ -1150,18 +1150,10 @@ impl App {
                      * so what's on the glass is what's in the model */
                     self.commit_open_stroke();
                     if self.agent_page.is_none() {
-                        if x >= ink::PANEL_W {
-                            /* rubbing the render panel wipes the render */
-                            self.clear_render();
-                        } else {
-                            self.erase_pass(x as f32, y as f32);
-                        }
+                        self.erase_pass(x as f32, y as f32);
                     } /* no eraser on the AGENT.md page — annotate instead */
-                } else if x < ink::PANEL_W - 3 || self.agent_page.is_some() {
-                    self.ink_pass(phase, x, y, pressure);
                 } else {
-                    /* the pen crossed into the render panel: end the stroke */
-                    self.commit_open_stroke();
+                    self.ink_pass(phase, x, y, pressure);
                 }
             }
             PenPhase::Release => {
@@ -1234,17 +1226,22 @@ impl App {
         });
     }
 
-    /// Rubber on the right panel: wipe the AI render (the sketch survives).
-    fn clear_render(&mut self) {
-        if self.nb.render.is_none() {
-            return;
-        }
-        self.nb.render = None;
-        self.nb.render_dirty = true;
+    /// Rubber over a raster (and not over ink): wipe that raster patch.
+    fn wipe_raster_at(&mut self, x: i32, y: i32) -> bool {
+        let Some(pos) = self.nb.rasters.iter().position(|r| r.contains(x, y)) else {
+            return false;
+        };
+        let rl = self.nb.rasters.remove(pos);
+        let r = rl.rect().pad(2).clamp_screen();
+        self.nb.rasters_dirty = true;
         self.nb.save_current();
         self.contact_changed = false; /* wiping a render is not new sketch ink */
-        self.repaint_right_panel();
-        println!("sketchbook: render wiped on page {}", self.nb.current + 1);
+        let had_gray = self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
+        self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
+        self.deghost_at = Some(Instant::now() + Duration::from_millis(900));
+        self.restore_chrome_over(r);
+        println!("sketchbook: raster #{} wiped on page {}", rl.id, self.nb.current + 1);
+        true
     }
 
     fn erase_pass(&mut self, x: f32, y: f32) {
@@ -1270,9 +1267,13 @@ impl App {
                 !hit
             });
             let r = region.pad(4).clamp_screen();
-            let had_gray = self.nb.page.render_region(&mut self.fb, r, self.nb.render.as_ref());
+            let had_gray = self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
             self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
             self.restore_chrome_over(r);
+        } else {
+            /* no strokes under the rubber: maybe the user is wiping one of
+             * pi's raster outputs */
+            self.wipe_raster_at(x as i32, y as i32);
         }
     }
 
@@ -1342,8 +1343,12 @@ impl App {
         }
         let Some(pi) = self.pi.as_mut() else { return };
         self.nb.save_current();
-        let (w, h, gray) = ink::snapshot_with_render(&self.nb.page, self.nb.render.as_ref(), SNAP_DIV);
-        let patches = patch_summary(&self.nb.page);
+        let (w, h, gray) = ink::snapshot_with_rasters(&self.nb.page, &self.nb.rasters, SNAP_DIV);
+        let patches = format!(
+            "{}; your raster outputs: {}",
+            patch_summary(&self.nb.page),
+            raster_summary(&self.nb.rasters),
+        );
         let layout = layout_hints(&self.nb.page, self.text_scale);
         let streaming = self.streaming;
         match pi.send_page(
@@ -1425,9 +1430,10 @@ impl App {
             "draw" => self.ipc_draw(req),
             "erase" => self.ipc_erase(req),
             "goto" => self.ipc_goto(req),
-            "sketch" => self.ipc_sketch(req),
-            "render" => self.ipc_render(req),
-            "render_get" => self.ipc_render_get(req),
+            "crop" => self.ipc_crop(req),
+            "place" => self.ipc_place(req),
+            "raster_get" => self.ipc_raster_get(req),
+            "raster_erase" => self.ipc_raster_erase(req),
             other => json!({ "ok": false, "error": format!("unknown cmd '{other}'") }),
         }
     }
@@ -1445,16 +1451,17 @@ impl App {
         if idx >= self.nb.count {
             return json!({ "ok": false, "error": format!("no page {} (sketchbook has {})", idx + 1, self.nb.count) });
         }
-        let (snap, patches) = if idx == self.nb.current {
+        let (snap, patches, rasters) = if idx == self.nb.current {
             (
-                ink::snapshot_with_render(&self.nb.page, self.nb.render.as_ref(), SNAP_DIV),
+                ink::snapshot_with_rasters(&self.nb.page, &self.nb.rasters, SNAP_DIV),
                 patch_list(&self.nb.page),
+                raster_list(&self.nb.rasters),
             )
         } else {
             match Page::load(&self.nb.page_path(idx)) {
                 Some(p) => {
-                    let rl = ink::RenderLayer::load(&self.nb.render_path(idx));
-                    (ink::snapshot_with_render(&p, rl.as_ref(), SNAP_DIV), patch_list(&p))
+                    let rl = ink::load_rasters(&self.nb.render_path(idx));
+                    (ink::snapshot_with_rasters(&p, &rl, SNAP_DIV), patch_list(&p), raster_list(&rl))
                 }
                 None => return json!({ "ok": false, "error": "page file unreadable" }),
             }
@@ -1470,39 +1477,55 @@ impl App {
             "image_scale": SNAP_DIV,
             "png_base64": png::base64(&png),
             "patches": patches,
+            "rasters": rasters,
         })
     }
 
-    /// The user's sketch (left panel) as a full-resolution PNG, cropped to
-    /// the ink's bounding box — what the agent sends to the image model.
-    fn ipc_sketch(&mut self, req: &Value) -> Value {
+    /// An arbitrary page region as a full-resolution PNG — the agent picks
+    /// what ships to the image model (a sketch, a sketch plus handwritten
+    /// instructions inside it, an existing raster with annotation marks).
+    /// Composites raster patches under the ink unless ink:false/rasters:false.
+    fn ipc_crop(&mut self, req: &Value) -> Value {
         let idx = self.req_page(req);
         if idx >= self.nb.count {
             return json!({ "ok": false, "error": format!("no page {} (sketchbook has {})", idx + 1, self.nb.count) });
         }
-        let loaded;
-        let page: &Page = if idx == self.nb.current {
-            &self.nb.page
+        let Some(rect) = req_rect(req, "rect") else {
+            return json!({ "ok": false, "error": "missing 'rect' [x0,y0,x1,y1]" });
+        };
+        let r = rect.clamp_screen();
+        if r.w() < 8 || r.h() < 8 {
+            return json!({ "ok": false, "error": "rect is degenerate" });
+        }
+        let with_ink = req["ink"].as_bool().unwrap_or(true);
+        let with_rasters = req["rasters"].as_bool().unwrap_or(true);
+
+        let loaded_page;
+        let loaded_rasters;
+        let (page, rasters): (&Page, &[ink::RasterPatch]) = if idx == self.nb.current {
+            (&self.nb.page, &self.nb.rasters)
         } else {
             match Page::load(&self.nb.page_path(idx)) {
-                Some(p) => { loaded = p; &loaded }
+                Some(p) => {
+                    loaded_page = p;
+                    loaded_rasters = ink::load_rasters(&self.nb.render_path(idx));
+                    (&loaded_page, &loaded_rasters)
+                }
                 None => return json!({ "ok": false, "error": "page file unreadable" }),
             }
         };
-        let Some(bbox) = sketch_bbox(page) else {
-            return json!({ "ok": false, "error": "the sketch panel is empty" });
+
+        let (w, _h, gray) = if with_ink && with_rasters {
+            ink::snapshot_with_rasters(page, rasters, 1)
+        } else if with_ink {
+            ink::snapshot_with_rasters(page, &[], 1)
+        } else {
+            ink::snapshot_with_rasters(&Page::default(), rasters, 1)
         };
-        let (w, _h, gray) = page.snapshot(1); /* strokes only, full res */
-        let r = bbox.pad(28).clamp_screen();
-        let (x0, y0) = (r.x0.max(0), r.y0.max(0));
-        let (x1, y1) = (r.x1.min(ink::PANEL_W - 4), r.y1.min(FB_H - 1));
-        let (cw, ch) = (x1 - x0 + 1, y1 - y0 + 1);
-        if cw <= 8 || ch <= 8 {
-            return json!({ "ok": false, "error": "the sketch panel is empty" });
-        }
+        let (cw, ch) = (r.w(), r.h());
         let mut crop = vec![255u8; (cw * ch) as usize];
         for y in 0..ch {
-            let src = ((y0 + y) * w + x0) as usize;
+            let src = ((r.y0 + y) * w + r.x0) as usize;
             let dst = (y * cw) as usize;
             crop[dst..dst + cw as usize].copy_from_slice(&gray[src..src + cw as usize]);
         }
@@ -1513,31 +1536,17 @@ impl App {
             "png_base64": png::base64(&png),
             "width": cw,
             "height": ch,
-            "bbox": [x0, y0, x1, y1],
+            "rect": [r.x0, r.y0, r.x1, r.y1],
         })
     }
 
-    /// Place an agent-generated grayscale raster on the RIGHT panel,
-    /// mirroring the sketch's vertical extent. `clear:true` removes it.
-    fn ipc_render(&mut self, req: &Value) -> Value {
+    /// Place an agent-generated grayscale raster at an agent-chosen page
+    /// rect (aspect-fit inside it, centered). Returns the raster id.
+    fn ipc_place(&mut self, req: &Value) -> Value {
         let idx = self.req_page(req);
         if idx >= self.nb.count {
             return json!({ "ok": false, "error": format!("no page {} (sketchbook has {})", idx + 1, self.nb.count) });
         }
-        let on_screen = idx == self.nb.current;
-
-        if req["clear"].as_bool() == Some(true) {
-            if on_screen {
-                self.nb.render = None;
-                self.nb.render_dirty = true;
-                self.nb.save_current();
-                self.repaint_right_panel();
-            } else {
-                let _ = std::fs::remove_file(self.nb.render_path(idx));
-            }
-            return json!({ "ok": true, "page": idx + 1, "cleared": true });
-        }
-
         let (Some(w), Some(h)) = (req["w"].as_i64(), req["h"].as_i64()) else {
             return json!({ "ok": false, "error": "missing 'w'/'h'" });
         };
@@ -1551,95 +1560,132 @@ impl App {
         if raw.len() != (w * h) as usize || w <= 0 || h <= 0 {
             return json!({ "ok": false, "error": format!("raw length {} != w*h {}", raw.len(), w * h) });
         }
-
-        /* destination: the right panel, vertically mirroring the sketch */
-        const MARGIN: i32 = 24;
-        let loaded;
-        let page: &Page = if on_screen {
-            &self.nb.page
-        } else {
-            match Page::load(&self.nb.page_path(idx)) {
-                Some(p) => { loaded = p; &loaded }
-                None => return json!({ "ok": false, "error": "page file unreadable" }),
-            }
+        let Some(dest) = req_rect(req, "rect") else {
+            return json!({ "ok": false, "error": "missing 'rect' [x0,y0,x1,y1] (destination)" });
         };
-        let (dy0, dy1) = match sketch_bbox(page) {
-            Some(b) => {
-                let mid = (b.y0 + b.y1) / 2;
-                let half = ((b.y1 - b.y0) / 2).max(200);
-                ((mid - half).max(MARGIN), (mid + half).min(FB_H - MARGIN))
-            }
-            None => (MARGIN, FB_H - MARGIN),
-        };
-        let max_w = FB_W - ink::PANEL_W - 2 * MARGIN;
-        let max_h = dy1 - dy0;
-        let scale = (max_w as f32 / w as f32).min(max_h as f32 / h as f32);
-        let (dw, dh) = (((w as f32 * scale) as i32).max(1), ((h as f32 * scale) as i32).max(1));
-        /* stored clean; graphite tooth is applied at blit/snapshot time
-         * (deterministic page-coordinate noise — see ink::grain_px) */
-        let gray = ink::resize_gray(&raw, w, h, dw, dh);
-        let rl = ink::RenderLayer {
-            x0: ink::PANEL_W + MARGIN + (max_w - dw) / 2,
-            y0: dy0 + (max_h - dh) / 2,
-            w: dw,
-            h: dh,
-            gray,
-        };
-
-        if on_screen {
-            self.nb.render = Some(rl);
-            self.nb.render_dirty = true;
-            self.nb.save_current();
-            self.repaint_right_panel();
-            self.live.status("render");
-        } else if let Err(e) = rl.save(&self.nb.render_path(idx)) {
-            return json!({ "ok": false, "error": format!("save render: {e}") });
+        let dest = dest.clamp_screen();
+        if dest.w() < 16 || dest.h() < 16 {
+            return json!({ "ok": false, "error": "destination rect is too small" });
         }
-        self.last_activity_page = idx;
-        println!("sketchbook: render {dw}x{dh} placed on page {}", idx + 1);
-        json!({ "ok": true, "page": idx + 1, "placed": [ink::PANEL_W + MARGIN + (max_w - dw) / 2, dy0 + (max_h - dh) / 2, dw, dh] })
+        let replace = req["replace"].as_u64(); /* optional raster id to replace */
+
+        let scale = (dest.w() as f32 / w as f32).min(dest.h() as f32 / h as f32);
+        let (dw, dh) = (((w as f32 * scale) as i32).max(1), ((h as f32 * scale) as i32).max(1));
+        /* stored clean; graphite tooth is applied at blit/snapshot time */
+        let gray = ink::resize_gray(&raw, w, h, dw, dh);
+        let (px, py) = (dest.x0 + (dest.w() - dw) / 2, dest.y0 + (dest.h() - dh) / 2);
+
+        if idx == self.nb.current {
+            let mut repaint = Rect { x0: px, y0: py, x1: px + dw - 1, y1: py + dh - 1 };
+            if let Some(rid) = replace {
+                if let Some(pos) = self.nb.rasters.iter().position(|r| r.id == rid) {
+                    repaint = repaint.union(self.nb.rasters.remove(pos).rect());
+                }
+            }
+            let id = self.nb.next_raster;
+            self.nb.next_raster += 1;
+            self.nb.rasters.push(ink::RasterPatch { id, x0: px, y0: py, w: dw, h: dh, gray });
+            self.nb.rasters_dirty = true;
+            self.nb.save_current();
+            self.repaint_raster_rect(repaint.pad(2));
+            self.live.status("render");
+            self.last_activity_page = idx;
+            println!("sketchbook: raster #{id} {dw}x{dh} placed at ({px},{py}) on page {}", idx + 1);
+            json!({ "ok": true, "id": id, "page": idx + 1, "placed": [px, py, dw, dh] })
+        } else {
+            let path = self.nb.render_path(idx);
+            let mut rasters = ink::load_rasters(&path);
+            if let Some(rid) = replace {
+                rasters.retain(|r| r.id != rid);
+            }
+            let id = rasters.iter().map(|r| r.id + 1).max().unwrap_or(1);
+            rasters.push(ink::RasterPatch { id, x0: px, y0: py, w: dw, h: dh, gray });
+            if let Err(e) = ink::save_rasters(&path, &rasters) {
+                return json!({ "ok": false, "error": format!("save rasters: {e}") });
+            }
+            self.last_activity_page = idx;
+            json!({ "ok": true, "id": id, "page": idx + 1, "placed": [px, py, dw, dh] })
+        }
     }
 
-    /// Hand back the page's current render layer as PNG — the input for an
-    /// edit-mode regeneration ("remove the background", "darker").
-    fn ipc_render_get(&mut self, req: &Value) -> Value {
+    /// Hand back one raster patch as PNG — the input for an edit-mode
+    /// regeneration ("remove the background", "darker").
+    fn ipc_raster_get(&mut self, req: &Value) -> Value {
         let idx = self.req_page(req);
         if idx >= self.nb.count {
             return json!({ "ok": false, "error": format!("no page {} (sketchbook has {})", idx + 1, self.nb.count) });
         }
         let loaded;
-        let rl: &ink::RenderLayer = if idx == self.nb.current {
-            match self.nb.render.as_ref() {
-                Some(r) => r,
-                None => return json!({ "ok": false, "error": "this page has no render yet" }),
-            }
+        let rasters: &[ink::RasterPatch] = if idx == self.nb.current {
+            &self.nb.rasters
         } else {
-            match ink::RenderLayer::load(&self.nb.render_path(idx)) {
-                Some(r) => { loaded = r; &loaded }
-                None => return json!({ "ok": false, "error": "this page has no render yet" }),
-            }
+            loaded = ink::load_rasters(&self.nb.render_path(idx));
+            &loaded
+        };
+        let rl = match req["id"].as_u64() {
+            Some(id) => rasters.iter().find(|r| r.id == id),
+            None => rasters.last(), /* no id: the most recent */
+        };
+        let Some(rl) = rl else {
+            return json!({ "ok": false, "error": "no such raster on this page" });
         };
         let png = png::encode_gray(rl.w as u32, rl.h as u32, &rl.gray);
         json!({
             "ok": true,
             "page": idx + 1,
+            "id": rl.id,
             "png_base64": png::base64(&png),
             "width": rl.w,
             "height": rl.h,
+            "rect": [rl.x0, rl.y0, rl.x0 + rl.w - 1, rl.y0 + rl.h - 1],
         })
     }
 
-    /// Repaint the right panel from the model with the 16-level waveform
-    /// (the render layer is real grayscale; DU would posterize it).
-    fn repaint_right_panel(&mut self) {
+    /// Remove one raster patch (the agent fixing itself, or replacing).
+    fn ipc_raster_erase(&mut self, req: &Value) -> Value {
+        let idx = self.req_page(req);
+        if idx >= self.nb.count {
+            return json!({ "ok": false, "error": format!("no page {} (sketchbook has {})", idx + 1, self.nb.count) });
+        }
+        let Some(id) = req["id"].as_u64() else {
+            return json!({ "ok": false, "error": "missing 'id'" });
+        };
+        if idx == self.nb.current {
+            let Some(pos) = self.nb.rasters.iter().position(|r| r.id == id) else {
+                return json!({ "ok": false, "error": format!("no raster #{id} on page {}", idx + 1) });
+            };
+            let rl = self.nb.rasters.remove(pos);
+            self.nb.rasters_dirty = true;
+            self.nb.save_current();
+            self.repaint_raster_rect(rl.rect().pad(2));
+            json!({ "ok": true, "page": idx + 1 })
+        } else {
+            let path = self.nb.render_path(idx);
+            let mut rasters = ink::load_rasters(&path);
+            let before = rasters.len();
+            rasters.retain(|r| r.id != id);
+            if rasters.len() == before {
+                return json!({ "ok": false, "error": format!("no raster #{id} on page {}", idx + 1) });
+            }
+            if let Err(e) = ink::save_rasters(&path, &rasters) {
+                return json!({ "ok": false, "error": format!("save rasters: {e}") });
+            }
+            json!({ "ok": true, "page": idx + 1 })
+        }
+    }
+
+    /// Repaint a raster-affected region with the 16-level waveform (real
+    /// grayscale; DU would posterize it).
+    fn repaint_raster_rect(&mut self, r: Rect) {
         if self.agent_page.is_some() || self.lib_view.is_some() {
             return; /* another view owns the screen; appears on return */
         }
-        let r = Rect { x0: ink::PANEL_W - 2, y0: 0, x1: FB_W - 1, y1: FB_H - 1 };
-        self.nb.page.render_region(&mut self.fb, r, self.nb.render.as_ref());
+        let r = r.clamp_screen();
+        self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
         self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Text);
         self.restore_chrome_over(r);
     }
+
 
     fn ipc_draw(&mut self, req: &Value) -> Value {
         let Some(svg) = req["svg"].as_str() else {
@@ -1731,7 +1777,7 @@ impl App {
                 Some(b) => {
                     if self.agent_page.is_none() && self.sidebar.is_none() && self.lib_view.is_none() {
                         let r = region.map_or(b, |r| r.union(b)).pad(4).clamp_screen();
-                        let had_gray = self.nb.page.render_region(&mut self.fb, r, self.nb.render.as_ref());
+                        let had_gray = self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
                         self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
                         self.restore_chrome_over(r);
                     }
@@ -1927,28 +1973,38 @@ impl App {
     }
 }
 
-/// Bounding box of all ink on the page, clamped to the sketch (left) panel.
-fn sketch_bbox(p: &Page) -> Option<Rect> {
-    let mut acc: Option<Rect> = None;
-    let mut add = |b: Option<Rect>| {
-        if let Some(b) = b {
-            acc = Some(match acc {
-                None => b,
-                Some(a) => a.union(b),
-            });
-        }
-    };
-    for s in &p.strokes {
-        add(ink::stroke_bbox(s));
+/// Parse a [x0,y0,x1,y1] array parameter into a Rect.
+fn req_rect(req: &Value, key: &str) -> Option<Rect> {
+    let a = req[key].as_array()?;
+    if a.len() != 4 {
+        return None;
     }
-    for pa in &p.patches {
-        add(ink::patch_bbox(pa));
+    let v: Vec<i32> = a.iter().filter_map(|x| x.as_i64().map(|v| v as i32)).collect();
+    if v.len() != 4 {
+        return None;
     }
-    let b = acc?;
-    if b.x0 >= ink::PANEL_W {
-        return None; /* everything is on the render side */
+    Some(Rect { x0: v[0].min(v[2]), y0: v[1].min(v[3]), x1: v[0].max(v[2]), y1: v[1].max(v[3]) })
+}
+
+fn raster_list(rasters: &[ink::RasterPatch]) -> Value {
+    Value::Array(
+        rasters
+            .iter()
+            .map(|r| json!({ "id": r.id, "rect": [r.x0, r.y0, r.x0 + r.w - 1, r.y0 + r.h - 1] }))
+            .collect(),
+    )
+}
+
+/// One line for the pause message: where the agent's rasters sit.
+fn raster_summary(rasters: &[ink::RasterPatch]) -> String {
+    if rasters.is_empty() {
+        return "none".into();
     }
-    Some(Rect { x0: b.x0.max(0), y0: b.y0.max(0), x1: b.x1.min(ink::PANEL_W - 1), y1: b.y1.min(FB_H - 1) })
+    rasters
+        .iter()
+        .map(|r| format!("#{} at ({},{})-({},{})", r.id, r.x0, r.y0, r.x0 + r.w - 1, r.y0 + r.h - 1))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn patch_list(p: &Page) -> Value {
@@ -2200,7 +2256,7 @@ fn main() -> std::process::ExitCode {
     };
 
     /* first paint */
-    app.nb.page.render_full(&mut app.fb, app.nb.render.as_ref());
+    app.nb.page.render_full(&mut app.fb, &app.nb.rasters);
     app.disp.full_refresh();
     app.draw_menu_icon();
     app.show_page_indicator();

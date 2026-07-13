@@ -95,18 +95,18 @@ def main():
         # patches, views, erases the circle mid-animation
         s.drain(4.2)
         write_png(out_png.replace(".png", "-thinking.png"))  # the working dot
-        s.drain(6.0)
+        s.drain(14.0)
         write_png(out_png)  # user ink + the AI note (circle erased again)
 
         # flip forward: a fresh page 2 (flip gesture + new-page path)
         time.sleep(1.7)  # let palm rejection lapse
         s.swipe(1150, 190)
-        s.drain(2.0)
+        s.drain(6.0)
         write_png(out_png.replace(".png", "-page2.png"))
 
         # flip back: page 1 re-rendered entirely from the saved vector model
         s.swipe(190, 1150)
-        s.drain(2.0)
+        s.drain(10.0)
         write_png(out_png.replace(".png", "-back.png"))
 
         # sidebar -> LIBRARY -> first item: the markdown reader

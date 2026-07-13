@@ -1,85 +1,77 @@
 # sketchbook — draw rough, get it rendered, on the reMarkable 2
 
 [notebook](../notebook/)'s takeover tech reshaped into an artist's
-sketchbook. Every page is a **spread**: the left panel is yours — sketch
-with the pen, erase with the marker's rubber — and the right panel belongs
-to pi. When you **pause sketching**, the spread is photographed to a pi
-agent running headless in the background. If the sketch has taken shape,
-pi describes what it sees ("a cat sitting upright, tail curled right"),
-sends your ink to a Gemini image model with a prompt tuned for monochrome
-graphite rendition, and the result — pencil shading, hatching, confident
-linework, quantized to the panel's 16 grays — appears on the right panel,
-vertically mirroring your sketch. Draw more, pause again: the render
-updates. Rub the right panel with the rubber to wipe a render you dislike.
+sketchbook. The **whole page is a shared canvas**: sketch, write and erase
+anywhere; pi's generated images land on the same page, wherever pi places
+them. When you **pause**, the page is photographed to a pi agent running
+headless in the background. pi is the **art director** between your page
+and a Gemini image model: it decides *which region* of the page to ship
+(your sketch alone — or your sketch plus handwritten notes inside the
+crop, which the model reads natively), *what to say* about it (a literal
+subject description that disambiguates wobbly strokes, or "follow the
+handwritten instructions in the image"), and *where the output lands*
+(aspect-fit into a free-space rect it picks from the measured layout).
+Results come back as grainy graphite — quantized to the panel's 16 grays
+with paper-tooth grain applied at paint time.
+
+Iterate by just writing on the page: "darker", "no background", an arrow
+at the bit you want changed — pi sends the *existing output* back to the
+model as the base image (edit-in-place: same drawing, same strokes
+elsewhere) together with your annotations, and replaces it where it
+stood. Rub any of pi's outputs with the rubber (in empty space) to wipe
+it; your ink is only ever yours.
 
 ```
- you sketch (left panel, vector ink)          pi renders (right panel, raster)
-   │ pause (2.8s) → spread snapshot ──► pi --mode rpc (resident child)
-   │                                        │ sketchbook_render {subject, style?}
-   │                                        ▼
-   │                              {cmd:"sketch"} → left-panel PNG (ink bbox crop)
-   │                                        │
-   │                                        ▼
-   │                              Gemini image model (nano-banana class):
-   │                              "rough stylus sketch depicting <subject>;
-   │                               redraw as graphite pencil, same pose..."
-   │                                        │ PNG → gray (node:zlib, no deps)
-   │                                        ▼
-   │                              {cmd:"render", w, h, raw} → bilinear fit,
-   │                              16-gray quantize, blit right panel (GL16)
+ you sketch / write / annotate (vector ink, anywhere on the page)
+   │ pause (2.8s) → page snapshot ──► pi --mode rpc (resident child)
+   │                                     │ sketchbook_generate
+   │                                     │   {region, prompt, edit_raster?,
+   │                                     │    dest, replace?}
+   │                                     ▼
+   │                       {cmd:"crop"}       → region PNG (ink + rasters)
+   │                       {cmd:"raster_get"} → prior output (edit base)
+   │                                     │
+   │                                     ▼
+   │                       Gemini image model (nano-banana class):
+   │                       reads handwriting inside the crop natively;
+   │                       edit mode updates the SAME image in place
+   │                                     │ PNG/JPEG → gray (no npm deps)
+   │                                     ▼
+   │                       {cmd:"place", rect} → aspect-fit, raster patch
    ▼
- display: rm2fb takeover — DU for your ink, Wave::Text for renders,
-          render layer persists per page (render-NNNN.skr) and re-renders
-          under strokes on every flip/erase (vector-first model intact)
+ display: rm2fb takeover — DU for ink, Wave::Text for rasters; grain
+          (paper-tooth value noise) applied at blit/snapshot time on page
+          coordinates, stored rasters stay CLEAN so edit round-trips
+          never compound grain; rasters persist per page (render-NNNN.skr,
+          id-tracked) and re-render under strokes on every flip/erase
 ```
 
-## How pi renders
+## The tools pi gets
 
-pi is spawned with `-e sketchbook-canvas.ts` (shipped next to the binary),
-which registers tools that call back into the app over a unix socket
-(`$SKETCHBOOK_SOCK`, JSON-lines):
-
-| tool | wire | does |
-|------|------|------|
-| `sketchbook_render {subject, style?, page?}` | `sketch` + `render` | captures your sketch, generates with Gemini, places the result on the right panel |
-| `sketchbook_draw {svg, page?}` | `{cmd:"draw",...}` | small annotations as pen strokes (labels, arrows) — left panel only by convention |
-| `sketchbook_erase {id, page?}` | `{cmd:"erase",...}` | remove one of pi's ink patches |
-| `sketchbook_view {page?}` | `{cmd:"view",...}` | fresh half-scale PNG of any spread (render layer included) |
-| `sketchbook_goto {page}` | `{cmd:"goto",...}` | flip the tablet to a page |
-
-The `subject` parameter is the interesting part: pi *reads* your rough
-sketch and tells the image model what it depicts. A wobbly blob with
-triangles becomes "a cat sitting upright, facing the viewer" — the
-description disambiguates the strokes and materially improves the render.
-Style defaults to graphite pencil; write "make it a watercolor" on the
-page and pi passes it through.
+| tool | does |
+|------|------|
+| `sketchbook_generate {region, prompt, edit_raster?, dest, replace?}` | the star: crop → model → place. `region` frames what the model sees (handwriting inside is read and followed); `edit_raster` bases the generation on an existing output (in-place edit); `dest` is where it lands; `replace` swaps the old output out |
+| `sketchbook_draw {svg, page?}` | small ink annotations (labels, arrows, answers) |
+| `sketchbook_erase {id, page?}` | remove one of pi's ink patches |
+| `sketchbook_view {page?}` | fresh half-scale PNG of any page (rasters included) |
+| `sketchbook_goto {page}` | flip the tablet to a page |
 
 The image model is `gemini-3.1-flash-image` (override with
-`$SKETCHBOOK_IMG_MODEL`). The PNG that comes back is decoded **in the
-extension** — a ~70-line PNG reader over `node:zlib`, no npm deps — and
-handed to the app as raw grayscale; the app bilinear-fits it into the
-right panel (mirroring your sketch's vertical extent), snaps it to the 16
-gray levels GC16 can show, and refreshes with the flash-free 16-level
-waveform.
-
-## The render layer
-
-The page model stays vector-first (your strokes + pi's ink patches, from
-libreink-page); the render is a **raster layer underneath the strokes** —
-exactly how the reader app paints book pages under ink. Erasing a stroke
-re-renders raster + remaining ink intact; wiping the render (rubber on the
-right panel) never touches your sketch. Per page, on disk:
-`page-NNNN.json` (vectors) + `render-NNNN.skr` (raw gray + placement).
+`$SKETCHBOOK_IMG_MODEL`; `gemini-3-pro-image` gives richer marks).
+Returned PNG *or JPEG* is decoded in the extension (node:zlib PNG reader
++ vendored jpeg-js), autocontrast-stretched so paper reads true white,
+and handed to the app as raw grayscale. `$SKETCHBOOK_GRAIN` scales the
+graphite tooth (0 off, 1 default, 1.4 grittier).
 
 ## Gestures
 
 | Do this | And |
 |---------|-----|
-| Sketch in the left panel | Pausing ~3s offers the spread to pi |
-| Cross the divider with the pen | The stroke ends at the divider — the right panel is pi's |
+| Sketch or write anywhere | Pausing ~3s offers the page to pi |
 | Flip the marker, rub your ink | Erase (whole strokes) |
-| Flip the marker, rub the right panel | Wipe the render (your sketch survives) |
-| Swipe left / right with a finger | Next / previous spread (past the last = new page) |
+| Flip the marker, rub one of pi's outputs (empty space) | Wipe that output (your ink survives) |
+| Write feedback next to an output | pi edits it in place on the next pause |
+| Swipe left / right with a finger | Next / previous page (past the last = new page) |
 | Tap the top-left corner | Sidebar: pages, go-to, INSTRUCTIONS, LIBRARY, quiet mode |
 | Sidebar → PI: AUTO / QUIET | Quiet mode: sketch in peace, nothing is sent |
 | Power button | Sleep + real suspend; wake resumes in place |
@@ -92,7 +84,7 @@ on the tablet (`../pi/pi-harness/install.sh`), WiFi on, and
 
 ```sh
 make                # cross-compile (cargo + rust-lld)
-make preview        # no tablet: qemu + fake pi + fake render → build/preview*.png
+make preview        # no tablet: qemu + fake pi + fake generate → build/preview*.png
 make fetch-server   # rm2fb_server (timower/rM2-stuff) into vendor/
 make deploy         # push binary/scripts/extension/manifest to the device
 make push-key       # one-time: ship $GEMINI_API_KEY (renders need it)
@@ -100,7 +92,7 @@ make log            # tail /tmp/sketchbook.log on the device
 make kill           # stop a running session (restores xochitl)
 ```
 
-Then tap **sketchbook** in the AppLoad menu. Renders cost one image-model
+Then tap **sketchbook** in the AppLoad menu. Generations cost one image-model
 call each (~a cent); pauses that don't warrant a render cost one cheap
 vision look. Quiet mode costs nothing.
 

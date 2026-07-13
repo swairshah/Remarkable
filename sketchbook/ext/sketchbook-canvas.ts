@@ -5,17 +5,18 @@
  * `-e <this file>` and SKETCHBOOK_SOCK pointing at its unix tool socket.
  * These tools speak one JSON object per line over that socket:
  *
- *   sketchbook_render {subject, style?, page?}  -> gen + place on the right panel
+ *   sketchbook_generate {region, prompt?, edit_raster?, dest, ...} -> gen + place
  *   sketchbook_draw   {svg, page?}              -> SVG -> pen strokes -> patch id
  *   sketchbook_erase  {id, page?}               -> remove a patch
  *   sketchbook_view   {page?}                   -> fresh half-scale PNG of a spread
  *   sketchbook_goto   {page}                    -> flip the tablet to a page
  *
- * sketchbook_render is the star: it asks the app for the sketch (the left
- * panel's ink, cropped to its bounding box), sends it to a Gemini image
- * model with a prompt tuned for monochrome pencil rendition, decodes the
- * returned PNG right here (node:zlib inflate + scanline unfilter — no npm
- * deps), and hands the app raw grayscale to place on the right panel.
+ * sketchbook_generate is the star: pi is the ART DIRECTOR — it picks a
+ * page region to crop (which may contain handwritten instructions the
+ * model reads natively), optionally an existing raster to edit in place,
+ * composes the text prompt, and picks the destination rect. The extension
+ * ferries: crop -> Gemini image model -> decode (PNG via node:zlib, JPEG
+ * via vendored jpeg-js) -> autocontrast -> raw grayscale -> place.
  *
  * When SKETCHBOOK_SOCK is absent (a normal pi session), nothing registers.
  */
@@ -36,14 +37,14 @@ const SOCK = process.env.SKETCHBOOK_SOCK || "";
 const IMG_MODEL = process.env.SKETCHBOOK_IMG_MODEL || "gemini-3.1-flash-image";
 const API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_STUDIO_API_KEY || "";
 
-const DEFAULT_STYLE =
-  "a refined, confident artist's pencil sketch built from VISIBLE INDIVIDUAL " +
-  "GRAPHITE STROKES: grainy pencil texture with the tooth of the paper showing " +
-  "through the shading, energetic hatching and cross-hatching with slightly " +
-  "broken stroke edges, darker pressed accents where a real artist would bear " +
-  "down, soft smudged tone only where a finger would blend it — NEVER smooth " +
-  "airbrushed gradients. Pure monochrome graphite on white paper, plain white " +
-  "background, no color, no frame, no text";
+const MONO_SUFFIX =
+  "Unless the instruction says otherwise, render as a refined artist's pencil " +
+  "drawing built from VISIBLE INDIVIDUAL GRAPHITE STROKES: grainy pencil " +
+  "texture with the tooth of the paper showing through, energetic hatching " +
+  "and cross-hatching with slightly broken stroke edges, darker pressed " +
+  "accents — never smooth airbrushed gradients. Always pure monochrome on " +
+  "plain white paper (this is an e-ink screen): no color, no frame, no text, " +
+  "no signature.";
 
 function call(cmd: Record<string, unknown>, timeoutMs = 30000): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -221,48 +222,19 @@ async function callImageModel(parts: unknown[]): Promise<Buffer> {
   throw new Error("gemini returned no image: " + JSON.stringify(data).slice(0, 300));
 }
 
-/** Fresh render: the sketch + pi's subject line + a style. */
-function generate(sketchPngB64: string, subject: string, style: string): Promise<Buffer> {
-  const prompt =
-    "This is a rough freehand sketch drawn with a stylus on an e-ink tablet. " +
-    `It depicts: ${subject}.\n` +
-    "Redraw it, keeping the same composition, pose, framing and personality — it " +
-    "must clearly read as a polished version of THIS drawing, not a different " +
-    `picture. Render it as ${style}. ` +
-    "The subject fills the frame the same way the sketch does.";
-  return callImageModel([
-    { text: prompt },
-    { inline_data: { mime_type: "image/png", data: sketchPngB64 } },
-  ]);
-}
-
-/** Edit: the previous render + the current sketch panel + an instruction.
- *  The model updates the SAME image — iterative refinement, not a redo. */
-function edit(
-  prevRenderB64: string,
-  sketchPngB64: string | null,
-  instruction: string,
+/** One generation call: pi's prompt + the page crop (+ optionally an
+ *  existing raster as the base image to edit in place). */
+function generateImage(
+  prompt: string,
+  cropPngB64: string | null,
+  baseRasterB64: string | null,
 ): Promise<Buffer> {
-  const parts: unknown[] = [
-    {
-      text:
-        "The first image is a pencil rendition you drew earlier of an artist's " +
-        "sketch. Apply this instruction to it, changing NOTHING else about the " +
-        `drawing — same subject, same composition, same strokes elsewhere:\n` +
-        `${instruction}\n` +
-        "Keep it pure monochrome graphite pencil on plain white paper, no color, " +
-        "no frame, no text." +
-        (sketchPngB64
-          ? " The second image is the artist's current sketch panel for " +
-            "reference — it may contain annotation marks or handwritten notes " +
-            "pointing at what to change; follow them, but do not copy any " +
-            "handwriting or annotation marks into the drawing."
-          : ""),
-    },
-    { inline_data: { mime_type: "image/png", data: prevRenderB64 } },
-  ];
-  if (sketchPngB64) {
-    parts.push({ inline_data: { mime_type: "image/png", data: sketchPngB64 } });
+  const parts: unknown[] = [{ text: prompt }];
+  if (baseRasterB64) {
+    parts.push({ inline_data: { mime_type: "image/png", data: baseRasterB64 } });
+  }
+  if (cropPngB64) {
+    parts.push({ inline_data: { mime_type: "image/png", data: cropPngB64 } });
   }
   return callImageModel(parts);
 }
@@ -273,94 +245,130 @@ export default function (pi: ExtensionAPI) {
   if (!SOCK) return; // not running inside the sketchbook app
 
   pi.registerTool({
-    name: "sketchbook_render",
-    label: "sketchbook: render the sketch",
+    name: "sketchbook_generate",
+    label: "sketchbook: generate onto the page",
     description:
-      "Turn the user's rough sketch (the LEFT panel of the current spread) into a polished " +
-      "rendition and place it on the RIGHT panel. Captures the sketch automatically; you " +
-      "supply `subject` — a one-line literal description of what the sketch depicts (be " +
-      "specific about pose, orientation, expression: the image model uses it to " +
-      "disambiguate rough strokes). Optional `style` replaces the default graphite-pencil " +
-      "look — use it only when the user asked for a style in writing. Replaces any " +
-      "previous render on the page. EDIT MODE: when a render already exists and the user " +
-      "asks for a CHANGE to it ('darker', 'remove the background shading', an annotation " +
-      "arrow pointing at a part) — pass `instruction` instead of `subject`: the model " +
-      "then UPDATES the existing render in place (same image, same strokes elsewhere) " +
-      "instead of redrawing from the sketch. It also sees the sketch panel, so " +
-      "annotations the user drew there guide the edit. Takes ~10-30s.",
+      "Ship part of the page to the image model and place the result back on the page. " +
+      "You are the art director: `region` [x0,y0,x1,y1] is the page crop the model SEES " +
+      "(frame it deliberately — the sketch alone, or sketch plus handwritten notes " +
+      "inside the crop: the model reads text in images and follows it); `prompt` is " +
+      "what you tell the model (describe literally what the sketch depicts; or point at " +
+      "the handwriting: 'follow the handwritten instructions in the image'); " +
+      "`edit_raster` (an output id) makes the model UPDATE that existing image in " +
+      "place instead of drawing fresh — use for any tweak to something you already " +
+      "made; `dest` [x0,y0,x1,y1] is where the output lands (aspect-fit, centered — " +
+      "use free space, never the user's ink; when editing, use the old rect and pass " +
+      "`replace` with the same id). Default look is grainy graphite pencil unless your " +
+      "prompt says otherwise. Returns the new raster id. Takes ~10-30s.",
     parameters: {
       type: "object",
       properties: {
-        subject: {
-          type: "string",
-          description: "Fresh render: what the sketch depicts, one careful line",
+        region: {
+          type: "array",
+          items: { type: "number" },
+          description: "Page crop [x0,y0,x1,y1] the model sees (omit only when editing a raster with no new context)",
         },
-        instruction: {
+        prompt: {
           type: "string",
-          description:
-            "Edit mode: the change to apply to the EXISTING render (mutually " +
-            "exclusive with subject; requires a render on the page)",
+          description: "Your instruction to the image model",
         },
-        style: {
-          type: "string",
-          description: "Optional style override (only when the user asked)",
+        edit_raster: {
+          type: "number",
+          description: "Existing output id to edit in place (model gets it as the base image)",
+        },
+        dest: {
+          type: "array",
+          items: { type: "number" },
+          description: "Destination rect [x0,y0,x1,y1] on the page",
+        },
+        replace: {
+          type: "number",
+          description: "Output id to remove when the new one lands (usually = edit_raster)",
+        },
+        include_rasters: {
+          type: "boolean",
+          description: "Include your existing outputs in the region crop (default true)",
         },
         page: {
           type: "number",
-          description: "1-based page number; omit for the spread on screen",
+          description: "1-based page number; omit for the page on screen",
         },
       },
+      required: ["prompt", "dest"],
     },
     async execute(_id: string, params: any) {
-      if (!API_KEY) return textResult("render failed: GEMINI_API_KEY is not set on the device", true);
-      if (!params.subject && !params.instruction) {
-        return textResult("render failed: pass `subject` (fresh render) or `instruction` (edit)", true);
+      if (!API_KEY) return textResult("generate failed: GEMINI_API_KEY is not set on the device", true);
+      if (!params.region && params.edit_raster == null) {
+        return textResult("generate failed: pass `region` (a page crop) and/or `edit_raster`", true);
       }
       try {
-        let img: Buffer;
-        if (params.instruction) {
-          /* edit the existing render in place */
-          const prev = await call({ cmd: "render_get", page: params.page });
-          if (!prev.ok) return textResult(`edit failed: ${prev.error} — use subject for a fresh render`, true);
-          const s = await call({ cmd: "sketch", page: params.page }).catch(() => null);
-          img = await edit(
-            prev.png_base64,
-            s?.ok ? s.png_base64 : null,
-            params.instruction,
-          );
-        } else {
-          const s = await call({ cmd: "sketch", page: params.page });
-          if (!s.ok) return textResult(`render failed: ${s.error}`, true);
-          img = await generate(
-            s.png_base64,
-            params.subject,
-            params.style?.trim() || DEFAULT_STYLE,
-          );
+        /* the base image, when editing one of our outputs in place */
+        let baseB64: string | null = null;
+        if (params.edit_raster != null) {
+          const prev = await call({ cmd: "raster_get", id: params.edit_raster, page: params.page });
+          if (!prev.ok) return textResult(`generate failed: ${prev.error}`, true);
+          baseB64 = prev.png_base64;
         }
+        /* the page crop the model sees */
+        let cropB64: string | null = null;
+        if (params.region) {
+          const c = await call({
+            cmd: "crop",
+            rect: params.region,
+            rasters: params.include_rasters !== false,
+            page: params.page,
+          });
+          if (!c.ok) return textResult(`generate failed: ${c.error}`, true);
+          cropB64 = c.png_base64;
+        }
+
+        let prompt = params.prompt;
+        if (baseB64) {
+          prompt =
+            "The first image is a drawing you made earlier; UPDATE THAT IMAGE, " +
+            "changing nothing except what the instruction asks — same subject, " +
+            "same composition, same strokes elsewhere." +
+            (cropB64
+              ? " The second image is the relevant part of the artist's page for " +
+                "reference; it may contain annotation marks or handwritten notes — " +
+                "follow them, but never copy handwriting or annotation marks into " +
+                "the drawing."
+              : "") +
+            `\nInstruction: ${prompt}\n` +
+            MONO_SUFFIX;
+        } else {
+          prompt =
+            "The attached image is from a page of an artist's sketchbook on an " +
+            "e-ink tablet (rough stylus ink; it may include handwritten notes — " +
+            "read and follow them, but never copy handwriting or annotation " +
+            `marks into your drawing).\n${prompt}\n` +
+            MONO_SUFFIX;
+        }
+
+        const img = await generateImage(prompt, cropB64, baseB64);
         const { w, h, gray } = imageToGray(img);
         const normalized = autocontrast(gray);
         const r = await call(
           {
-            cmd: "render",
+            cmd: "place",
             page: params.page,
             w,
             h,
             raw_base64: normalized.toString("base64"),
+            rect: params.dest,
+            replace: params.replace,
           },
           60000,
         );
-        if (!r.ok) return textResult(`render failed: ${r.error}`, true);
+        if (!r.ok) return textResult(`generate failed: ${r.error}`, true);
         const [px, py, pw, ph] = r.placed ?? [];
-        const what = params.instruction
-          ? `Edited the render ("${params.instruction}")`
-          : `Rendered "${params.subject}"`;
         return textResult(
-          `${what} onto page ${r.page}'s right panel ` +
-            `(${pw}x${ph} at ${px},${py}). The user's rubber can wipe it; a new ` +
-            `sketchbook_render replaces it.`,
+          `Placed output #${r.id} (${pw}x${ph} at ${px},${py}) on page ${r.page}. ` +
+            `Edit it later with edit_raster:${r.id} (+ replace:${r.id}); ` +
+            `sketchbook_view to check the page. The user's rubber can wipe it.`,
         );
       } catch (e: any) {
-        return textResult(`render failed: ${e.message}`, true);
+        return textResult(`generate failed: ${e.message}`, true);
       }
     },
   });

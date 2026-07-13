@@ -96,14 +96,15 @@ for line in sys.stdin:
         e = tool_call({"cmd": "erase", "id": a.get("id")})
         print(f"fake-pi: erase A -> {e}", file=sys.stderr)
 
-        # the sketchbook flow: grab the sketch, place a fake "AI render"
-        # (a shaded sphere gradient) on the right panel
-        emit({"type": "tool_execution_start", "toolName": "sketchbook_render",
-              "args": {"subject": "a rough circle"}})
-        sk = tool_call({"cmd": "sketch"})
+        # the art-director flow: crop a region (the user's sketch), place
+        # a fake "AI output" (a shaded sphere gradient) at a chosen dest,
+        # then edit-in-place: fetch it back and replace it
+        emit({"type": "tool_execution_start", "toolName": "sketchbook_generate",
+              "args": {"prompt": "a rough circle"}})
+        ck = tool_call({"cmd": "crop", "rect": [120, 450, 700, 950]})
         print(
-            f"fake-pi: sketch -> ok={sk.get('ok')} bbox={sk.get('bbox')} "
-            f"png {len(sk.get('png_base64', ''))}b64",
+            f"fake-pi: crop -> ok={ck.get('ok')} rect={ck.get('rect')} "
+            f"png {len(ck.get('png_base64', ''))}b64",
             file=sys.stderr,
         )
         w, hh = 320, 400
@@ -112,9 +113,20 @@ for line in sys.stdin:
             for x in range(w):
                 d = math.hypot((x - w / 2) / (w / 2), (y - hh / 2) / (hh / 2))
                 raw.append(max(0, min(255, int(60 + 195 * d))))
-        r = tool_call({"cmd": "render", "w": w, "h": hh,
-                       "raw_base64": base64.b64encode(bytes(raw)).decode()})
-        print(f"fake-pi: render -> {r}", file=sys.stderr)
+        r = tool_call({"cmd": "place", "w": w, "h": hh,
+                       "raw_base64": base64.b64encode(bytes(raw)).decode(),
+                       "rect": [760, 300, 1360, 1100]})
+        print(f"fake-pi: place -> {r}", file=sys.stderr)
+        rid = r.get("id")
+        rg = tool_call({"cmd": "raster_get", "id": rid})
+        print(f"fake-pi: raster_get -> ok={rg.get('ok')} id={rg.get('id')} "
+              f"rect={rg.get('rect')}", file=sys.stderr)
+        # "edit": place an inverted gradient over the same rect, replacing
+        raw2 = bytes(255 - b for b in raw)
+        r2 = tool_call({"cmd": "place", "w": w, "h": hh,
+                        "raw_base64": base64.b64encode(raw2).decode(),
+                        "rect": rg.get("rect"), "replace": rid})
+        print(f"fake-pi: place(replace) -> {r2}", file=sys.stderr)
     else:
         emit({"type": "message_update",
               "assistantMessageEvent": {"type": "text_delta", "delta": "pass"}})
