@@ -72,12 +72,14 @@ fetch-server:
 # Kill first: overwriting a running binary fails with "text file busy".
 deploy: build vendor/rm2fb_server
 	node --experimental-strip-types --check ext/sketchbook-canvas.ts   # a broken extension kills pi silently on-device
+	node --experimental-strip-types --check ext/sketchbook-context.ts
 	$(SSH) '$(KILL_APP); mkdir -p $(DEVICE_DIR)'
 	cat $(BUILT) | $(SSH) 'cat > $(DEVICE_DIR)/$(BIN) && chmod +x $(DEVICE_DIR)/$(BIN)'
 	cat scripts/appload-launch.sh | $(SSH) 'cat > $(DEVICE_DIR)/appload-launch.sh && chmod +x $(DEVICE_DIR)/appload-launch.sh'
 	cat scripts/takeover.sh | $(SSH) 'cat > $(DEVICE_DIR)/takeover.sh && chmod +x $(DEVICE_DIR)/takeover.sh'
 	cat ext/sketchbook-canvas.ts | $(SSH) 'cat > $(DEVICE_DIR)/sketchbook-canvas.ts'
 	cat ext/jpeg-decode.cjs | $(SSH) 'cat > $(DEVICE_DIR)/jpeg-decode.cjs'
+	cat ext/sketchbook-context.ts | $(SSH) 'cat > $(DEVICE_DIR)/sketchbook-context.ts'
 	cat vendor/rm2fb_server | $(SSH) 'cat > $(DEVICE_DIR)/rm2fb_server && chmod +x $(DEVICE_DIR)/rm2fb_server'
 	cat vendor/librm2fb_server.so | $(SSH) 'cat > $(DEVICE_DIR)/librm2fb_server.so'
 	cat app/external.manifest.json | $(SSH) 'cat > $(DEVICE_DIR)/external.manifest.json'

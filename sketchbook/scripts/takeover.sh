@@ -55,7 +55,7 @@ cd /home/root
 # is stopped while we run)
 HOME=/home/root PATH="/home/root/bin:/home/root/opt/node/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     NODE_OPTIONS="--max-old-space-size=640" \
-    SKETCHBOOK_EXT="$HERE/sketchbook-canvas.ts" \
+    SKETCHBOOK_EXT="$HERE/sketchbook-canvas.ts:$HERE/sketchbook-context.ts" \
     SKETCHBOOK_FONT="${SKETCHBOOK_FONT:-serif}" \
     GEMINI_API_KEY="${GEMINI_API_KEY:-}" \
     SKETCHBOOK_IMG_MODEL="${SKETCHBOOK_IMG_MODEL:-}" \

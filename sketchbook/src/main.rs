@@ -89,6 +89,7 @@ const TB_REFRESH: u32 = 4;
 const TB_ERASER: u32 = 5;
 const TB_UNDO: u32 = 6;
 const TB_REDO: u32 = 7;
+const TB_RESET: u32 = 8;
 
 /// Undo depth (each entry clones the page's vectors; raster buffers are
 /// cloned only when the op touched them).
@@ -1381,6 +1382,7 @@ impl App {
             }
             toolbar::Hit::Item(TB_UNDO) => self.do_undo(),
             toolbar::Hit::Item(TB_REDO) => self.do_redo(),
+            toolbar::Hit::Item(TB_RESET) => self.reset_session(),
             toolbar::Hit::Item(TB_REFRESH) => {
                 self.disp.full_refresh();
             }
@@ -1396,6 +1398,37 @@ impl App {
             }
         }
         self.draw_toolbar();
+    }
+
+    /// Archive the current pi session and start a fresh one. The new pi
+    /// keeps AGENT.md (its learned preferences) and can read any page with
+    /// sketchbook_view — only the conversation history is retired.
+    fn reset_session(&mut self) {
+        if let Some(pi) = self.pi.as_mut() {
+            pi.kill();
+        }
+        self.pi = None;
+        self.streaming = false;
+        self.set_working(false);
+        self.reply_buf.clear();
+        self.pi_alive_at = None;
+        let dir = pi_rpc::session_dir();
+        let mut archived = 0;
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "jsonl") {
+                    let mut arch = p.clone();
+                    arch.set_extension("jsonl.archived");
+                    if std::fs::rename(&p, &arch).is_ok() {
+                        archived += 1;
+                    }
+                }
+            }
+        }
+        self.pi_respawn_at = Some(Instant::now()); /* respawn loop restarts it */
+        self.live.status("idle");
+        println!("sketchbook: session reset ({archived} transcript(s) archived); fresh pi incoming");
     }
 
     /* -- undo / redo -- */
@@ -3303,6 +3336,7 @@ fn main() -> std::process::ExitCode {
                 toolbar::Item { id: TB_GENERATE, icon: toolbar::Icon::Squiggle, label: "RENDER", active: false },
                 toolbar::Item { id: TB_QUIET, icon: toolbar::Icon::Pi, label: if quiet { "OFF" } else { "AUTO" }, active: !quiet },
                 toolbar::Item { id: TB_REFRESH, icon: toolbar::Icon::Refresh, label: "CLEAN", active: false },
+                toolbar::Item { id: TB_RESET, icon: toolbar::Icon::Restart, label: "NEW SES", active: false },
             ];
             tb
         },

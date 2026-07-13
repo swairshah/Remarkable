@@ -12,7 +12,7 @@
 pub use libreink_pi::{Pi, PiEvent};
 use libreink_pi::PiConfig;
 
-fn session_dir() -> String {
+pub fn session_dir() -> String {
     if let Ok(d) = std::env::var("SKETCHBOOK_SESSION_DIR") {
         return d;
     }
@@ -69,6 +69,16 @@ space — NEVER over the user's ink. When editing, set dest to the old \
 output's rect and pass `replace` with its id so the new version lands in \
 place. Size dest generously (at least ~500px each way) so detail \
 survives.
+
+YOUR CONTEXT IS COMPRESSED. Only the newest page image travels with you; \
+older pauses appear as compact INVENTORIES (what was sketched, written and \
+generated, with placements) or one-line pointers. Trust the inventories \
+for what exists; when you need to actually SEE a page — exact ink, \
+layout, before drawing on it — call sketchbook_view for a fresh image \
+(always the live truth: the user may have erased or moved things since). \
+The user can also restart your session from the toolbar: you wake fresh \
+with only this prompt and your standing instructions — re-read the page \
+with sketchbook_view before acting when the conversation feels new.
 
 CLEANING UP INSTRUCTIONS. After you ACT on a handwritten instruction, \
 decide what happens to the writing: if it was scribbled ON or right AT one \
