@@ -45,6 +45,7 @@ mod pi_rpc;
 use display::{Display, Wave};
 use draw::{text_width, BLACK, WHITE};
 use fb::{Framebuffer, SCREEN_H as FB_H, SCREEN_W as FB_W};
+use libreink_core::toolbar::{Action, EdgeToolbar, EraserMode, Feature};
 use ink::{Sketchbook, Page, Pt, Rect, RenderExt, Stroke};
 use ipc::IpcServer;
 use pen::{Pen, PenPhase};
@@ -81,75 +82,31 @@ const SNAP_DIV: i32 = 2;
 const FADE_STEPS: u32 = 4;
 const FADE_STEP: Duration = Duration::from_millis(320);
 
-/* the right-edge toolbar (stock-reMarkable style): item ids */
-const TB_SELECT: u32 = 1;
-const TB_GENERATE: u32 = 2;
-const TB_QUIET: u32 = 3;
-const TB_REFRESH: u32 = 4;
-const TB_ERASER: u32 = 5;
-const TB_UNDO: u32 = 6;
-const TB_REDO: u32 = 7;
-const TB_RESET: u32 = 8;
+/* the right-edge toolbar (libreink-core's EdgeToolbar): this app's
+ * feature set. EraserMode (what the marker's rubber end does: object /
+ * pixel / region) comes from the component too. */
+const TB_FEATURES: [Feature; 8] = [
+    Feature::Undo,
+    Feature::Redo,
+    Feature::Select,
+    Feature::Eraser,
+    Feature::Nudge,
+    Feature::PiMode,
+    Feature::Refresh,
+    Feature::NewSession,
+];
 
 /// Undo depth (each entry clones the page's vectors; raster buffers are
 /// cloned only when the op touched them).
 const UNDO_CAP: usize = 16;
 
-/// What the marker's rubber end does.
-#[derive(Clone, Copy, PartialEq)]
-enum EraserMode {
-    /// Whole strokes vanish at a touch (the quick-sheets default).
-    Object,
-    /// Only what the rubber actually covers: strokes are SPLIT at the rub
-    /// (the vector model keeps the remainders), raster pixels go white.
-    Pixel,
-    /// Circle a region with the rubber; on lift everything inside goes.
-    Region,
-}
-
-impl EraserMode {
-    fn key(self) -> &'static str {
-        match self {
-            EraserMode::Object => "object",
-            EraserMode::Pixel => "pixel",
-            EraserMode::Region => "region",
-        }
-    }
-    fn from_key(s: &str) -> EraserMode {
-        match s {
-            "pixel" => EraserMode::Pixel,
-            "region" => EraserMode::Region,
-            _ => EraserMode::Object,
-        }
-    }
-    fn next(self) -> EraserMode {
-        match self {
-            EraserMode::Object => EraserMode::Pixel,
-            EraserMode::Pixel => EraserMode::Region,
-            EraserMode::Region => EraserMode::Object,
-        }
-    }
-    fn icon(self) -> toolbar::Icon {
-        match self {
-            EraserMode::Object => toolbar::Icon::Eraser,
-            EraserMode::Pixel => toolbar::Icon::EraserPixel,
-            EraserMode::Region => toolbar::Icon::EraserRegion,
-        }
-    }
-    fn label(self) -> &'static str {
-        match self {
-            EraserMode::Object => "ERASE",
-            EraserMode::Pixel => "PIXEL",
-            EraserMode::Region => "REGION",
-        }
-    }
-}
-
 /// Lasso selection: majority of a stroke's points must fall inside the
 /// loop for the stroke to join the selection.
 const SEL_INSIDE: f32 = 0.6;
-/// Drag preview repaint throttle.
-const DRAG_TICK: Duration = Duration::from_millis(70);
+/// A selection drag repaints its marquee only after the pen RESTS this
+/// long — never mid-motion (chasing the pen leaves DU smear trails). The
+/// real move happens once, on release.
+const DRAG_SETTLE: Duration = Duration::from_millis(150);
 
 /// One undo step: the page's vector content, plus the rasters when the
 /// recorded operation touched them (None = "rasters were not changed by
@@ -459,7 +416,8 @@ enum Sel {
         /// Save-under: the fb band beneath the preview marquee — erasing
         /// it is a memcpy, not a model re-render (the drag stays snappy).
         saved: Option<(i32, Vec<u16>)>,
-        last_tick: Instant,
+        /// Last pen motion; the marquee paints only after DRAG_SETTLE rest.
+        moved_at: Instant,
     },
 }
 
@@ -1313,7 +1271,15 @@ impl App {
         if self.sidebar.is_some() || self.agent_page.is_some() || self.lib_view.is_some() {
             return;
         }
-        self.tb.draw(&mut self.fb);
+        let st = toolbar::State {
+            can_undo: !self.undo.is_empty(),
+            can_redo: !self.redo.is_empty(),
+            selecting: self.sel.is_some(),
+            eraser: self.eraser,
+            pi_auto: !self.quiet,
+            ..Default::default()
+        };
+        self.tb.draw(&mut self.fb, &st);
         let r = self.tb.rect();
         self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
     }
@@ -1325,7 +1291,7 @@ impl App {
         }
         let Some(hit) = self.tb.hit(x, y) else { return false };
         match hit {
-            toolbar::Hit::Toggle => {
+            Action::Toggle => {
                 let was = self.tb.rect();
                 self.tb.open = !self.tb.open;
                 if !self.tb.open {
@@ -1336,15 +1302,15 @@ impl App {
                 }
                 self.draw_toolbar();
             }
-            toolbar::Hit::Item(TB_SELECT) => {
+            Action::Select => {
                 if self.sel.is_some() {
                     self.cancel_selection();
                 } else {
                     self.sel = Some(Sel::Armed);
-                    self.set_tb_active(TB_SELECT, true);
+                    self.draw_toolbar();
                 }
             }
-            toolbar::Hit::Item(TB_GENERATE) => {
+            Action::Nudge => {
                 /* offer the page to pi right now (quiet mode included) */
                 if !self.nb.page.is_empty() || !self.nb.rasters.is_empty() {
                     self.page_changed = true;
@@ -1355,49 +1321,25 @@ impl App {
                     self.quiet = quiet;
                 }
             }
-            toolbar::Hit::Item(TB_QUIET) => {
+            Action::PiMode => {
                 self.quiet = !self.quiet;
                 save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser);
-                let label = if self.quiet { "OFF" } else { "AUTO" };
-                for it in &mut self.tb.items {
-                    if it.id == TB_QUIET {
-                        it.label = label;
-                    }
-                }
-                self.set_tb_active(TB_QUIET, !self.quiet);
-            }
-            toolbar::Hit::Item(TB_ERASER) => {
-                self.eraser = self.eraser.next();
-                save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser);
-                let (icon, label, active) =
-                    (self.eraser.icon(), self.eraser.label(), self.eraser != EraserMode::Object);
-                for it in &mut self.tb.items {
-                    if it.id == TB_ERASER {
-                        it.icon = icon;
-                        it.label = label;
-                        it.active = active;
-                    }
-                }
                 self.draw_toolbar();
             }
-            toolbar::Hit::Item(TB_UNDO) => self.do_undo(),
-            toolbar::Hit::Item(TB_REDO) => self.do_redo(),
-            toolbar::Hit::Item(TB_RESET) => self.reset_session(),
-            toolbar::Hit::Item(TB_REFRESH) => {
+            Action::Eraser => {
+                self.eraser = self.eraser.next();
+                save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser);
+                self.draw_toolbar();
+            }
+            Action::Undo => self.do_undo(),
+            Action::Redo => self.do_redo(),
+            Action::NewSession => self.reset_session(),
+            Action::Refresh => {
                 self.disp.full_refresh();
             }
-            toolbar::Hit::Item(_) => {}
+            _ => {}
         }
         true
-    }
-
-    fn set_tb_active(&mut self, id: u32, active: bool) {
-        for it in &mut self.tb.items {
-            if it.id == id {
-                it.active = active;
-            }
-        }
-        self.draw_toolbar();
     }
 
     /// Archive the current pi session and start a fresh one. The new pi
@@ -1519,15 +1461,10 @@ impl App {
 
     /* -- lasso select: circle objects, drag them around -- */
 
-    /// Drop the selection without repainting (a full repaint follows).
+    /// Drop the selection without repainting (a full repaint follows —
+    /// the toolbar's SELECT cell un-inverts on its next draw).
     fn drop_selection(&mut self) {
-        if self.sel.take().is_some() {
-            for it in &mut self.tb.items {
-                if it.id == TB_SELECT {
-                    it.active = false;
-                }
-            }
-        }
+        self.sel = None;
     }
 
     fn cancel_selection(&mut self) {
@@ -1552,7 +1489,7 @@ impl App {
             self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
             self.restore_chrome_over(r);
         }
-        self.set_tb_active(TB_SELECT, false);
+        self.draw_toolbar(); /* SELECT un-inverts */
     }
 
     /// Pen events while the select tool is armed. Returns true if consumed.
@@ -1570,7 +1507,7 @@ impl App {
                         ly: y,
                         drawn: None,
                         saved: None,
-                        last_tick: Instant::now(),
+                        moved_at: Instant::now(),
                     });
                 } else {
                     /* press outside: drop the marquee, start a fresh lasso */
@@ -1597,26 +1534,13 @@ impl App {
             (Sel::Lasso { pts }, PenPhase::Release) => {
                 self.finish_lasso(pts);
             }
-            (Sel::Drag { sel, sx, sy, lx: _, ly: _, drawn, mut saved, mut last_tick }, PenPhase::Move) => {
-                let mut new_drawn = drawn;
-                if last_tick.elapsed() >= DRAG_TICK {
-                    last_tick = Instant::now();
-                    let target = offset_rect(sel.bbox, x - sx, y - sy).clamp_screen();
-                    if drawn != Some(target) {
-                        /* erase the old preview by pasting the saved band
-                         * back — a memcpy, no model re-render, no lag */
-                        if let (Some(d), Some((y0, band))) = (drawn, saved.take()) {
-                            self.fb.paste_band(y0, &band);
-                            let d = d.pad(8).clamp_screen();
-                            self.disp.update(d.x0, d.y0, d.w(), d.h(), Wave::Ink);
-                        }
-                        let keep = target.pad(9).clamp_screen();
-                        saved = Some((keep.y0, self.fb.copy_band(keep.y0, keep.y1 + 1)));
-                        self.draw_marquee(target);
-                        new_drawn = Some(target);
-                    }
+            (Sel::Drag { sel, sx, sy, lx, ly, drawn, saved, mut moved_at }, PenPhase::Move) => {
+                /* track the pen, paint nothing — the marquee appears where
+                 * the pen SETTLES (drag_settle_tick), never mid-motion */
+                if (x - lx).abs() + (y - ly).abs() >= 3 {
+                    moved_at = Instant::now();
                 }
-                self.sel = Some(Sel::Drag { sel, sx, sy, lx: x, ly: y, drawn: new_drawn, saved, last_tick });
+                self.sel = Some(Sel::Drag { sel, sx, sy, lx: x, ly: y, drawn, saved, moved_at });
             }
             (Sel::Drag { sel, sx, sy, lx, ly, drawn, saved, .. }, PenPhase::Release) => {
                 let _ = (lx, ly);
@@ -1693,6 +1617,32 @@ impl App {
             _ => {
                 self.sel = Some(Sel::Armed);
             }
+        }
+    }
+
+    /// The pen rested mid-drag: move the preview marquee to the resting
+    /// spot (band-restore the old one — a memcpy, no model re-render).
+    fn drag_settle_tick(&mut self) {
+        match self.sel.take() {
+            Some(Sel::Drag { sel, sx, sy, lx, ly, drawn, mut saved, moved_at }) => {
+                let mut new_drawn = drawn;
+                if moved_at.elapsed() >= DRAG_SETTLE {
+                    let target = offset_rect(sel.bbox, lx - sx, ly - sy).clamp_screen();
+                    if drawn != Some(target) {
+                        if let (Some(d), Some((y0, band))) = (drawn, saved.take()) {
+                            self.fb.paste_band(y0, &band);
+                            let d = d.pad(8).clamp_screen();
+                            self.disp.update(d.x0, d.y0, d.w(), d.h(), Wave::Ink);
+                        }
+                        let keep = target.pad(9).clamp_screen();
+                        saved = Some((keep.y0, self.fb.copy_band(keep.y0, keep.y1 + 1)));
+                        self.draw_marquee(target);
+                        new_drawn = Some(target);
+                    }
+                }
+                self.sel = Some(Sel::Drag { sel, sx, sy, lx, ly, drawn: new_drawn, saved, moved_at });
+            }
+            other => self.sel = other,
         }
     }
 
@@ -3348,20 +3298,7 @@ fn main() -> std::process::ExitCode {
         pi_font,
         lib_view: None,
         fade: None,
-        tb: {
-            let mut tb = toolbar::EdgeToolbar::new(FB_W - 52, 96);
-            tb.items = vec![
-                toolbar::Item { id: TB_UNDO, icon: toolbar::Icon::Undo, label: "UNDO", active: false },
-                toolbar::Item { id: TB_REDO, icon: toolbar::Icon::Redo, label: "REDO", active: false },
-                toolbar::Item { id: TB_SELECT, icon: toolbar::Icon::Lasso, label: "SELECT", active: false },
-                toolbar::Item { id: TB_ERASER, icon: eraser.icon(), label: eraser.label(), active: eraser != EraserMode::Object },
-                toolbar::Item { id: TB_GENERATE, icon: toolbar::Icon::Squiggle, label: "RENDER", active: false },
-                toolbar::Item { id: TB_QUIET, icon: toolbar::Icon::Pi, label: if quiet { "OFF" } else { "AUTO" }, active: !quiet },
-                toolbar::Item { id: TB_REFRESH, icon: toolbar::Icon::Refresh, label: "CLEAN", active: false },
-                toolbar::Item { id: TB_RESET, icon: toolbar::Icon::Restart, label: "NEW SES", active: false },
-            ];
-            tb
-        },
+        tb: EdgeToolbar::new(FB_W - 52, 96, TB_FEATURES.to_vec()),
         sel: None,
         pen_chrome: false,
         eraser,
@@ -3377,11 +3314,6 @@ fn main() -> std::process::ExitCode {
     /* first paint */
     app.nb.page.render_full(&mut app.fb, &app.nb.rasters);
     app.disp.full_refresh();
-    app.tb.items.iter_mut().for_each(|it| {
-        if it.id == TB_QUIET {
-            it.active = !app.quiet; /* eye open = watching */
-        }
-    });
     app.draw_menu_icon();
     app.draw_toolbar();
     app.show_page_indicator();
@@ -3522,6 +3454,7 @@ fn main() -> std::process::ExitCode {
             app.anim_tick();
         }
         app.fade_tick();
+        app.drag_settle_tick();
         app.maybe_send_page();
         app.live.tick(app.nb.current);
         app.check_pi_health();
@@ -3590,6 +3523,13 @@ fn next_timeout(app: &App) -> i32 {
     }
     if let Some(f) = &app.fade {
         soonest(f.next_at.saturating_duration_since(Instant::now()));
+    }
+    if let Some(Sel::Drag { sel, sx, sy, lx, ly, drawn, moved_at, .. }) = &app.sel {
+        /* wake for the settle repaint — but only while one is pending */
+        let target = offset_rect(sel.bbox, lx - sx, ly - sy).clamp_screen();
+        if *drawn != Some(target) {
+            soonest(DRAG_SETTLE.saturating_sub(moved_at.elapsed()));
+        }
     }
     if app.live.enabled {
         /* batch flushes + reconnect checks while streaming */

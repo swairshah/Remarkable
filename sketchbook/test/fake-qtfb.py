@@ -114,7 +114,7 @@ def main():
         s.pen_tap(1352, 96)             # toggle button: unfold
         s.drain(1.5)
         write_png(out_png.replace(".png", "-toolbar.png"))
-        s.pen_tap(1352, 182)            # first item: SELECT (lasso)
+        s.pen_tap(1352, 396)            # third item: SELECT (lasso)
         s.drain(1.0)
         s.pen(PEN_PRESS, 350, 420)      # lasso around the circle sketch
         for i in range(1, 40):
