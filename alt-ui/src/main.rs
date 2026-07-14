@@ -36,7 +36,7 @@
  * APP is this app's identity in those crates: log prefix + env-var prefix. */
 pub const APP: libreink_core::app::AppId =
     libreink_core::app::AppId { name: "paper", env_prefix: "PAPER" };
-pub use libreink_core::{draw, fb, font, png, png_dec};
+pub use libreink_core::{draw, fb, font, png, png_dec, toolbar};
 pub use libreink_display::{display, qtfb, rm2fb};
 pub use libreink_input::{palm, pen, power, touch};
 pub use libreink_hershey as hershey;
@@ -48,8 +48,6 @@ pub use libreink_page as ink;
 #[allow(dead_code)] /* words/snapshot/underline wire in with pi (M5) */
 mod doc;
 mod home;
-#[allow(dead_code)] /* selection APIs wire in with the lasso (M4) */
-mod icons;
 mod kb;
 #[allow(dead_code)] /* wired in with pi (M5) */
 mod pi_rpc;
@@ -57,7 +55,6 @@ mod select;
 mod statusbar;
 mod store;
 mod thumbs;
-mod toolbar;
 #[allow(dead_code)] /* MoveStrokes wires in with the lasso (M4) */
 mod undo;
 
@@ -78,7 +75,7 @@ use std::collections::VecDeque;
 use statusbar::{SysStatus, STATUS_H};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use toolbar::{TbAction, Tool};
+use toolbar::{Action, EdgeToolbar, EraserMode, Feature, Tool};
 use undo::EditOp;
 
 /* ---- tuning -------------------------------------------------------------- */
@@ -88,6 +85,10 @@ const INK_FLUSH_TAKEOVER: Duration = Duration::from_millis(8);
 const PEN_TIMEOUT: Duration = Duration::from_millis(1500); /* palm rejection */
 
 const ERASER_R: f32 = 22.0;
+
+/// A selection drag repaints its dashed ring only after the pen RESTS this
+/// long — never mid-motion (chasing the pen leaves DU smear trails).
+const DRAG_SETTLE: Duration = Duration::from_millis(150);
 
 /// How long a writing pause must last before the page goes to pi.
 const IDLE_DELAY: Duration = Duration::from_millis(2800);
@@ -99,9 +100,44 @@ const ANIM_BUDGET: f32 = 48.0;
 /// Page snapshots for pi are half scale (702x936).
 const SNAP_DIV: i32 = 2;
 
-/* the pi working dot sits just left of the toolbar strip */
-const DOT_RECT: Rect =
-    Rect { x0: toolbar::TB_X0 - 40, y0: 8, x1: toolbar::TB_X0 - 14, y1: 34 };
+/* the AGENT.md standing-instructions page (opened from the home header) */
+const AGENT_TEXT_X: i32 = 70;
+const AGENT_TEXT_Y0: i32 = 120;
+const AGENT_TEXT_PX: f32 = 36.0;
+const AGENT_TEXT_W: i32 = FB_W - 2 * AGENT_TEXT_X;
+
+/// The user's standing-instructions file — MUST match pi_rpc.rs, which
+/// injects it into pi's system prompt at every launch.
+fn agent_md_path() -> String {
+    if let Ok(p) = std::env::var("PAPER_AGENT_MD") {
+        return p;
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/root".into());
+    format!("{home}/.local/share/alt-ui/AGENT.md")
+}
+
+/* the right-edge toolbar (libreink-core's EdgeToolbar): toggle-button
+ * center + this app's feature set, top to bottom */
+const TB_CX: i32 = FB_W - 52;
+const TB_CY: i32 = 96;
+const TB_FEATURES: [Feature; 12] = [
+    Feature::Tool(Tool::Pen),
+    Feature::Tool(Tool::Eraser),
+    Feature::Tool(Tool::Lasso),
+    Feature::Undo,
+    Feature::Redo,
+    Feature::PiMode,
+    Feature::Nudge,
+    Feature::PagePrev,
+    Feature::PageGoTo,
+    Feature::PageNext,
+    Feature::Font,
+    Feature::Home,
+];
+
+/* the pi working dot sits just left of the unfolded strip's edge */
+const TB_EDGE: i32 = TB_CX - toolbar::STRIP_W / 2;
+const DOT_RECT: Rect = Rect { x0: TB_EDGE - 40, y0: 8, x1: TB_EDGE - 14, y1: 34 };
 
 /* the top-edge swipe reveals the top bar (CLOSE / MY FILES / status) */
 const EDGE_Y: i32 = 16;
@@ -178,7 +214,7 @@ fn settings_path() -> String {
     format!("{}/settings.json", store::data_dir())
 }
 
-fn load_settings() -> (String, home::Sort, Tool, PiFont) {
+fn load_settings() -> (String, home::Sort, Tool, PiFont, bool, EraserMode) {
     match store::read_json(&settings_path()) {
         Some(v) => (
             v["last_doc"].as_str().unwrap_or("").to_string(),
@@ -186,21 +222,28 @@ fn load_settings() -> (String, home::Sort, Tool, PiFont) {
                 Some("title") => home::Sort::Title,
                 _ => home::Sort::Opened,
             },
-            match v["tool"].as_str() {
-                Some("eraser") => Tool::Eraser,
-                Some("lasso") => Tool::Lasso,
-                _ => Tool::Pen,
-            },
+            Tool::from_key(v["tool"].as_str().unwrap_or("pen")),
             v["pi_font"]
                 .as_str()
                 .and_then(PiFont::from_key)
                 .unwrap_or(PiFont::Serif),
+            v["quiet"].as_bool().unwrap_or(false),
+            EraserMode::from_key(v["eraser"].as_str().unwrap_or("object")),
         ),
-        None => (String::new(), home::Sort::Opened, Tool::Pen, PiFont::Serif),
+        None => {
+            (String::new(), home::Sort::Opened, Tool::Pen, PiFont::Serif, false, EraserMode::Object)
+        }
     }
 }
 
-fn save_settings(last_doc: &str, sort: home::Sort, tool: Tool, pi_font: PiFont) {
+fn save_settings(
+    last_doc: &str,
+    sort: home::Sort,
+    tool: Tool,
+    pi_font: PiFont,
+    quiet: bool,
+    eraser: EraserMode,
+) {
     let p = settings_path();
     if let Some(dir) = std::path::Path::new(&p).parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -208,8 +251,10 @@ fn save_settings(last_doc: &str, sort: home::Sort, tool: Tool, pi_font: PiFont) 
     let doc = json!({
         "last_doc": last_doc,
         "sort": match sort { home::Sort::Title => "title", home::Sort::Opened => "opened" },
-        "tool": match tool { Tool::Pen => "pen", Tool::Eraser => "eraser", Tool::Lasso => "lasso" },
+        "tool": tool.key(),
         "pi_font": pi_font.key(),
+        "quiet": quiet,
+        "eraser": eraser.key(),
     });
     let _ = std::fs::write(&p, serde_json::to_vec(&doc).unwrap_or_default());
 }
@@ -241,13 +286,17 @@ struct DocView {
 
     /* editing */
     tool: Tool,
-    tb_open: bool,
+    tb: EdgeToolbar,
     undo: undo::PerPage,
     pending_erase: Vec<ink::OwnedStroke>, /* rubber batch, one op per contact */
+    /* pixel-rubber batch: (lifted originals, fragment refs), one op per contact */
+    pending_split: (Vec<ink::OwnedStroke>, Vec<(ink::Owner, u64)>),
+    rub_loop: Option<select::Lasso>, /* region eraser: the loop being drawn */
     lasso: Option<select::Lasso>,
     selection: Option<select::Selection>,
     sel_chrome: Option<Rect>, /* where the dashed box is PAINTED right now */
-    last_drag_paint: Instant,
+    drag_moved_at: Instant, /* last pen motion during a drag */
+    drag_dirty: bool,       /* ring not yet painted at the current offset */
 
     /* live pen ink */
     cur_stroke: Option<Stroke>,
@@ -275,13 +324,16 @@ impl DocView {
         DocView {
             doc,
             tool,
-            tb_open: false,
+            tb: EdgeToolbar::new(TB_CX, TB_CY, TB_FEATURES.to_vec()),
             undo: undo::PerPage::default(),
             pending_erase: Vec::new(),
+            pending_split: (Vec::new(), Vec::new()),
+            rub_loop: None,
             lasso: None,
             selection: None,
             sel_chrome: None,
-            last_drag_paint: Instant::now(),
+            drag_moved_at: Instant::now(),
+            drag_dirty: false,
             cur_stroke: None,
             ink_dirty: None,
             contact_changed: false,
@@ -298,9 +350,22 @@ impl DocView {
     }
 }
 
+/// The standing-instructions page: AGENT.md rendered as text, plus the
+/// user's not-yet-applied handwritten annotations (never persisted as ink —
+/// pi consumes them into the file, then the page re-renders clean).
+struct AgentView {
+    ink: Page,                 /* annotation strokes only */
+    cur_stroke: Option<Stroke>,
+    ink_dirty: Option<Rect>,
+    changed: bool,             /* unsent annotations exist */
+    waiting: bool,             /* pi is applying them; reload on End */
+    idle_at: Option<Instant>,  /* the pause trigger */
+}
+
 enum Screen {
     Home(HomeView),
     Doc(DocView),
+    Agent(AgentView),
 }
 
 /// Modal overlays: exactly one at a time, swallowing all input. The idx
@@ -343,6 +408,9 @@ struct App {
     sort: home::Sort,
     tool: Tool, /* remembered across documents, persisted */
     pi_font: PiFont, /* pi's default writing font, persisted */
+    quiet: bool, /* pi OFF: pauses don't send pages (persisted); NUDGE still does */
+    eraser: EraserMode, /* what erasing does: object/pixel/region (persisted) */
+    nudged: bool, /* a NUDGE is in flight — overrides quiet until the page sends */
     flips_since_flash: u32, /* partial-GC16 turns; GC16 flash every FLIP_DEGHOST_EVERY */
 
     ink_flush: Duration,
@@ -375,7 +443,7 @@ impl App {
         if let Screen::Doc(dv) = &mut self.screen {
             dv.doc.save_all();
         }
-        save_settings("", self.sort, self.tool, self.pi_font);
+        save_settings("", self.sort, self.tool, self.pi_font, self.quiet, self.eraser);
         self.screen = Screen::Home(HomeView::build(folder, self.sort));
         self.render_home(true);
         if edited {
@@ -477,9 +545,14 @@ impl App {
                 home::Sort::Opened => home::Sort::Title,
                 home::Sort::Title => home::Sort::Opened,
             };
-            save_settings("", self.sort, self.tool, self.pi_font);
+            save_settings("", self.sort, self.tool, self.pi_font, self.quiet, self.eraser);
             self.rebuild_home();
             self.render_home(false);
+            return;
+        }
+        let ix = sx - 24 - home::INST_BTN_W;
+        if in_rect(x, y, ix, by, home::INST_BTN_W, home::HDR_BTN_H) {
+            self.open_agent_page();
             return;
         }
         /* breadcrumb: tap the "< folder" title to go back up */
@@ -523,7 +596,7 @@ impl App {
                     d.count(),
                     d.current + 1
                 );
-                save_settings(id, self.sort, self.tool, self.pi_font);
+                save_settings(id, self.sort, self.tool, self.pi_font, self.quiet, self.eraser);
                 self.dialog = None;
                 self.screen = Screen::Doc(DocView::new(d, self.tool));
                 self.flips_since_flash = 0;
@@ -591,6 +664,7 @@ impl App {
                 self.disp.update(r.x0, r.y0, r.w(), r.h(), w);
             }
             Screen::Home(_) => self.render_home(false),
+            Screen::Agent(_) => self.render_agent_page(false),
         }
     }
 
@@ -605,7 +679,7 @@ impl App {
             self.paint_top_bar();
         }
         if let Screen::Doc(dv) = &self.screen {
-            let t = toolbar::tb_rect(dv.tb_open);
+            let t = dv.tb.rect();
             if r.x1 >= t.x0 && r.x0 <= t.x1 && r.y1 >= t.y0 && r.y0 <= t.y1 {
                 self.paint_toolbar();
             }
@@ -760,6 +834,7 @@ impl App {
                 }
             }
             Screen::Doc(_) => self.doc_pen(phase, x, y, pressure, rubber),
+            Screen::Agent(_) => self.agent_pen(phase, x, y, pressure, rubber),
         }
     }
 
@@ -769,7 +844,7 @@ impl App {
         if phase == PenPhase::Press {
             let Screen::Doc(dv) = &self.screen else { return };
             if dv.cur_stroke.is_none() {
-                if let Some(a) = toolbar::hit(x, y, dv.tb_open) {
+                if let Some(a) = dv.tb.hit(x, y) {
                     self.pen_swallow = true; /* swallow this tap's Move/Release */
                     self.toolbar_action(a);
                     return;
@@ -799,7 +874,11 @@ impl App {
                         self.cancel_lasso();
                         self.dismiss_selection();
                     }
-                    self.erase_pass(x as f32, y as f32);
+                    if self.eraser == EraserMode::Region {
+                        self.region_rub(phase, x, y);
+                    } else {
+                        self.erase_pass(x as f32, y as f32);
+                    }
                 } else if tool == Tool::Pen {
                     self.ink_pass(phase, x, y, pressure);
                 } else {
@@ -812,7 +891,9 @@ impl App {
                     self.lasso_pen(phase, x, y);
                 }
                 self.commit_open_stroke();
+                self.finish_region_rub();
                 self.flush_erase_op();
+                self.flush_split_op();
                 if let Screen::Doc(dv) = &mut self.screen {
                     if dv.contact_changed {
                         dv.contact_changed = false;
@@ -839,7 +920,8 @@ impl App {
                 self.render_doc_region_wave(r, Some(Wave::Ink));
                 self.restore_chrome_over(r);
             }
-            Screen::Home(_) => {
+            Screen::Home(_) | Screen::Agent(_) => {
+                /* both paint white under the dot region */
                 self.fb.fill_rect(r.x0, r.y0, r.w(), r.h(), WHITE);
                 self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
             }
@@ -920,27 +1002,35 @@ impl App {
         }
     }
 
-    /// Live drag: the logical offset always tracks the pen; only the
-    /// dashed chrome repaints, throttled. Ink stays put until release.
+    /// Live drag: the logical offset always tracks the pen, but NOTHING
+    /// repaints mid-motion — the ring appears where the pen settles
+    /// (drag_settle_tick) and the ink itself moves once, on release.
     fn drag_move(&mut self, x: i32, y: i32) {
-        let paint = {
+        let Screen::Doc(dv) = &mut self.screen else { return };
+        let Some(sel) = &mut dv.selection else { return };
+        let Some((fx, fy)) = sel.drag_from else { return };
+        let (dx, dy) = sel.clamp_offset(x - fx, y - fy);
+        if (dx, dy) == (sel.dx, sel.dy) {
+            return;
+        }
+        sel.dx = dx;
+        sel.dy = dy;
+        dv.drag_moved_at = Instant::now();
+        dv.drag_dirty = true;
+    }
+
+    /// The pen rested mid-drag: show the ring at the resting offset.
+    fn drag_settle_tick(&mut self) {
+        let due = {
             let Screen::Doc(dv) = &mut self.screen else { return };
-            let Some(sel) = &mut dv.selection else { return };
-            let Some((fx, fy)) = sel.drag_from else { return };
-            let (dx, dy) = sel.clamp_offset(x - fx, y - fy);
-            if (dx, dy) == (sel.dx, sel.dy) {
-                return;
-            }
-            sel.dx = dx;
-            sel.dy = dy;
-            if dv.last_drag_paint.elapsed() < Duration::from_millis(30) {
-                false
-            } else {
-                dv.last_drag_paint = Instant::now();
-                true
-            }
+            dv.drag_dirty
+                && dv.selection.as_ref().is_some_and(|s| s.drag_from.is_some())
+                && dv.drag_moved_at.elapsed() >= DRAG_SETTLE
         };
-        if paint {
+        if due {
+            if let Screen::Doc(dv) = &mut self.screen {
+                dv.drag_dirty = false;
+            }
             self.repaint_selection_chrome();
         }
     }
@@ -949,6 +1039,7 @@ impl App {
     fn drag_commit(&mut self) {
         let dirty = {
             let Screen::Doc(dv) = &mut self.screen else { return };
+            dv.drag_dirty = false; /* the commit repaints everything */
             let Some(sel) = &mut dv.selection else { return };
             let (dx, dy) = (sel.dx, sel.dy);
             sel.drag_from = None;
@@ -1147,6 +1238,99 @@ impl App {
         self.paint_toolbar();
     }
 
+    /// One pixel-rubber contact = one undoable SPLIT op.
+    fn flush_split_op(&mut self) {
+        let Screen::Doc(dv) = &mut self.screen else { return };
+        let (removed, added_refs) = std::mem::take(&mut dv.pending_split);
+        if removed.is_empty() && added_refs.is_empty() {
+            return;
+        }
+        let removed_refs = removed.iter().map(|o| (o.owner, o.stroke.id)).collect();
+        let key = dv.doc.cur_ink_path();
+        dv.undo.stack(&key).push(EditOp::SplitStrokes {
+            removed_refs,
+            removed: Some(removed),
+            added_refs,
+            added: None,
+        });
+        self.paint_toolbar();
+    }
+
+    /// REGION eraser: the rubber draws a loop (thin trail); the lift deletes.
+    fn region_rub(&mut self, phase: PenPhase, x: i32, y: i32) {
+        match phase {
+            PenPhase::Press => {
+                if let Screen::Doc(dv) = &mut self.screen {
+                    dv.rub_loop = Some(select::Lasso::new(x as f32, y as f32));
+                }
+            }
+            PenPhase::Move => {
+                let Screen::Doc(dv) = &mut self.screen else { return };
+                let Some(l) = &mut dv.rub_loop else {
+                    dv.rub_loop = Some(select::Lasso::new(x as f32, y as f32));
+                    return;
+                };
+                if let Some(prev) = l.extend(x as f32, y as f32) {
+                    let seg = select::draw_trail_segment(&mut self.fb, prev, (x as f32, y as f32));
+                    dv.ink_dirty = Some(match dv.ink_dirty {
+                        None => seg,
+                        Some(d) => d.union(seg),
+                    });
+                }
+            }
+            PenPhase::Release => self.finish_region_rub(),
+        }
+    }
+
+    /// The region-eraser loop closed: everything fully inside it goes, as
+    /// one undoable EraseStrokes op (same anatomy as a lasso delete).
+    fn finish_region_rub(&mut self) {
+        let (trail, dirty) = {
+            let Screen::Doc(dv) = &mut self.screen else { return };
+            let Some(l) = dv.rub_loop.take() else { return };
+            let trail = l.bbox().pad(6);
+            let mut dirty: Option<Rect> = None;
+            if l.viable() {
+                let (refs, _) = select::select_strokes(&dv.doc.page, &l.pts);
+                if !refs.is_empty() {
+                    let (lifted, gone) = dv.doc.page.remove_strokes_by_ids(&refs);
+                    let key = dv.doc.cur_ink_path();
+                    dv.undo.stack(&key).push(EditOp::erased(lifted));
+                    dv.contact_changed = true;
+                    dv.page_changed = true;
+                    dv.deghost_at = Some(Instant::now() + Duration::from_millis(1100));
+                    if let Some(g) = gone {
+                        /* stop pacing anim strokes that just vanished */
+                        let cur = dv.doc.current;
+                        let mut region = g;
+                        dv.anim.retain(|a| {
+                            let hit = a.page == cur
+                                && a.bbox.x1 >= g.x0
+                                && a.bbox.x0 <= g.x1
+                                && a.bbox.y1 >= g.y0
+                                && a.bbox.y0 <= g.y1;
+                            if hit {
+                                region = region.union(a.bbox);
+                            }
+                            !hit
+                        });
+                        dirty = Some(region);
+                    }
+                }
+            }
+            (trail, dirty)
+        };
+        /* wipe the trail, repaint what vanished, un-gray UNDO */
+        let r = match dirty {
+            Some(d) => trail.union(d.pad(4)),
+            None => trail,
+        }
+        .clamp_screen();
+        self.render_doc_region_wave(r, Some(Wave::Ink));
+        self.restore_chrome_over(r);
+        self.paint_toolbar();
+    }
+
     fn ink_pass(&mut self, phase: PenPhase, x: i32, y: i32, pressure: i32) {
         let Screen::Doc(dv) = &mut self.screen else { return };
         let p = Pt { x: x as f32, y: y as f32, r: brush_r(pressure) };
@@ -1210,10 +1394,33 @@ impl App {
             self.paint_toolbar();
             return;
         }
+        let mode = self.eraser;
         let gone = {
             let Screen::Doc(dv) = &mut self.screen else { return };
-            let Some((gone, lifted)) = dv.doc.page.erase_at(x, y, ERASER_R) else { return };
-            dv.pending_erase.extend(lifted);
+            let gone = if mode == EraserMode::Pixel {
+                let Some((gone, removed, added)) = dv.doc.page.split_at(x, y, ERASER_R) else {
+                    return;
+                };
+                /* merge into the contact's batch: re-splitting one of our
+                 * own fragments must not record it as a removed ORIGINAL —
+                 * it never existed before this contact */
+                let (pr, pa) = &mut dv.pending_split;
+                for os in removed {
+                    let key = (os.owner, os.stroke.id);
+                    match pa.iter().position(|&k| k == key) {
+                        Some(i) => {
+                            pa.remove(i);
+                        }
+                        None => pr.push(os),
+                    }
+                }
+                pa.extend(added);
+                gone
+            } else {
+                let Some((gone, lifted)) = dv.doc.page.erase_at(x, y, ERASER_R) else { return };
+                dv.pending_erase.extend(lifted);
+                gone
+            };
             dv.contact_changed = true;
             dv.page_changed = true;
             /* DU-erased black ink ghosts badly; flash once the scrubbing
@@ -1279,72 +1486,101 @@ impl App {
             .undo
             .peek(&key)
             .map_or((false, false), |s| (s.can_undo(), s.can_redo()));
-        toolbar::paint(
-            &mut self.fb,
-            dv.tb_open,
-            dv.tool,
-            cu,
-            cr,
-            (dv.doc.current + 1, dv.doc.count()),
-        );
+        let st = toolbar::State {
+            can_undo: cu,
+            can_redo: cr,
+            tool: dv.tool,
+            eraser: self.eraser,
+            pi_auto: !self.quiet,
+            page: (dv.doc.current + 1, dv.doc.count()),
+            ..Default::default()
+        };
+        dv.tb.draw(&mut self.fb, &st);
     }
 
     fn paint_toolbar(&mut self) {
         self.blit_toolbar();
         let Screen::Doc(dv) = &self.screen else { return };
-        let r = toolbar::tb_rect(dv.tb_open);
+        let r = dv.tb.rect();
         self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
     }
 
-    fn toolbar_action(&mut self, a: TbAction) {
+    fn toolbar_action(&mut self, a: Action) {
         match a {
-            TbAction::Swallow => {}
-            TbAction::Toggle => {
-                let was_open = {
+            Action::Toggle => {
+                let collapsed = {
                     let Screen::Doc(dv) = &mut self.screen else { return };
-                    let was = dv.tb_open;
-                    dv.tb_open = !was;
-                    was
+                    let r = dv.tb.rect(); /* full strip while still open */
+                    dv.tb.open = !dv.tb.open;
+                    (!dv.tb.open).then_some(r)
                 };
-                if was_open {
+                if let Some(r) = collapsed {
                     /* collapsing: re-render the strip area from the model */
-                    let r = toolbar::tb_rect(true);
                     self.render_doc_region(r);
                 }
                 self.paint_toolbar();
             }
-            TbAction::Tool(t) => {
-                self.cancel_lasso();
-                self.dismiss_selection();
-                if let Screen::Doc(dv) = &mut self.screen {
-                    dv.tool = t;
+            Action::Tool(t) => {
+                if t == Tool::Eraser && self.tool == Tool::Eraser {
+                    /* second tap on the armed eraser: cycle its mode */
+                    self.eraser = self.eraser.next();
+                } else {
+                    self.cancel_lasso();
+                    self.dismiss_selection();
+                    if let Screen::Doc(dv) = &mut self.screen {
+                        dv.tool = t;
+                    }
+                    self.tool = t;
                 }
-                self.tool = t;
-                save_settings(&self.doc_id(), self.sort, t, self.pi_font);
+                save_settings(&self.doc_id(), self.sort, t, self.pi_font, self.quiet, self.eraser);
                 self.paint_toolbar();
             }
-            TbAction::Undo => self.undo_action(false),
-            TbAction::Redo => self.undo_action(true),
-            TbAction::PagePrev => self.flip(-1),
-            TbAction::PageNext => self.flip(1),
-            TbAction::GoTo => {
+            Action::Undo => self.undo_action(false),
+            Action::Redo => self.undo_action(true),
+            Action::Nudge => {
+                /* offer the page to pi right now (quiet mode included) */
+                let armed = {
+                    let Screen::Doc(dv) = &mut self.screen else { return };
+                    if dv.doc.page.is_empty() {
+                        false
+                    } else {
+                        dv.page_changed = true;
+                        dv.idle_at = Some(Instant::now());
+                        true
+                    }
+                };
+                if armed {
+                    self.nudged = true;
+                    self.maybe_send_page();
+                }
+            }
+            Action::PiMode => {
+                self.quiet = !self.quiet;
+                save_settings(&self.doc_id(), self.sort, self.tool, self.pi_font, self.quiet, self.eraser);
+                self.paint_toolbar();
+            }
+            Action::PagePrev => self.flip(-1),
+            Action::PageNext => self.flip(1),
+            Action::PageGoTo => {
                 self.dialog = Some(Dialog::GoTo { entry: String::new() });
                 self.render_goto_dialog();
             }
-            TbAction::Font => {
+            Action::Font => {
                 self.dialog = Some(Dialog::FontPick);
                 self.render_font_dialog();
             }
-            TbAction::Home => {
+            Action::Home => {
                 self.go_home(None);
             }
+            /* not in TB_FEATURES */
+            _ => {}
         }
     }
 
     fn doc_id(&self) -> String {
         match &self.screen {
             Screen::Doc(dv) => dv.doc.id.clone(),
-            Screen::Home(_) => String::new(),
+            _ => String::new(),
         }
     }
 
@@ -1398,7 +1634,7 @@ impl App {
                 }
                 /* finger taps work the toolbar too */
                 if let Screen::Doc(dv) = &self.screen {
-                    if let Some(a) = toolbar::hit(x, y, dv.tb_open) {
+                    if let Some(a) = dv.tb.hit(x, y) {
                         self.toolbar_action(a);
                         return;
                     }
@@ -1429,6 +1665,12 @@ impl App {
                         if dx.abs() >= FLIP_DX && dy.abs() <= FLIP_DY_MAX {
                             /* swipe left = next page (turning forward) */
                             self.flip(if dx < 0 { 1 } else { -1 });
+                        }
+                    }
+                    Screen::Agent(_) => {
+                        /* forward (swipe left) returns to the home grid */
+                        if dx <= -FLIP_DX && dy.abs() <= FLIP_DY_MAX {
+                            self.close_agent_page();
                         }
                     }
                     Screen::Home(_) => {
@@ -1509,6 +1751,7 @@ impl App {
         match &self.screen {
             Screen::Doc(_) => self.render_doc_region(r),
             Screen::Home(_) => self.render_home(false),
+            Screen::Agent(_) => self.render_agent_page(false),
         }
     }
 
@@ -1679,7 +1922,7 @@ impl App {
         match dialog_row_at(n, x, y) {
             Some(i) if i < PiFont::ALL.len() => {
                 self.pi_font = PiFont::ALL[i];
-                save_settings(&self.doc_id(), self.sort, self.tool, self.pi_font);
+                save_settings(&self.doc_id(), self.sort, self.tool, self.pi_font, self.quiet, self.eraser);
                 println!("paper: pi font -> {}", self.pi_font.key());
                 self.dialog = None;
                 self.dismiss_font_dialog(n);
@@ -1736,6 +1979,236 @@ impl App {
         }
     }
 
+    /* -- the AGENT.md standing-instructions page -- */
+
+    fn open_agent_page(&mut self) {
+        self.dialog = None;
+        self.bar_until = None;
+        self.screen = Screen::Agent(AgentView {
+            ink: Page::default(),
+            cur_stroke: None,
+            ink_dirty: None,
+            changed: false,
+            waiting: false,
+            idle_at: None,
+        });
+        self.render_agent_page(true);
+        println!("paper: AGENT.md page opened");
+    }
+
+    fn close_agent_page(&mut self) {
+        self.screen = Screen::Home(HomeView::build(None, self.sort));
+        self.render_home(true);
+        if self.streaming {
+            self.working = false;
+            self.set_working(true); /* re-draw the dot over the fresh home */
+        }
+        println!("paper: AGENT.md page closed");
+    }
+
+    /// Paint the standing-instructions page: header, the file as text, and
+    /// any pending annotation ink. `flash` runs the GC16 page-turn refresh.
+    fn render_agent_page(&mut self, flash: bool) {
+        self.blit_agent_page();
+        if flash {
+            self.disp.full_refresh();
+        } else {
+            self.disp.update(0, 0, FB_W, FB_H, Wave::Print);
+        }
+    }
+
+    /// Draw the instructions page into the framebuffer WITHOUT pushing it
+    /// to the panel (the caller picks the update: full paint, or just the
+    /// region a rubber pass wiped — redrawing the rest is idempotent).
+    fn blit_agent_page(&mut self) {
+        self.fb.fill_rect(0, 0, FB_W, FB_H, WHITE);
+        self.fb.text(24, 18, "YOUR STANDING INSTRUCTIONS  (AGENT.MD)", 3, BLACK);
+        self.fb.text(
+            24,
+            52,
+            "write feedback on this page, pause to apply - swipe left to return",
+            2,
+            GRAY,
+        );
+        self.fb.fill_rect(0, 84, FB_W, 2, BLACK);
+
+        let content = std::fs::read_to_string(agent_md_path()).unwrap_or_default();
+        let lh = text::line_h(text::Face::Body, AGENT_TEXT_PX);
+        let mut y = AGENT_TEXT_Y0;
+        'outer: for raw in content.lines() {
+            let line = if raw.trim().is_empty() { " " } else { raw };
+            for wrapped in text::wrap(text::Face::Body, AGENT_TEXT_PX, AGENT_TEXT_W, line) {
+                if y + lh > FB_H - 40 {
+                    self.fb.text(AGENT_TEXT_X, y + 8, "[... file continues]", 2, GRAY);
+                    break 'outer;
+                }
+                text::draw_line(&mut self.fb, AGENT_TEXT_X, y, text::Face::Body, AGENT_TEXT_PX, wrapped.trim_end());
+                y += lh;
+            }
+        }
+        if let Screen::Agent(av) = &self.screen {
+            for s in &av.ink.strokes {
+                if s.pts.len() == 1 {
+                    ink::stamp_segment(&mut self.fb, s.pts[0], s.pts[0], s.gray);
+                }
+                for w in s.pts.windows(2) {
+                    ink::stamp_segment(&mut self.fb, w[0], w[1], s.gray);
+                }
+            }
+        }
+        if self.working {
+            let (cx, cy) = ((DOT_RECT.x0 + DOT_RECT.x1) / 2, (DOT_RECT.y0 + DOT_RECT.y1) / 2);
+            self.fb.disc(cx, cy, 8, GRAY);
+        }
+    }
+
+    /// Pen input on the instructions page: annotation ink, and the rubber
+    /// to take annotations back (object-erase; the printed text is not
+    /// ours to erase). No tools, no undo. Strokes live in the AgentView
+    /// scratch layer until pi consumes them into the file.
+    fn agent_pen(&mut self, phase: PenPhase, x: i32, y: i32, pressure: i32, rubber: bool) {
+        match phase {
+            PenPhase::Press | PenPhase::Move => {
+                self.last_contact = Some(Instant::now());
+                let Screen::Agent(av) = &mut self.screen else { return };
+                if phase == PenPhase::Press {
+                    av.idle_at = None; /* writing again: hold the trigger */
+                }
+                if rubber {
+                    /* the rubber lifts whole annotation strokes; commit any
+                     * open one first so what's on the glass is erasable */
+                    if let Some(s) = av.cur_stroke.take() {
+                        if !s.pts.is_empty() {
+                            av.ink.strokes.push(s);
+                            av.changed = true;
+                        }
+                    }
+                    let Some((gone, _)) = av.ink.erase_at(x as f32, y as f32, ERASER_R)
+                    else {
+                        return;
+                    };
+                    av.changed = true;
+                    let r = gone.pad(4).clamp_screen();
+                    self.blit_agent_page();
+                    self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Text);
+                    return;
+                }
+                let p = Pt { x: x as f32, y: y as f32, r: brush_r(pressure) };
+                let prev = match (&mut av.cur_stroke, phase) {
+                    (Some(s), PenPhase::Move) => {
+                        let prev = *s.pts.last().unwrap();
+                        s.pts.push(p);
+                        prev
+                    }
+                    _ => {
+                        av.cur_stroke = Some(Stroke { id: 0, pts: vec![p], gray: ink::USER_GRAY });
+                        p
+                    }
+                };
+                ink::stamp_segment(&mut self.fb, prev, p, ink::USER_GRAY);
+                let seg = Rect {
+                    x0: (prev.x.min(p.x) - prev.r.max(p.r)) as i32,
+                    y0: (prev.y.min(p.y) - prev.r.max(p.r)) as i32,
+                    x1: (prev.x.max(p.x) + prev.r.max(p.r)).ceil() as i32,
+                    y1: (prev.y.max(p.y) + prev.r.max(p.r)).ceil() as i32,
+                };
+                av.ink_dirty = Some(match av.ink_dirty {
+                    None => seg,
+                    Some(d) => d.union(seg),
+                });
+            }
+            PenPhase::Release => {
+                self.last_contact = Some(Instant::now());
+                let Screen::Agent(av) = &mut self.screen else { return };
+                if let Some(s) = av.cur_stroke.take() {
+                    if !s.pts.is_empty() {
+                        av.ink.strokes.push(s);
+                        av.changed = true;
+                        av.idle_at = Some(Instant::now() + IDLE_DELAY);
+                    }
+                } else if av.changed {
+                    /* a rubber pass ended: annotations left mean the pause
+                     * should still ship them; none left means never mind */
+                    av.idle_at = if av.ink.strokes.is_empty() {
+                        None
+                    } else {
+                        Some(Instant::now() + IDLE_DELAY)
+                    };
+                }
+            }
+        }
+    }
+
+    /// The user paused after annotating the instructions page: ship the
+    /// annotated view to pi with orders to rewrite the file to match.
+    fn send_agent_feedback(&mut self) {
+        let ready = matches!(&self.screen,
+            Screen::Agent(av) if av.changed && !av.ink.strokes.is_empty());
+        if !ready || self.pi.is_none() {
+            return;
+        }
+        let path = agent_md_path();
+        let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+        if content.len() > 6000 {
+            content.truncate(6000);
+        }
+
+        /* composite snapshot: annotation ink at half scale, then the file
+         * text drawn into the same buffer at half geometry */
+        let (w, h, mut gray) = {
+            let Screen::Agent(av) = &self.screen else { return };
+            av.ink.snapshot(SNAP_DIV)
+        };
+        let lh = text::line_h(text::Face::Body, AGENT_TEXT_PX);
+        let mut y = AGENT_TEXT_Y0;
+        'outer: for raw in content.lines() {
+            let line = if raw.trim().is_empty() { " " } else { raw };
+            for wrapped in text::wrap(text::Face::Body, AGENT_TEXT_PX, AGENT_TEXT_W, line) {
+                if y + lh > FB_H - 40 {
+                    break 'outer;
+                }
+                text::draw_gray(
+                    &mut gray,
+                    w,
+                    h,
+                    AGENT_TEXT_X / SNAP_DIV,
+                    y / SNAP_DIV,
+                    text::Face::Body,
+                    AGENT_TEXT_PX / SNAP_DIV as f32,
+                    wrapped.trim_end(),
+                );
+                y += lh;
+            }
+        }
+
+        let msg = format!(
+            "The attached image is your standing-instructions page (the file \
+             {path}) as the user sees it, WITH their fresh handwritten \
+             annotations. Current file contents:\n```\n{content}\n```\n\
+             Interpret the annotations and rewrite {path} with your shell \
+             tools to match the user's intent: crossed-out lines are removed, \
+             added notes are incorporated (rewrite cleanly, don't transcribe \
+             scribbles verbatim), keep it under ~40 lines of markdown. When \
+             the file is updated, reply with just `done`. Do NOT call \
+             canvas_draw for this."
+        );
+        let streaming = self.streaming;
+        let Some(pi) = self.pi.as_mut() else { return };
+        match pi.send_image_message(&gray, w as u32, h as u32, &msg, streaming) {
+            Ok(()) => {
+                if let Screen::Agent(av) = &mut self.screen {
+                    av.changed = false;
+                    av.waiting = true;
+                }
+                self.streaming = true;
+                self.set_working(true);
+                self.pi_alive_at = Instant::now();
+                println!("paper: AGENT.md annotations sent to pi");
+            }
+            Err(e) => println!("paper: agent feedback send failed: {e}"),
+        }
+    }
+
     /* -- status bar upkeep -- */
 
     fn status_bar_visible(&self) -> bool {
@@ -1763,6 +2236,22 @@ impl App {
     /* -- the pause trigger: hand the page to pi -- */
 
     fn maybe_send_page(&mut self) {
+        /* the instructions page has its own pause: ship the annotations */
+        if let Screen::Agent(av) = &mut self.screen {
+            let due = av.cur_stroke.is_none()
+                && av.idle_at.is_some_and(|at| Instant::now() >= at);
+            if !due {
+                return;
+            }
+            /* still touching the glass? push the deadline out a beat */
+            if self.last_contact.is_some_and(|t| t.elapsed() < IDLE_DELAY) {
+                av.idle_at = Some(Instant::now() + Duration::from_millis(300));
+                return;
+            }
+            av.idle_at = None;
+            self.send_agent_feedback();
+            return;
+        }
         let due = {
             let Screen::Doc(dv) = &self.screen else { return };
             /* a live selection/lasso means the user is mid-manipulation */
@@ -1790,6 +2279,14 @@ impl App {
             }
             return;
         }
+        if self.quiet && !self.nudged {
+            /* pi is OFF: write in peace — pauses send nothing; NUDGE does */
+            if let Screen::Doc(dv) = &mut self.screen {
+                dv.idle_at = None;
+            }
+            return;
+        }
+        self.nudged = false;
         let (msg, gray, w, h, page_no) = {
             let Screen::Doc(dv) = &mut self.screen else { return };
             dv.idle_at = None;
@@ -1877,6 +2374,20 @@ impl App {
                     println!("paper: pi said: {t}");
                 }
                 self.reply_buf.clear();
+                /* annotations applied: show the rewritten file, clean */
+                let reload = if let Screen::Agent(av) = &mut self.screen {
+                    let w = av.waiting;
+                    if w {
+                        av.waiting = false;
+                        av.ink = Page::default();
+                    }
+                    w
+                } else {
+                    false
+                };
+                if reload {
+                    self.render_agent_page(false);
+                }
             }
             PiEvent::Died(reason) => {
                 self.streaming = false;
@@ -1908,6 +2419,15 @@ impl App {
             if let Screen::Doc(dv) = &mut self.screen {
                 dv.page_changed = true;
                 dv.idle_at = Some(Instant::now() + Duration::from_millis(400));
+            }
+            /* likewise a swallowed instructions annotation (the ink is
+             * still on the page until pi's End clears it) */
+            if let Screen::Agent(av) = &mut self.screen {
+                if av.waiting {
+                    av.waiting = false;
+                    av.changed = true;
+                    av.idle_at = Some(Instant::now() + Duration::from_millis(400));
+                }
             }
             self.pi_respawn_at = Some(Instant::now());
         }
@@ -2770,7 +3290,7 @@ fn main() -> std::process::ExitCode {
         .and_then(|s| s.parse::<u64>().ok())
         .map_or(Duration::from_secs(180), Duration::from_secs);
 
-    let (last_doc, sort, tool, pi_font) = load_settings();
+    let (last_doc, sort, tool, pi_font, quiet, eraser) = load_settings();
     let now = Instant::now();
     let mut app = App {
         fb,
@@ -2795,6 +3315,9 @@ fn main() -> std::process::ExitCode {
         sort,
         tool,
         pi_font,
+        quiet,
+        eraser,
+        nudged: false,
         flips_since_flash: 0,
         ink_flush: if takeover { INK_FLUSH_TAKEOVER } else { INK_FLUSH_QTFB },
         last_ink_flush: now,
@@ -2939,9 +3462,14 @@ fn main() -> std::process::ExitCode {
 
         /* -- due work -- */
         let mut flushed: Option<Rect> = None;
-        if let Screen::Doc(dv) = &mut app.screen {
-            if dv.ink_dirty.is_some() && app.last_ink_flush.elapsed() >= app.ink_flush {
-                let r = dv.ink_dirty.take().unwrap().clamp_screen();
+        if app.last_ink_flush.elapsed() >= app.ink_flush {
+            let dirty = match &mut app.screen {
+                Screen::Doc(dv) => dv.ink_dirty.take(),
+                Screen::Agent(av) => av.ink_dirty.take(),
+                Screen::Home(_) => None,
+            };
+            if let Some(r) = dirty {
+                let r = r.clamp_screen();
                 app.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
                 app.last_ink_flush = Instant::now();
                 flushed = Some(r);
@@ -3006,6 +3534,7 @@ fn main() -> std::process::ExitCode {
         if anim_due {
             app.anim_tick();
         }
+        app.drag_settle_tick();
         app.maybe_send_page();
         app.check_pi_health();
         app.thumb_tick();
@@ -3055,6 +3584,9 @@ fn next_timeout(app: &App) -> i32 {
             {
                 soonest(at.saturating_duration_since(Instant::now()));
             }
+            if dv.drag_dirty {
+                soonest(DRAG_SETTLE.saturating_sub(dv.drag_moved_at.elapsed()));
+            }
         }
         Screen::Home(hv) => {
             if !hv.pending.is_empty() && app.dialog.is_none() {
@@ -3062,6 +3594,14 @@ fn next_timeout(app: &App) -> i32 {
             }
             if app.dialog.is_none() {
                 soonest(app.home_rescan_at.saturating_duration_since(Instant::now()));
+            }
+        }
+        Screen::Agent(av) => {
+            if av.ink_dirty.is_some() {
+                soonest(app.ink_flush.saturating_sub(app.last_ink_flush.elapsed()));
+            }
+            if let Some(at) = av.idle_at {
+                soonest(at.saturating_duration_since(Instant::now()));
             }
         }
     }

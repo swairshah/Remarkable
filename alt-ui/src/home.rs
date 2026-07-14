@@ -21,6 +21,7 @@ pub const ROWS: i32 = (SCREEN_H - GRID_Y0) / CELL_H; /* 3 */
 /* header buttons (right-aligned) */
 pub const NEW_BTN_W: i32 = 300;
 pub const SORT_BTN_W: i32 = 220;
+pub const INST_BTN_W: i32 = 300; /* the pi standing-instructions page */
 pub const HDR_BTN_H: i32 = 64;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -162,6 +163,11 @@ impl HomeView {
             Sort::Title => "A - Z",
         };
         fb.text(sx + (SORT_BTN_W - text_width(sl, 3)) / 2, by + (HDR_BTN_H - 21) / 2, sl, 3, BLACK);
+        /* the pi standing-instructions page (annotate AGENT.md) */
+        let ix = sx - 24 - INST_BTN_W;
+        fb.rect_outline(ix, by, INST_BTN_W, HDR_BTN_H, 2, BLACK);
+        let il = "INSTRUCTIONS";
+        fb.text(ix + (INST_BTN_W - text_width(il, 3)) / 2, by + (HDR_BTN_H - 21) / 2, il, 3, BLACK);
 
         fb.fill_rect(0, GRID_Y0 - 4, SCREEN_W, 2, BLACK);
 

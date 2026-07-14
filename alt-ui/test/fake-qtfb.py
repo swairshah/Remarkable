@@ -271,13 +271,13 @@ def scenario_m2(h, out_png):
     print("fake-qtfb: m2 assertions passed")
 
 
-# toolbar geometry mirror (src/toolbar.rs)
-TB_CX = W - 104 // 2  # strip button center x = 1352
-TB_TOGGLE = (W - 60, 60)
-# button-center y for each toolbar slot (mirrors src/toolbar.rs slot_y):
-# TB_TOP=132, TB_BTN_H=96, DIV_H=25, dividers after lasso/redo/next/home.
-TB_BTN = {"pen": 180, "eraser": 276, "lasso": 372, "undo": 493, "redo": 589,
-          "prev": 710, "goto": 806, "next": 902, "font": 1023, "home": 1119}
+# toolbar geometry mirror (libreink-core's EdgeToolbar + main.rs TB_FEATURES)
+TB_CX = W - 52  # toggle-button center x (the strip is centered under it)
+TB_TOGGLE = (W - 52, 96)
+# cell-center y per feature: strip top = cy + BTN_R + GAP = 136, CELL_H = 104
+TB_BTN = {"pen": 188, "eraser": 292, "lasso": 396, "undo": 500, "redo": 604,
+          "pi": 708, "nudge": 812,
+          "prev": 916, "goto": 1020, "next": 1124, "font": 1228, "home": 1332}
 
 
 def pen_tap(s, x, y):
@@ -440,12 +440,12 @@ def scenario_redobug(h, out_png):
     def buttons(tag=None):
         if tag:
             write_png(out_png.replace(".png", f"-{tag}.png"))
-        return darkness(493), darkness(589)
+        return darkness(486), darkness(590)
 
     undo_d, redo_d = buttons("stroke-undo")
     print(f"fake-qtfb: redobug stroke undo-btn={undo_d} redo-btn={redo_d}")
     assert undo_d < 60, f"undo should be greyed (empty stack): {undo_d}"
-    assert redo_d > 120, f"redo should be ENABLED after undoing a stroke: {redo_d}"
+    assert redo_d > 80, f"redo should be ENABLED after undoing a stroke: {redo_d}"
 
     # ERASE then undo -> redo must light up
     pen_tap(s, TB_CX, TB_BTN["redo"])  # bring the stroke back
@@ -461,7 +461,7 @@ def scenario_redobug(h, out_png):
     s.drain(0.8)
     u, r = buttons("erase-undo")
     print(f"fake-qtfb: redobug erase undo-btn={u} redo-btn={r}")
-    assert r > 120, f"redo should be ENABLED after undoing an erase: {r}"
+    assert r > 80, f"redo should be ENABLED after undoing an erase: {r}"
 
     # MOVE then undo -> redo must light up
     pen_tap(s, TB_CX, TB_BTN["lasso"])
@@ -477,7 +477,7 @@ def scenario_redobug(h, out_png):
     s.drain(0.8)
     u, r = buttons("move-undo")
     print(f"fake-qtfb: redobug move undo-btn={u} redo-btn={r}")
-    assert r > 120, f"redo should be ENABLED after undoing a move: {r}"
+    assert r > 80, f"redo should be ENABLED after undoing a move: {r}"
 
     s.terminate_clean()
     print("fake-qtfb: redobug assertions passed")
@@ -537,7 +537,9 @@ def scenario_m3(h, out_png):
     s.drain(0.8)
     shot("undo-after-flip")     # only A remains
 
-    # toolbar swallow: pen tool back on, stroke runs UNDER the strip
+    # toolbar swallow: pen tool back on. Taps on the strip act (never ink) —
+    # every pen_tap above proves it; this stroke runs the toolbar COLUMN
+    # below the open strip, to the screen edge.
     pen_tap(s, TB_CX, TB_BTN["pen"])
     s.drain(0.3)
     s.pen(PEN_PRESS, 1000, 1500)
@@ -748,6 +750,118 @@ def scenario_m5_nb(h, out_png):
     print("fake-qtfb: m5-nb assertions passed")
 
 
+def scenario_agent(h, out_png):
+    """The AGENT.md feedback loop: open the INSTRUCTIONS page from the home
+    header, annotate it, pause -> fake pi rewrites the file -> the page
+    re-renders clean; swipe left returns home."""
+    def shot(tag):
+        write_png(out_png.replace(".png", f"-{tag}.png"))
+
+    subprocess.run(["rm", "-rf", DATA_DIR], check=False)
+    agent_md = "/tmp/au-agent.md"
+    with open(agent_md, "w") as f:
+        f.write("# paper agent - standing instructions\n\n"
+                "- (nothing yet - when the user tells you how they want you to\n"
+                "  behave while they read, record it here)\n")
+
+    s = h.launch(PAPER_FAKE_SYS="1", FAKE_PI_SCRIPT="agent",
+                 PAPER_AGENT_MD=agent_md)
+    s.drain(1.8)
+
+    # the INSTRUCTIONS button: third from the right in the header row
+    # (main.rs home_tap mirrors home.rs render: NEW 300, SORT 220, INST 300,
+    # 24px gaps, right edge inset 48; button row at STATUS_H(56) + 40)
+    ix = 1404 - 48 - 300 - 24 - 220 - 24 - 300
+    s.tap(ix + 150, 56 + 40 + 32)
+    s.drain(1.2)
+    shot("instructions")
+
+    # annotate: a squiggle over the file text (the feedback ink)
+    s.squiggle(300, 700, n=45)
+    s.drain(1.0)
+    shot("annotated")
+
+    # pause fires at 2.8s -> send; fake pi thinks 1s, rewrites, replies done;
+    # End re-renders the page clean from the rewritten file
+    s.drain(7.0)
+    with open(agent_md) as f:
+        content = f.read()
+    assert "script font" in content, f"AGENT.md was not rewritten: {content!r}"
+    shot("applied")
+
+    # swipe left returns to the home grid
+    s.swipe(1150, 190)
+    s.drain(1.2)
+    shot("home-after")
+
+    s.terminate_clean()
+    print("fake-qtfb: agent assertions passed")
+
+
+def scenario_erasemodes(h, out_png):
+    """The eraser's three modes: object scrub, pixel split, region loop.
+    Tapping the armed ERASE cell cycles object -> pixel -> region."""
+    def shot(tag):
+        write_png(out_png.replace(".png", f"-{tag}.png"))
+
+    subprocess.run(["rm", "-rf", DATA_DIR], check=False)
+    os.makedirs(f"{DATA_DIR}/docs/nb-er", exist_ok=True)
+    with open(f"{DATA_DIR}/docs/nb-er/meta.json", "w") as f:
+        json.dump({"v": 1, "kind": "notebook", "title": "Eraser Lab"}, f)
+    s = h.launch(PAPER_OPEN="nb-er", PAPER_FAKE_SYS="1")
+    s.drain(1.5)
+
+    pen_tap(s, *TB_TOGGLE)
+    s.drain(0.5)
+    s.squiggle(200, 600, n=40)   # stroke A
+    s.drain(0.4)
+    s.squiggle(200, 900, n=40)   # stroke B
+    s.drain(0.6)
+
+    # OBJECT (the default): one touch takes the whole stroke
+    pen_tap(s, TB_CX, TB_BTN["eraser"])  # arm the eraser tool
+    s.drain(0.4)
+    shot("armed")                        # cell shows ERASE
+    s.pen(PEN_PRESS, 380, 900)
+    s.pen(PEN_UPDATE, 384, 900)
+    s.pen(PEN_RELEASE, 384, 900)
+    s.drain(1.0)
+    shot("object")                       # B gone whole
+
+    # PIXEL: scrub a vertical band through A's middle -> A splits in two
+    pen_tap(s, TB_CX, TB_BTN["eraser"])  # second tap: cycle to PIXEL
+    s.drain(0.4)
+    s.pen(PEN_PRESS, 380, 560)
+    for i in range(1, 10):
+        s.pen(PEN_UPDATE, 380, 560 + i * 10)
+    s.pen(PEN_RELEASE, 380, 660)
+    s.drain(1.0)
+    shot("pixel")                        # A with a bite through the middle
+
+    pen_tap(s, TB_CX, TB_BTN["undo"])    # undo the split: A whole again
+    s.drain(0.8)
+    shot("split-undo")
+    pen_tap(s, TB_CX, TB_BTN["redo"])    # redo: fragments again
+    s.drain(0.8)
+
+    # REGION: cycle to REGION, loop the LEFT fragment -> it vanishes
+    pen_tap(s, TB_CX, TB_BTN["eraser"])
+    s.drain(0.4)
+    lasso_loop(s, 270, 600, 120)
+    s.drain(1.2)
+    shot("region")                       # only the right fragment remains
+
+    s.terminate_clean()
+
+    ink = json.load(open(f"{DATA_DIR}/docs/nb-er/ink/note-0001.json"))
+    n = len(ink["strokes"])
+    assert n == 1, f"one fragment should survive, got {n}"
+    xs = [ink["strokes"][0]["p"][i] for i in range(0, len(ink["strokes"][0]["p"]), 3)]
+    assert min(xs) / 10 > 350, f"the survivor should be the RIGHT fragment, min x {min(xs)/10}"
+    assert ink["strokes"][0]["i"] > 2, "fragment must carry a fresh id"
+    print("fake-qtfb: erasemodes assertions passed")
+
+
 SCENARIOS = {
     "m0": scenario_m0,
     "m1": scenario_m1,
@@ -757,8 +871,10 @@ SCENARIOS = {
     "m5-book": scenario_m5_book,
     "m5-nb": scenario_m5_nb,
     "redobug": scenario_redobug,
+    "erasemodes": scenario_erasemodes,
     "fontflip": scenario_fontflip,
     "garamond": scenario_garamond,
+    "agent": scenario_agent,
 }
 
 

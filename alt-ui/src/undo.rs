@@ -27,6 +27,15 @@ pub enum EditOp {
     /// A rubber batch or lasso delete. `strokes` is Some while APPLIED;
     /// `refs` always identifies the victims (for redo).
     EraseStrokes { refs: Vec<(Owner, u64)>, strokes: Option<Vec<OwnedStroke>> },
+    /// A pixel-rubber contact: victims split into surviving fragments.
+    /// `removed` (the originals) is Some while APPLIED; `added` (the
+    /// fragments) is Some only while UNDONE. Refs always identify both.
+    SplitStrokes {
+        removed_refs: Vec<(Owner, u64)>,
+        removed: Option<Vec<OwnedStroke>>,
+        added_refs: Vec<(Owner, u64)>,
+        added: Option<Vec<OwnedStroke>>,
+    },
     /// A lasso move (M4).
     MoveStrokes { refs: Vec<(Owner, u64)>, dx: f32, dy: f32 },
     /// pi drew a patch. `body` (strokes + typeset texts) is Some only while UNDONE.
@@ -50,6 +59,12 @@ fn op_owned_pts(op: &EditOp) -> usize {
         EditOp::EraseStrokes { strokes, .. } => {
             strokes.as_ref().map_or(0, |v| v.iter().map(|o| o.stroke.pts.len()).sum())
         }
+        EditOp::SplitStrokes { removed, added, .. } => [removed, added]
+            .iter()
+            .filter_map(|o| o.as_ref())
+            .flatten()
+            .map(|o| o.stroke.pts.len())
+            .sum(),
         EditOp::MoveStrokes { .. } => 0,
         EditOp::AddPatch { body, .. } | EditOp::ErasePatch { body, .. } => {
             body.as_ref().map_or(0, |(ss, _)| ss.iter().map(|s| s.pts.len()).sum())
@@ -117,6 +132,16 @@ impl UndoStack {
                     Some(b)
                 }
                 EditOp::EraseStrokes { strokes, .. } => page.insert_owned(strokes.take()?),
+                EditOp::SplitStrokes { removed, added_refs, added, .. } => {
+                    /* fragments out, originals back */
+                    let (lifted, b1) = page.remove_strokes_by_ids(added_refs);
+                    *added = Some(lifted);
+                    let b2 = page.insert_owned(removed.take()?);
+                    match (b1, b2) {
+                        (Some(a), Some(b)) => Some(a.union(b)),
+                        (a, b) => a.or(b),
+                    }
+                }
                 EditOp::MoveStrokes { refs, dx, dy } => page.translate_strokes(refs, -*dx, -*dy),
                 EditOp::AddPatch { id, body } => {
                     let (content, b) = page.take_patch(*id)?;
@@ -154,6 +179,16 @@ impl UndoStack {
                     let (lifted, b) = page.remove_strokes_by_ids(refs);
                     *strokes = Some(lifted);
                     b
+                }
+                EditOp::SplitStrokes { removed_refs, removed, added, .. } => {
+                    /* originals out, fragments back */
+                    let (lifted, b1) = page.remove_strokes_by_ids(removed_refs);
+                    *removed = Some(lifted);
+                    let b2 = page.insert_owned(added.take()?);
+                    match (b1, b2) {
+                        (Some(a), Some(b)) => Some(a.union(b)),
+                        (a, b) => a.or(b),
+                    }
                 }
                 EditOp::MoveStrokes { refs, dx, dy } => page.translate_strokes(refs, *dx, *dy),
                 EditOp::AddPatch { id, body } => {

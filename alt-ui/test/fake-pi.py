@@ -87,6 +87,24 @@ for line in sys.stdin:
         emit({"type": "agent_end", "messages": []})
         continue
 
+    if MODE == "agent":
+        # the instructions-page loop: rewrite AGENT.md like real pi would
+        # (with "shell tools"), then reply `done`
+        msg = cmd.get("message", "")
+        if "standing-instructions page" in msg:
+            path = os.environ["PAPER_AGENT_MD"]
+            with open(path, "w") as f:
+                f.write("# paper agent - standing instructions\n\n"
+                        "- always write margin notes in script font\n")
+            print(f"fake-pi: agent rewrote {path}", file=sys.stderr)
+            emit({"type": "message_update",
+                  "assistantMessageEvent": {"type": "text_delta", "delta": "done"}})
+        else:
+            emit({"type": "message_update",
+                  "assistantMessageEvent": {"type": "text_delta", "delta": "pass"}})
+        emit({"type": "agent_end", "messages": []})
+        continue
+
     if MODE in ("notebook", "garamond"):
         if not responded:
             responded = True
