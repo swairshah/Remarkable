@@ -277,12 +277,19 @@ TB_TOGGLE = (W - 52, 96)
 # cell-center y per feature: strip top = cy + BTN_R + GAP = 136, CELL_H = 104
 TB_BTN = {"pen": 188, "eraser": 292, "lasso": 396, "undo": 500, "redo": 604,
           "pi": 708, "nudge": 812,
-          "prev": 916, "goto": 1020, "next": 1124, "font": 1228, "home": 1332}
+          "prev": 916, "goto": 1020, "next": 1124, "add": 1228, "font": 1332, "home": 1436}
 
 
 def pen_tap(s, x, y):
     s.pen(PEN_PRESS, x, y)
     s.pen(PEN_RELEASE, x, y)
+
+
+def dialog_row_center(nrows, row):
+    """Center of a standard draw_dialog_rows action."""
+    h = 84 + nrows * 96 + 24
+    y0 = (H - h) // 2
+    return (W // 2, y0 + 84 + row * 96 + 48)
 
 
 def np_key_center(label):
@@ -484,7 +491,7 @@ def scenario_redobug(h, out_png):
 
 
 def scenario_m3(h, out_png):
-    """Toolbar, tools, undo/redo, erase-undo, id persistence, numpad."""
+    """Toolbar, tools, undo/redo, erase-undo, id persistence, page dialogs."""
     def shot(tag):
         write_png(out_png.replace(".png", f"-{tag}.png"))
 
@@ -559,13 +566,22 @@ def scenario_m3(h, out_png):
     s.drain(1.8)
     shot("page2")
 
+    # ADD PAGE requires confirmation because pages cannot be deleted yet.
+    pen_tap(s, TB_CX, TB_BTN["add"])
+    s.drain(0.8)
+    shot("add-confirm")
+    pen_tap(s, *dialog_row_center(2, 0))  # ADD PAGE
+    s.drain(1.8)
+    shot("page3")
+
     s.terminate_clean()
 
     ink1 = json.load(open(f"{DATA_DIR}/docs/nb-test/ink/note-0001.json"))
     assert len(ink1["strokes"]) == 2, f"page 1 should hold A + the edge stroke, got {len(ink1['strokes'])}"
     assert all("i" in s and s["i"] > 0 for s in ink1["strokes"]), "stroke ids missing"
     st = json.load(open(f"{DATA_DIR}/docs/nb-test/state.json"))
-    assert st["pos"] == 1, f"should end on page 2, got {st}"
+    assert len(st["seq"]) == 3, f"confirmed add should create page 3: {st}"
+    assert st["pos"] == 2, f"should open the new page 3, got {st}"
     print("fake-qtfb: m3 assertions passed")
 
 

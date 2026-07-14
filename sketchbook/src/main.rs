@@ -3000,23 +3000,6 @@ impl App {
         self.last_anim = Instant::now();
     }
 
-    /* -- sleep (takeover only) -- */
-
-    fn show_sleep_page(&mut self) -> Vec<u16> {
-        let saved = self.fb.copy_band(0, FB_H);
-        self.fb.fill_rect(0, 0, FB_W, FB_H, WHITE);
-        let msg = "sketchbook sleeps";
-        let w = text::width(text::Face::Body, 44.0, msg);
-        text::draw_line(&mut self.fb, (FB_W - w) / 2, FB_H / 2 - 60, text::Face::Body, 44.0, msg);
-        let hint = "press power to wake";
-        let hw = text::width(text::Face::Body, 28.0, hint);
-        text::draw_line(&mut self.fb, (FB_W - hw) / 2, FB_H / 2 + 10, text::Face::Body, 28.0, hint);
-        saved
-    }
-
-    fn restore_sleep_page(&mut self, saved: &[u16]) {
-        self.fb.paste_band(0, saved);
-    }
 }
 
 /// Parse a [x0,y0,x1,y1] array parameter into a Rect.
@@ -3153,8 +3136,9 @@ fn sleep_cycle(
 ) {
     println!("sketchbook: sleeping");
     app.nb.save_current();
-    let saved = app.show_sleep_page();
-    app.disp.full_refresh();
+    let sleep_overlay = libreink_core::sleep::SleepOverlay::show(&mut app.fb);
+    let sleep_rect = sleep_overlay.rect();
+    app.disp.update(sleep_rect.x0, sleep_rect.y0, sleep_rect.w(), sleep_rect.h(), Wave::Page);
     std::thread::sleep(Duration::from_millis(800));
     /* flush local changes to the VM while the sleep page settles — sync is
      * event-driven (edit / sleep / wake), not timer-driven, to keep the
@@ -3181,8 +3165,8 @@ fn sleep_cycle(
         println!("sketchbook: suspend aborted (EPD discharge timer), retrying");
     }
     println!("sketchbook: waking");
-    app.restore_sleep_page(&saved);
-    app.disp.full_refresh();
+    sleep_overlay.restore(&mut app.fb);
+    app.disp.update(sleep_rect.x0, sleep_rect.y0, sleep_rect.w(), sleep_rect.h(), Wave::Page);
     power::wifi_heal(); /* pi needs the network back */
     if let Some(pd) = pen.as_mut() {
         pd.drain(|_, _| {});

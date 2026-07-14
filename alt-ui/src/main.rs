@@ -120,7 +120,7 @@ fn agent_md_path() -> String {
  * center + this app's feature set, top to bottom */
 const TB_CX: i32 = FB_W - 52;
 const TB_CY: i32 = 96;
-const TB_FEATURES: [Feature; 12] = [
+const TB_FEATURES: [Feature; 13] = [
     Feature::Tool(Tool::Pen),
     Feature::Tool(Tool::Eraser),
     Feature::Tool(Tool::Lasso),
@@ -131,6 +131,7 @@ const TB_FEATURES: [Feature; 12] = [
     Feature::PagePrev,
     Feature::PageGoTo,
     Feature::PageNext,
+    Feature::PageAdd,
     Feature::Font,
     Feature::Home,
 ];
@@ -377,6 +378,7 @@ enum Dialog {
     MoveTo { idx: usize },
     NewFolder { idx: usize, kb: Kb },
     GoTo { entry: String }, /* the page-jump numpad (doc screen) */
+    ConfirmAddPage,         /* confirm blank-page insertion (doc screen) */
     FontPick,               /* pick pi's handwriting face (doc screen) */
 }
 
@@ -1565,6 +1567,10 @@ impl App {
                 self.dialog = Some(Dialog::GoTo { entry: String::new() });
                 self.render_goto_dialog();
             }
+            Action::PageAdd => {
+                self.dialog = Some(Dialog::ConfirmAddPage);
+                self.render_add_page_dialog();
+            }
             Action::Font => {
                 self.dialog = Some(Dialog::FontPick);
                 self.render_font_dialog();
@@ -1885,6 +1891,21 @@ impl App {
                 }
                 return; /* doc-screen dialog: no home repaint */
             }
+            Dialog::ConfirmAddPage => {
+                if let Some(0) = dialog_row_at(2, x, y) {
+                    let at = {
+                        let Screen::Doc(dv) = &mut self.screen else { return };
+                        let current = dv.doc.current;
+                        dv.doc.insert_note(current)
+                    };
+                    println!("paper: added blank page at {}", at + 1);
+                    self.jump_to(at + 1);
+                    self.trigger_sync();
+                } else {
+                    self.dismiss_rows_dialog(2);
+                }
+                return; /* doc-screen dialog: handled its own repaint */
+            }
             Dialog::FontPick => {
                 self.font_dialog_press(x, y);
                 return; /* doc-screen dialog: no home repaint */
@@ -1896,6 +1917,26 @@ impl App {
     fn dismiss_doc_dialog(&mut self) {
         self.dialog = None;
         let r = np_rect().pad(8);
+        self.render_doc_region(r);
+        self.restore_chrome_over(r);
+    }
+
+    /* -- blank-page confirmation -- */
+
+    fn render_add_page_dialog(&mut self) {
+        let page = match &self.screen {
+            Screen::Doc(dv) => dv.doc.current + 1,
+            _ => return,
+        };
+        let rows = ["ADD PAGE".to_string(), "CANCEL".to_string()];
+        draw_dialog_rows(&mut self.fb, &format!("Add page after {page}? (no delete yet)"), &rows);
+        let r = dialog_rect(rows.len());
+        self.disp.update(r.x0 - 6, r.y0 - 6, r.w() + 12, r.h() + 12, Wave::Ink);
+    }
+
+    fn dismiss_rows_dialog(&mut self, nrows: usize) {
+        self.dialog = None;
+        let r = dialog_rect(nrows).pad(10);
         self.render_doc_region(r);
         self.restore_chrome_over(r);
     }
@@ -2885,23 +2926,6 @@ impl App {
         self.last_anim = Instant::now();
     }
 
-    /* -- sleep (takeover only) -- */
-
-    fn show_sleep_page(&mut self) -> Vec<u16> {
-        let saved = self.fb.copy_band(0, FB_H);
-        self.fb.fill_rect(0, 0, FB_W, FB_H, WHITE);
-        let msg = "Paper sleeps";
-        let w = text::width(text::Face::Body, 44.0, msg);
-        text::draw_line(&mut self.fb, (FB_W - w) / 2, FB_H / 2 - 60, text::Face::Body, 44.0, msg);
-        let hint = "press power to wake";
-        let hw = text::width(text::Face::Body, 28.0, hint);
-        text::draw_line(&mut self.fb, (FB_W - hw) / 2, FB_H / 2 + 10, text::Face::Body, 28.0, hint);
-        saved
-    }
-
-    fn restore_sleep_page(&mut self, saved: &[u16]) {
-        self.fb.paste_band(0, saved);
-    }
 }
 
 /* ---- pi message helpers ------------------------------------------------------ */
@@ -3131,8 +3155,8 @@ fn render_dialog(fb: &mut Framebuffer, d: &Dialog, screen: &Screen) {
             let t = format!("Move \"{}\" to:", title_of(*idx));
             draw_dialog_rows(fb, &t, &rows);
         }
-        Dialog::GoTo { .. } | Dialog::FontPick => {
-            /* doc-screen dialogs; rendered by render_goto_dialog / render_font_dialog */
+        Dialog::GoTo { .. } | Dialog::ConfirmAddPage | Dialog::FontPick => {
+            /* doc-screen dialogs; rendered by their dedicated methods */
         }
     }
 }
@@ -3173,8 +3197,9 @@ fn sleep_cycle(
     if let Screen::Doc(dv) = &mut app.screen {
         dv.doc.save_all();
     }
-    let saved = app.show_sleep_page();
-    app.disp.full_refresh();
+    let sleep_overlay = libreink_core::sleep::SleepOverlay::show(&mut app.fb);
+    let sleep_rect = sleep_overlay.rect();
+    app.disp.update(sleep_rect.x0, sleep_rect.y0, sleep_rect.w(), sleep_rect.h(), Wave::Page);
     std::thread::sleep(Duration::from_millis(800));
     /* flush local changes to the VM while the sleep page settles — sync is
      * event-driven (edit / sleep / wake), not timer-driven, to keep the
@@ -3201,8 +3226,8 @@ fn sleep_cycle(
         println!("paper: suspend aborted (EPD discharge timer), retrying");
     }
     println!("paper: waking");
-    app.restore_sleep_page(&saved);
-    app.disp.full_refresh();
+    sleep_overlay.restore(&mut app.fb);
+    app.disp.update(sleep_rect.x0, sleep_rect.y0, sleep_rect.w(), sleep_rect.h(), Wave::Page);
     power::wifi_heal(); /* pi needs the network back */
     if let Some(pd) = pen.as_mut() {
         pd.drain(|_, _| {});

@@ -669,21 +669,19 @@ impl App {
 
     /* -- sleep (takeover only: the power button is ours) -- */
 
-    /// Blank the panel to a sleep page; returns the saved screen contents.
-    fn show_sleep_page(&mut self) -> Vec<u16> {
-        let saved = self.fb.copy_band(0, FB_H);
-        self.fb.fill_rect(0, 0, FB_W, FB_H, WHITE);
-        let msg = "collab sleeps";
-        let w = text::width(text::Face::Body, 44.0, msg);
-        text::draw_line(&mut self.fb, (FB_W - w) / 2, FB_H / 2 - 60, text::Face::Body, 44.0, msg);
-        let hint = "press power to wake";
-        let hw = text::width(text::Face::Body, 28.0, hint);
-        text::draw_line(&mut self.fb, (FB_W - hw) / 2, FB_H / 2 + 10, text::Face::Body, 28.0, hint);
+    /// Preserve the current surface and add a compact top-right sleep badge.
+    fn show_sleep_badge(&mut self) -> Vec<u16> {
+        let saved = self.fb.copy_band(SLEEP_Y, SLEEP_Y + SLEEP_H);
+        let old_clip = (self.fb.clip_y0, self.fb.clip_y1);
+        self.fb.clear_clip();
+        self.fb.fill_rect(SLEEP_X, SLEEP_Y, SLEEP_W, SLEEP_H, WHITE);
+        self.fb.text(SLEEP_X + 12, SLEEP_Y + 12, "Zzz...", 4, BLACK);
+        self.fb.set_clip(old_clip.0, old_clip.1);
         saved
     }
 
-    fn restore_sleep_page(&mut self, saved: &[u16]) {
-        self.fb.paste_band(0, saved);
+    fn restore_sleep_badge(&mut self, saved: &[u16]) {
+        self.fb.paste_band(SLEEP_Y, saved);
     }
 }
 
@@ -698,8 +696,13 @@ fn brush(nib: usize, pressure: i32, rubber: bool) -> (i32, u16) {
     }
 }
 
-/// The power-button sleep cycle (riddle's dance): sleep page, flashing
-/// refresh, suspend-until-it-sticks, then restore, heal wifi, and discard
+const SLEEP_W: i32 = 168;
+const SLEEP_H: i32 = 52;
+const SLEEP_X: i32 = FB_W - 20 - SLEEP_W;
+const SLEEP_Y: i32 = 20;
+
+/// The power-button sleep cycle (riddle's dance): sleep badge, suspend-
+/// until-it-sticks, then restore, heal wifi, and discard
 /// any input that queued while asleep (stale pen events would otherwise
 /// replay as phantom ink).
 fn sleep_cycle(
@@ -709,9 +712,9 @@ fn sleep_cycle(
     touchdev: &mut Option<touch::TouchDevice>,
 ) {
     println!("collab: sleeping");
-    let saved = app.show_sleep_page();
-    app.disp.full_refresh();
-    /* let the flashing refresh finish before the panel loses power */
+    let saved = app.show_sleep_badge();
+    app.disp.update(SLEEP_X, SLEEP_Y, SLEEP_W, SLEEP_H, Wave::Text);
+    /* let the badge update finish before the panel loses power */
     std::thread::sleep(Duration::from_millis(800));
     /* flush local changes to the VM while the sleep page settles — sync is
      * event-driven (edit / sleep / wake), not timer-driven, to keep the
@@ -741,8 +744,8 @@ fn sleep_cycle(
         println!("collab: suspend aborted (EPD discharge timer), retrying");
     }
     println!("collab: waking");
-    app.restore_sleep_page(&saved);
-    app.disp.full_refresh();
+    app.restore_sleep_badge(&saved);
+    app.disp.update(SLEEP_X, SLEEP_Y, SLEEP_W, SLEEP_H, Wave::Text);
     power::wifi_heal(); /* pi needs the network back */
     if let Some(pd) = pen.as_mut() {
         pd.drain(|_, _| {});
