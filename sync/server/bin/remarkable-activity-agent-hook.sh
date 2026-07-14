@@ -9,7 +9,10 @@ STATE_DIR="${STATE_DIR:-$HOME/remarkable-exports/activity-agent}"
 # nginx serves $HOME/notes as the web root; the digest lives at /updates/
 OUTPUT_HTML="${OUTPUT_HTML:-$HOME/notes/updates/index.html}"
 ENV_FILE="${ENV_FILE:-$HOME/.env}"
-MODEL="${MODEL:-anthropic/claude-sonnet-4-6}"
+# Routed through the exe.dev LLM integration (llm.int.exe.xyz) using the
+# connected ChatGPT subscription. Use "openrouter/<vendor>/<model>" to route
+# via OpenRouter instead (requires OPENROUTER_API_KEY).
+MODEL="${MODEL:-gpt-5.5}"
 
 node "$HOME/bin/remarkable-activity-agent.js" \
   -p "$PROMPT" \

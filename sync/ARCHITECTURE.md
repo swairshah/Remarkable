@@ -134,7 +134,7 @@ Node but no TypeScript toolchain, and git never sees generated code.
 
 `remarkable-activity-agent-hook.sh` is a thin wrapper supplying the production
 flags (source dir, state dir, output `~/notes/updates/index.html`, `~/.env`
-for secrets, model `anthropic/claude-sonnet-4-6`).
+for secrets, model `gpt-5.5`).
 
 Per run:
 
@@ -147,11 +147,17 @@ Per run:
    doc gets human-readable "bits": `page 12 -> 15`, `opened`, `modified`,
    `bookmarks 2 -> 3`, `highlights 5 -> 7`, `handwriting changed`.
 3. **Summarize.** If anything changed, it takes the 10 most recent changes and
-   calls OpenRouter's chat-completions API (key: `OPENROUTER_API_KEY` from
-   `~/.env`). If the "Notebook" doc's handwriting changed, it attaches up to
-   6 of its most recently modified thumbnail images as base64 data URLs so the
-   model can see *what* was written. Missing key or API failure degrades to a
-   plain bullet list — the page still publishes.
+   calls the exe.dev LLM integration's Responses API
+   (`https://llm.int.exe.xyz/v1/responses`, override with `EXE_LLM_BASE`),
+   which routes `gpt-*` models to the connected ChatGPT subscription — no API
+   key stored on the VM. The ChatGPT source requires `store:false` +
+   `stream:true`, so the agent reads the SSE stream and concatenates
+   `output_text` deltas. Models prefixed `openrouter/<vendor>/<model>` route
+   via OpenRouter instead (key: `OPENROUTER_API_KEY` from `~/.env`). If the
+   "Notebook" doc's handwriting changed, it attaches up to 6 of its most
+   recently modified thumbnail images as base64 data URLs so the model can
+   see *what* was written. API failure degrades to a plain bullet list — the
+   page still publishes.
 4. **Publish.** Writes `latest.md` and appends a JSONL record to
    `history.jsonl` (state dir: `~/remarkable-exports/activity-agent/`), then
    renders a self-contained dark-themed HTML dashboard — summary, change list,
@@ -334,7 +340,7 @@ content dirs. Flags/env:
 | `~/remarkable-exports/notes-pdf/` | rendered notes PDFs, `manifest.sha256`, `.rendered.state`, `export.log` |
 | `~/notes/updates/index.html` | published activity digest (`/updates/`) |
 | `~/notes-server/` | nginx config + viewer html |
-| `~/.env` | `OPENROUTER_API_KEY` for the activity agent |
+| `~/.env` | optional `OPENROUTER_API_KEY` (only for `openrouter/*` models) |
 
 All agent state and the document mirror were migrated from swair.dev, so
 digest history is continuous across the move and the first sync after the

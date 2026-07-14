@@ -59,7 +59,7 @@ function parseArgs(argv: string[]): Cli {
   const cli: Cli = {
     prompt:
       "Summarize reMarkable activity since last sync. Focus on reading progress, highlights, bookmarks, and notebook writing changes.",
-    model: "anthropic/claude-sonnet-4-6",
+    model: "gpt-5.5",
     sourceDir: path.join(homedir(), "remarkable-backup", "xochitl"),
     stateDir: path.join(homedir(), "remarkable-exports", "activity-agent"),
     outputHtml: path.join(homedir(), "notes", "updates", "index.html"),
@@ -335,13 +335,36 @@ async function collectNotebookImages(sourceDir: string, changes: Change[]): Prom
   return dataUrls;
 }
 
+// Extract assistant text from a Responses API SSE stream. The exe.dev
+// ChatGPT-subscription source requires store:false + stream:true, so we
+// always read SSE and concatenate output_text deltas.
+function parseResponsesSSE(body: string): string {
+  const deltas: string[] = [];
+  let doneText = "";
+  for (const raw of body.split(/\r?\n/)) {
+    if (!raw.startsWith("data: ")) continue;
+    const payload = raw.slice(6).trim();
+    if (!payload || payload === "[DONE]") continue;
+    try {
+      const ev = JSON.parse(payload) as {
+        type?: string;
+        delta?: string;
+        part?: { type?: string; text?: string };
+      };
+      if (ev.type === "response.output_text.delta" && typeof ev.delta === "string") {
+        deltas.push(ev.delta);
+      } else if (ev.type === "response.content_part.done" && ev.part?.type === "output_text" && ev.part.text) {
+        doneText += (doneText ? "\n" : "") + ev.part.text;
+      }
+    } catch {
+      // ignore malformed SSE lines
+    }
+  }
+  return (deltas.length ? deltas.join("") : doneText).trim();
+}
+
 async function summarizeWithLLM(cli: Cli, changes: Change[]): Promise<string> {
   const env = await loadEnv(cli.envFile);
-  const key = process.env.OPENROUTER_API_KEY || env.OPENROUTER_API_KEY;
-
-  if (!key) {
-    return ["OPENROUTER_API_KEY missing; fallback summary:", ...changes.map((c) => `- ${c.name}: ${c.bits.join(", ")}`)].join("\n");
-  }
 
   const system = "You are a concise personal activity summarizer. Return accurate markdown only.";
   const notebookImages = await collectNotebookImages(cli.sourceDir, changes);
@@ -352,37 +375,72 @@ async function summarizeWithLLM(cli: Cli, changes: Change[]): Promise<string> {
       : ""
   }\n\nFormat:\n## Activity Summary\n## Reading\n## Writing\n## Highlights & Bookmarks\n## Next Actions`;
 
-  const userContent =
-    notebookImages.length > 0
-      ? [
-          { type: "text", text: userText },
-          ...notebookImages.map((url) => ({ type: "image_url", image_url: { url } })),
-        ]
-      : userText;
+  const fallback = (label: string): string =>
+    `${label}\n\n${changes.map((c) => `- ${c.name}: ${c.bits.join(", ")}`).join("\n")}`;
 
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  // model "openrouter/<vendor>/<model>" -> OpenRouter chat completions.
+  // Anything else -> exe.dev LLM integration (Responses API), which routes
+  // gpt-* to the connected ChatGPT subscription. No API key needed in-VM.
+  if (cli.model.startsWith("openrouter/")) {
+    const key = process.env.OPENROUTER_API_KEY || env.OPENROUTER_API_KEY;
+    if (!key) return fallback("OPENROUTER_API_KEY missing; fallback summary:");
+
+    const userContent =
+      notebookImages.length > 0
+        ? [
+            { type: "text", text: userText },
+            ...notebookImages.map((url) => ({ type: "image_url", image_url: { url } })),
+          ]
+        : userText;
+
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: cli.model.slice("openrouter/".length),
+        temperature: 0.2,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: userContent },
+        ],
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      return `${fallback(`LLM call failed (${res.status}).`)}\n\nError: ${err}`;
+    }
+
+    const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    return json.choices?.[0]?.message?.content?.trim() || "(empty summary)";
+  }
+
+  const base = (process.env.EXE_LLM_BASE || env.EXE_LLM_BASE || "https://llm.int.exe.xyz").replace(/\/$/, "");
+  const inputContent: Array<Record<string, unknown>> = [{ type: "input_text", text: userText }];
+  for (const url of notebookImages) inputContent.push({ type: "input_image", image_url: url });
+
+  const res = await fetch(`${base}/v1/responses`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: cli.model,
-      temperature: 0.2,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: userContent },
-      ],
+      store: false,
+      stream: true,
+      instructions: system,
+      input: [{ role: "user", content: inputContent }],
     }),
   });
 
   if (!res.ok) {
     const err = await res.text();
-    return `LLM call failed (${res.status}).\n\n${changes.map((c) => `- ${c.name}: ${c.bits.join(", ")}`).join("\n")}\n\nError: ${err}`;
+    return `${fallback(`LLM call failed (${res.status}).`)}\n\nError: ${err}`;
   }
 
-  const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-  return json.choices?.[0]?.message?.content?.trim() || "(empty summary)";
+  const text = parseResponsesSSE(await res.text());
+  return text || "(empty summary)";
 }
 
 function esc(s: string): string {

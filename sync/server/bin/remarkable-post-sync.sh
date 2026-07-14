@@ -136,15 +136,18 @@ if [[ -f "$PUB_MARKER" ]]; then
   recent_trigger=""
   [[ -f "$TRG_MARKER" ]] && recent_trigger="$(find "$TRG_MARKER" -mmin -"$COOLDOWN_MIN" 2>/dev/null || true)"
   if [[ ! -f "$TRG_MARKER" ]] || { [[ "$PUB_MARKER" -nt "$TRG_MARKER" ]] && [[ -z "$recent_trigger" ]]; }; then
-    EXE_API_TOKEN="$(grep '^EXE_API_TOKEN=' "$HOME/.env" 2>/dev/null | cut -d= -f2-)"
-    if [[ -n "$EXE_API_TOKEN" ]]; then
-      curl -s -m 30 -X POST https://exe.dev/exec \
-        -H "Authorization: Bearer $EXE_API_TOKEN" \
-        --data-binary "shelley prompt remarkable 'A reMarkable sync just published new changes. Follow the reMarkable duties in ~/.config/shelley/AGENTS.md: read the latest diffs.jsonl entries and changed-page images, update your journal, and update todays exercises post under ~/notes/notes/.'" \
+    # Shelley runs on this same VM — talk to it over the local unix socket so
+    # we can pin the model. gpt-* models route through the connected ChatGPT
+    # subscription on the llm integration (no exe.dev LLM credits burned);
+    # claude-* models go through the credit-metered gateway.
+    SHELLEY_MODEL="${SHELLEY_MODEL:-gpt-5.6-sol}"
+    if command -v shelley >/dev/null 2>&1; then
+      shelley client chat -model "$SHELLEY_MODEL" \
+        -p 'A reMarkable sync just published new changes. Follow the reMarkable duties in ~/.config/shelley/AGENTS.md: read the latest diffs.jsonl entries and changed-page images, update your journal, and update todays exercises post under ~/notes/notes/.' \
         >> "$STATE_DIR/shelley-trigger.log" 2>&1 || true
       echo "" >> "$STATE_DIR/shelley-trigger.log"
       touch "$TRG_MARKER"
-      echo "[$(date -Is)] shelley triggered" >> "$LOG"
+      echo "[$(date -Is)] shelley triggered (model=$SHELLEY_MODEL)" >> "$LOG"
     fi
   fi
 fi

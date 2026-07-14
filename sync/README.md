@@ -207,7 +207,8 @@ ssh exe.dev ssh-key add "<that public key> remarkable-tablet-sync"
 ssh exe.dev share port remarkable 8000
 ssh exe.dev share set-public remarkable
 
-# 3. Secrets for the activity agent
+# 3. (optional) OpenRouter key — only needed for openrouter/* models; the
+#    default gpt-5.5 goes through the exe.dev LLM integration, no key needed
 ssh exedev@remarkable.exe.xyz 'echo "OPENROUTER_API_KEY=..." >> ~/.env && chmod 600 ~/.env'
 ```
 
