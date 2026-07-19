@@ -36,6 +36,7 @@ const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 const { URL } = require('url');
 const { serializedLibrary } = require('./papier-library');
+const { createPiSessions } = require('./papier-pi-sessions');
 
 const BACKUP = process.env.PAPIER_BACKUP || '/home/exedev/remarkable-backup';
 const INBOX = path.join(BACKUP, 'papier-inbound');
@@ -54,6 +55,8 @@ const PREVIEW_PY = '/home/exedev/bin/papier-preview-page.py';
 const PY = '/home/exedev/papier-venv/bin/python3';
 const PORT = Number(process.env.PAPIER_PORT || 8093);
 [INCOMING, DOCS, SOURCES, PREVIEWS, COVERS, COMPOSE, DERIVED].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+
+const piSessions = createPiSessions({ mirrorDocs: MIRROR, inboundDocs: DOCS });
 
 const MAX_BYTES = 200 * 1024 * 1024;
 const DEFAULT_CROP = [0, 0, 1, 1];   // whole page (fractions 0..1)
@@ -176,9 +179,32 @@ function writeAtomically(dst, data) {
   fs.renameSync(tmp, dst);
 }
 
+// The freshest copy of a page ink file: the inbound overlay (iPad + pi
+// writes) when present, else the tablet mirror.
+function effectiveInkPath(id, file) {
+  const overlay = path.join(DOCS, id, 'ink', file);
+  if (fs.existsSync(overlay)) return overlay;
+  return path.join(MIRROR, id, 'ink', file);
+}
+
+// GET /ink?id=&file= — the merged-truth read the iPad uses.
+function handleInkRead(res, id, file) {
+  id = safeId(id);
+  if (!id || !/^(?:pdf|note)-\d{4}\.json$/.test(file || '')) return json(res, 400, { ok: false, error: 'bad request' });
+  const p = effectiveInkPath(id, file);
+  if (!fs.existsSync(p)) { res.writeHead(404); res.end('no ink'); return; }
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+  fs.createReadStream(p).pipe(res);
+}
+
 // POST /ink?id=<doc>&file=note-0001.json — body is the FULL page ink file
 // (v/next_patch/next_stroke/strokes/patches, libreink-page schema). Papier
 // heals foreign stroke ids on load, so the iPad may number strokes freely.
+//
+// Ownership split: the poster (iPad) is the authority on USER strokes; the
+// SERVER is the authority on pi's patches (cloud pi may have drawn/erased
+// since the client loaded the page), so the current file's patches replace
+// the posted ones.
 function handleInkWrite(req, res, id, file) {
   id = safeId(id);
   if (!id) return json(res, 400, { ok: false, error: 'bad id' });
@@ -189,6 +215,13 @@ function handleInkWrite(req, res, id, file) {
     try { page = JSON.parse(buf.toString('utf8')); } catch (_) { return json(res, 400, { ok: false, error: 'not JSON' }); }
     if (!page || page.v !== 1 || !Array.isArray(page.strokes) || !Array.isArray(page.patches))
       return json(res, 400, { ok: false, error: 'not a page ink file' });
+    try {
+      const current = JSON.parse(fs.readFileSync(effectiveInkPath(id, file), 'utf8'));
+      if (current && Array.isArray(current.patches)) {
+        page.patches = current.patches;
+        page.next_patch = Math.max(page.next_patch || 1, current.next_patch || 1);
+      }
+    } catch (_) { /* no existing file — nothing to merge */ }
     try {
       const dir = path.join(DOCS, id, 'ink');
       fs.mkdirSync(dir, { recursive: true });
@@ -319,7 +352,9 @@ function buildDerivedPdf(id, docDir) {
     });
   });
   derivedBuilds.set(id, p);
-  p.finally(() => derivedBuilds.delete(id));
+  // .finally() derives a NEW promise; without the .catch a failed build
+  // becomes an unhandled rejection and kills the whole service.
+  p.finally(() => derivedBuilds.delete(id)).catch(() => {});
   return p;
 }
 function streamPdf(req, res, file, immutable) {
@@ -640,6 +675,8 @@ http.createServer((req, res) => {
   if ((req.method === 'GET' || req.method === 'HEAD') && p === '/source-pdf') return handleSourcePdf(req, res, u.searchParams.get('id'), u.searchParams.get('v'));
   if (req.method === 'POST' && p === '/compose') return handleCompose(req, res);
   if (req.method === 'GET' && p === '/compose-status') return handleComposeStatus(res, u.searchParams.get('job'));
+  if (piSessions.handle(req, res, p, u)) return;
+  if (req.method === 'GET' && p === '/ink') return handleInkRead(res, u.searchParams.get('id'), u.searchParams.get('file'));
   if (req.method === 'POST' && p === '/ink') return handleInkWrite(req, res, u.searchParams.get('id'), u.searchParams.get('file'));
   if (req.method === 'POST' && p === '/state') return handleStateWrite(req, res, u.searchParams.get('id'));
   if (req.method === 'POST' && p === '/notebook') return handleNotebookCreate(req, res);

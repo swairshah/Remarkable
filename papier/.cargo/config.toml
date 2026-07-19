@@ -7,5 +7,10 @@
 [target.armv7-unknown-linux-musleabihf]
 linker = "rust-lld"
 
+# The cloud twin (src/bin/cloud_canvas.rs) runs on the sync VM: same
+# crates, x86_64 target. Same zero-dependency static-link setup.
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+
 [build]
 target = "armv7-unknown-linux-musleabihf"

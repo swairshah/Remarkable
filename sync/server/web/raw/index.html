@@ -8,13 +8,28 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Google+Sans+Code:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  :root { --sidebar-w: 180px; --serif:'Iowan Old Style','Palatino Linotype',Palatino,'Book Antiqua',Georgia,serif; --mono:'Google Sans Code',ui-monospace,'SF Mono',Menlo,Consolas,monospace; }
-  html,body{margin:0;height:100%;background:#111;color:#eee;font-family:var(--serif);overflow:hidden;}
+  :root {
+    --sidebar-w: 180px;
+    --serif:'Iowan Old Style','Palatino Linotype',Palatino,'Book Antiqua',Georgia,serif;
+    --mono:'Google Sans Code',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    --bg:#111; --panel:#181818; --line:#2a2a2a; --text:#eee; --muted:#bbb; --dim:#aaa;
+    --hover:#222; --active:#2c3a55; --active-text:#fff;
+    --overlay:rgba(0,0,0,.55); --overlay-text:#eee; --thumb-bg:#000;
+    --img-shadow:none;
+  }
+  /* Light mode — nav.js / the <head> bootstrap set <html data-theme="light"> */
+  html[data-theme=light] {
+    --bg:#f4f3f0; --panel:#ffffff; --line:#e2e0da; --text:#1c1c1c; --muted:#4a4d53; --dim:#6b6f76;
+    --hover:#eceae4; --active:#dce6f5; --active-text:#1a2b4a;
+    --overlay:rgba(255,255,255,.8); --overlay-text:#1c1c1c; --thumb-bg:#e8e6e0;
+    --img-shadow:0 4px 24px rgba(0,0,0,.22);
+  }
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--serif);overflow:hidden;}
   body{touch-action:pan-y;}
 
   #sidebar{
     position:fixed;top:0;left:0;bottom:0;width:var(--sidebar-w);
-    background:#181818;border-right:1px solid #2a2a2a;
+    background:var(--panel);border-right:1px solid var(--line);
     overflow-y:auto;overflow-x:hidden;
     transition:transform .2s ease;z-index:10;
     -webkit-overflow-scrolling:touch;
@@ -24,13 +39,13 @@
   #sidebar li{
     display:flex;align-items:center;gap:8px;
     padding:6px;margin-bottom:4px;border-radius:6px;
-    cursor:pointer;font-size:12px;color:#bbb;
+    cursor:pointer;font-size:12px;color:var(--muted);
   }
-  #sidebar li:hover{background:#222;}
-  #sidebar li.active{background:#2c3a55;color:#fff;}
+  #sidebar li:hover{background:var(--hover);}
+  #sidebar li.active{background:var(--active);color:var(--active-text);}
   #sidebar li img{
     width:64px;height:84px;object-fit:cover;
-    background:#000;border-radius:3px;flex-shrink:0;
+    background:var(--thumb-bg);border-radius:3px;flex-shrink:0;
   }
   #sidebar li .num{font-variant-numeric:tabular-nums;font-family:var(--mono);}
 
@@ -41,12 +56,12 @@
   body.sb-hidden #main{left:0;}
 
   #stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;}
-  #img{max-width:100%;max-height:100%;user-select:none;-webkit-user-drag:none;display:none;}
-  #msg{padding:20px;font-size:14px;color:#aaa;}
+  #img{max-width:100%;max-height:100%;user-select:none;-webkit-user-drag:none;display:none;box-shadow:var(--img-shadow);}
+  #msg{padding:20px;font-size:14px;color:var(--dim);}
 
   #counter{
     position:absolute;bottom:12px;left:50%;transform:translateX(-50%);
-    background:rgba(0,0,0,.55);padding:4px 12px;border-radius:14px;
+    background:var(--overlay);color:var(--overlay-text);padding:4px 12px;border-radius:14px;
     font-size:13px;font-variant-numeric:tabular-nums;font-family:var(--mono);
   }
 
@@ -55,7 +70,7 @@
 
   #toggle{
     position:fixed;top:10px;left:10px;z-index:20;
-    background:rgba(0,0,0,.55);color:#eee;border:none;
+    background:var(--overlay);color:var(--overlay-text);border:none;
     width:36px;height:36px;border-radius:8px;cursor:pointer;
     font-size:18px;line-height:1;
   }
@@ -64,7 +79,7 @@
 
   #latest{
     position:fixed;top:10px;right:10px;z-index:20;
-    background:rgba(0,0,0,.55);color:#eee;border:none;
+    background:var(--overlay);color:var(--overlay-text);border:none;
     padding:8px 12px;border-radius:8px;cursor:pointer;font-size:12px;
   }
 

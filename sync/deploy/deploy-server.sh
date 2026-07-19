@@ -69,6 +69,22 @@ echo "[deploy-server] scp Papier viewer + library/upload service"
 scp -q "$PAPIER_SERVER"/bin/papier-upload.js "$PAPIER_SERVER"/bin/papier-library.js \
   "$PAPIER_SERVER"/bin/papier-preview-page.py "$PAPIER_SERVER"/bin/papier-render.sh \
   "$PAPIER_SERVER"/bin/papier-compose.sh "$PAPIER_SERVER"/bin/papier-make-pdf.py "$HOST:bin/"
+
+echo "[deploy-server] ensure papier python venv (pymupdf for pdf derive/render)"
+ssh "$HOST" '
+  set -e
+  if [ ! -x ~/papier-venv/bin/python3 ]; then
+    python3 -m venv ~/papier-venv
+    ~/papier-venv/bin/pip install -q pymupdf
+  fi
+'
+
+echo "[deploy-server] build + ship papier remote-pi (cloud-canvas + session service)"
+(cd "$HERE/../papier" && cargo build --release --bin cloud_canvas --target x86_64-unknown-linux-musl >/dev/null)
+scp -q "$HERE/../papier"/target/x86_64-unknown-linux-musl/release/cloud_canvas "$HOST:bin/papier-cloud-canvas"
+scp -q "$PAPIER_SERVER"/bin/papier-pi-sessions.js "$PAPIER_SERVER"/bin/papier-cloud-prompt.md \
+  "$HERE/../papier"/ext/papier-canvas.ts "$HOST:bin/"
+ssh "$HOST" 'chmod +x ~/bin/papier-cloud-canvas'
 scp -q "$PAPIER_SERVER"/web/index.html "$HOST:notes-server/papier/index.html"
 ssh "$HOST" 'chmod +x ~/bin/papier-preview-page.py ~/bin/papier-render.sh ~/bin/papier-compose.sh ~/bin/papier-make-pdf.py'
 

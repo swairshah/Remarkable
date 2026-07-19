@@ -20,9 +20,12 @@
     --papier: #fbfbf9; --ink: #1c1c1c; --ai: #2457c5;
     --bg: #ececec; --card: #fff; --line: #d8d8d4; --muted: #6a6a66; --accent: #1c1c1c;
   }
+  /* Dark via OS preference only when the site-wide toggle (nav.js,
+     <html data-theme>) hasn't made an explicit choice. */
   @media (prefers-color-scheme: dark) {
-    :root { --papier:#f4f4f0; --bg:#161615; --card:#212120; --line:#333; --muted:#9a9a94; --accent:#f0f0ea; }
+    :root:not([data-theme]) { --papier:#f4f4f0; --bg:#161615; --card:#212120; --line:#333; --muted:#9a9a94; --accent:#f0f0ea; }
   }
+  html[data-theme=dark] { --papier:#f4f4f0; --bg:#161615; --card:#212120; --line:#333; --muted:#9a9a94; --accent:#f0f0ea; }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
   body {

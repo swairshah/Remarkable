@@ -59,6 +59,15 @@ and a diff digest, then pings you. When you receive a prompt mentioning a
    digest at `~/notes/updates/index.html` — same palette, body text in
    'Iowan Old Style' (serif fallbacks), mono in 'Google Sans Code' (Google
    Fonts). Load MathJax from CDN if the material needs math.
+   **Light mode.** The site nav has a light/dark toggle that sets
+   `data-theme="light"|"dark"` on `<html>` — it follows the visitor's
+   system theme by default and persists an explicit choice in
+   localStorage. Define your palette as CSS custom properties on `:root` (the dark
+   digest palette as default) plus an `html[data-theme=light]` block
+   overriding them, and reference only the variables in your rules:
+   `--bg:rgb(250,250,249); --bg2:rgb(239,238,234); --border:rgba(20,24,32,.14);
+   --text:rgb(64,68,74); --bright:rgb(22,24,28); --muted:rgb(110,115,123);
+   --accent:rgb(199,106,6)`.
    Do NOT add your own site-navigation bar: nginx injects a shared nav
    (`/nav.js`) into every HTML page automatically. In-content links
    (back to the index, between posts) are fine.

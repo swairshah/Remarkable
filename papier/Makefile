@@ -67,6 +67,12 @@ build:
 	cargo build --release
 	file $(BUILT)
 
+# The remote-pi tool executor for the sync VM: the same libreink crates,
+# x86_64 static. Shipped by sync/deploy/deploy-server.sh.
+cloud-canvas:
+	cargo build --release --bin cloud_canvas --target x86_64-unknown-linux-musl
+	file target/x86_64-unknown-linux-musl/release/cloud_canvas
+
 # Host-arch tests (the .cargo config pins builds to armv7, so tests need an
 # explicit native target). The PNG decoder test moved to libreink-core with
 # the extraction; run the shared crates' suite too so this stays one command.

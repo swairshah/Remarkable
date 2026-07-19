@@ -498,6 +498,8 @@ function renderHtml(summary: string, changes: Change[], history: HistoryEntry[])
 <style>
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:rgb(15,17,21);--bg2:rgb(26,29,35);--border:rgba(107,114,128,.2);--text:rgb(201,204,209);--bright:rgb(229,231,235);--muted:rgb(107,114,128);--accent:rgb(245,158,11);--serif:'Iowan Old Style','Palatino Linotype',Palatino,'Book Antiqua',Georgia,serif;--mono:'Google Sans Code',ui-monospace,'SF Mono',Menlo,Consolas,monospace}
+/* Light mode — the site nav's toggle sets <html data-theme="light"> (see /nav.js) */
+html[data-theme=light]{--bg:rgb(250,250,249);--bg2:rgb(239,238,234);--border:rgba(20,24,32,.14);--text:rgb(64,68,74);--bright:rgb(22,24,28);--muted:rgb(110,115,123);--accent:rgb(199,106,6)}
 body{background:var(--bg);color:var(--text);font-family:var(--serif);font-size:17px;line-height:1.6;min-height:100vh}
 pre,code{font-family:var(--mono)}
 nav{padding:20px 24px;display:flex;justify-content:space-between;align-items:center}.nav-left{display:flex;align-items:center;gap:14px}.brand{color:var(--bright);text-decoration:none;font-weight:500}.brand:hover{color:var(--accent)}
