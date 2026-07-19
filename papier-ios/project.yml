@@ -1,0 +1,52 @@
+name: Papier
+options:
+  bundleIdPrefix: com.swair
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+targets:
+  PapierUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [PapierUITests]
+    dependencies:
+      - target: Papier
+    settings:
+      base:
+        TEST_TARGET_NAME: Papier
+        GENERATE_INFOPLIST_FILE: true
+        PRODUCT_BUNDLE_IDENTIFIER: com.swair.papier.uitests
+
+  Papier:
+    type: application
+    platform: iOS
+    sources:
+      - Papier
+    info:
+      path: Papier/Info.plist
+      properties:
+        CFBundleDisplayName: Papier
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSAppTransportSecurity:
+          # The papier VM is reached over the tailnet (WireGuard-encrypted)
+          # as plain HTTP on :8000 — ATS must allow it.
+          NSAllowsArbitraryLoads: true
+        UIApplicationSupportsIndirectInputEvents: true
+        UIAppFonts:
+          - EBGaramond-Regular.ttf
+          - EBGaramond-SemiBold.ttf
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.swair.papier
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "5.9"
+        INFOPLIST_KEY_CFBundleDisplayName: Papier
+        SUPPORTS_MACCATALYST: false
+        ENABLE_PREVIEWS: true

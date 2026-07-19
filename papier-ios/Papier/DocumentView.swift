@@ -1,0 +1,221 @@
+// DocumentView.swift — a document open full-screen: swipe (or arrow) page
+// navigation over the doc's seq, a papier-style floating right-edge tool
+// rail (pencil / eraser / finger / undo / redo), page counter, add-page
+// for notebooks. Books show the pre-rendered raster under the ink.
+
+import PencilKit
+import SwiftUI
+
+struct DocumentView: View {
+    let doc: PapierDoc
+
+    @EnvironmentObject private var store: LibraryStore
+    @Environment(\.scenePhase) private var scenePhase
+
+    @State private var seq: [SeqEntry]
+    @State private var index: Int
+    @State private var tool: CanvasTool = .pencil
+    @State private var fingerDraws = false
+    @State private var models: [String: PageModel] = [:]
+    @StateObject private var hub = CanvasHub()
+
+    init(doc: PapierDoc) {
+        self.doc = doc
+        _seq = State(initialValue: doc.seq.isEmpty ? [.note(1)] : doc.seq)
+        let saved = UserDefaults.standard.integer(forKey: "pos-\(doc.id)")
+        _index = State(initialValue: min(max(saved, 0), max((doc.seq.count) - 1, 0)))
+    }
+
+    private func model(for entry: SeqEntry) -> PageModel {
+        if let m = models[entry.inkKey] { return m }
+        let m = PageModel(doc: doc, entry: entry, store: store)
+        DispatchQueue.main.async { models[entry.inkKey] = m }
+        return m
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color(uiColor: .systemGray6).ignoresSafeArea()
+
+                TabView(selection: $index) {
+                    ForEach(Array(seq.enumerated()), id: \.offset) { i, entry in
+                        PageScreen(doc: doc,
+                                   entry: entry,
+                                   model: model(for: entry),
+                                   near: abs(i - index) <= 1,
+                                   active: i == index,
+                                   tool: tool,
+                                   fingerDraws: fingerDraws,
+                                   hub: hub)
+                            .tag(i)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .ignoresSafeArea(edges: .bottom)
+
+                toolRail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                    .padding(.trailing, 10)
+            }
+        }
+        .navigationTitle(doc.meta.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                syncBadge
+                Text("\(index + 1) / \(seq.count)")
+                    .font(.system(.footnote, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                if doc.isNotebook {
+                    Button { addPage() } label: { Image(systemName: "plus.square.on.square") }
+                        .help("Add a page after this one")
+                }
+            }
+        }
+        .onChange(of: index) { old, _ in
+            UserDefaults.standard.set(index, forKey: "pos-\(doc.id)")
+            if old < seq.count { models[seq[old].inkKey]?.flushNow() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { flushAll() }
+        }
+        .onDisappear { flushAll(); store.startPolling() }
+        .onAppear { store.stopPolling() }
+    }
+
+    private var currentModel: PageModel? { models[seq[index].inkKey] }
+
+    private var syncBadge: some View {
+        Group {
+            switch currentModel?.sync {
+            case .dirty, .saving: Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.orange)
+            case .saved: Image(systemName: "checkmark.icloud").foregroundStyle(.green)
+            case .error: Image(systemName: "exclamationmark.icloud").foregroundStyle(.red)
+            default: EmptyView()
+            }
+        }
+        .font(.footnote)
+        .animation(.default, value: currentModel?.sync)
+    }
+
+    // papier's right-edge toolbar, reinterpreted as a floating rail.
+    private var toolRail: some View {
+        VStack(spacing: 14) {
+            railButton("pencil", active: tool == .pencil) { tool = .pencil }
+                .accessibilityIdentifier("rail-pencil")
+            railButton("eraser", active: tool == .eraser) { tool = .eraser }
+                .accessibilityIdentifier("rail-eraser")
+            railButton("hand.draw", active: fingerDraws) { fingerDraws.toggle() }
+                .accessibilityIdentifier("rail-finger")
+            Divider().frame(width: 22)
+            railButton("arrow.uturn.backward", active: false) {
+                hub.activeCanvas?.undoManager?.undo()
+            }
+            railButton("arrow.uturn.forward", active: false) {
+                hub.activeCanvas?.undoManager?.redo()
+            }
+        }
+        .padding(.vertical, 14)
+        .padding(.horizontal, 8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+    }
+
+    private func railButton(_ symbol: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .medium))
+                .frame(width: 30, height: 30)
+                .background(active ? Color.accentColor.opacity(0.18) : .clear,
+                            in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func flushAll() {
+        for m in models.values { m.flushNow() }
+    }
+
+    /// Append a fresh note page after the current one and tell the cloud.
+    private func addPage() {
+        let nextNote = (seq.compactMap { if case .note(let n) = $0 { n } else { nil } }.max() ?? 0) + 1
+        seq.insert(.note(nextNote), at: index + 1)
+        let state = DocState(nextNote: nextNote + 1, pos: index + 1, seq: seq)
+        Task {
+            try? await store.client.postState(docId: doc.id, state: state)
+            withAnimation { index += 1 }
+        }
+    }
+}
+
+// MARK: - one page
+
+private struct PageScreen: View {
+    let doc: PapierDoc
+    let entry: SeqEntry
+    @ObservedObject var model: PageModel
+    let near: Bool
+    let active: Bool
+    let tool: CanvasTool
+    let fingerDraws: Bool
+    let hub: CanvasHub
+
+    @EnvironmentObject private var store: LibraryStore
+
+    var body: some View {
+        GeometryReader { geo in
+            let fit = fittedSize(in: geo.size)
+            ZStack {
+                if near {
+                    page(fit: fit)
+                        .frame(width: fit.width, height: fit.height)
+                        .background(Color.white)
+                        .shadow(color: .black.opacity(0.14), radius: 8, y: 2)
+                        .task(id: fit.width) {
+                            await model.load(displayWidth: fit.width)
+                            model.rescale(displayWidth: fit.width)
+                        }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private func page(fit: CGSize) -> some View {
+        ZStack {
+            Color.white
+            if case .pdf(let p) = entry {
+                AsyncImage(url: store.client.pageURL(doc, pdfPage: p)) { phase in
+                    switch phase {
+                    case .success(let img): img.resizable().scaledToFit()
+                    case .empty: ProgressView()
+                    case .failure: Image(systemName: "photo").foregroundStyle(.tertiary)
+                    @unknown default: EmptyView()
+                    }
+                }
+            }
+            if let patches = model.patchesImage {
+                Image(uiImage: patches).resizable().scaledToFit()
+            }
+            if let drawing = model.initialDrawing {
+                CanvasView(initialDrawing: drawing,
+                           tool: tool,
+                           fingerDraws: fingerDraws,
+                           isActive: active,
+                           hub: hub,
+                           onChanged: { model.drawingChanged($0) })
+            } else {
+                ProgressView()
+            }
+        }
+    }
+
+    private func fittedSize(in container: CGSize) -> CGSize {
+        let aspect = doc.pageW / doc.pageH
+        let margin: CGFloat = 12
+        let w = min(container.width - margin * 2, (container.height - margin * 2) * aspect)
+        return CGSize(width: max(w, 1), height: max(w / aspect, 1))
+    }
+}
