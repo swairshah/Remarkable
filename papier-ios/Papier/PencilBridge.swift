@@ -60,13 +60,27 @@ enum PencilBridge {
         var id = firstId
         var out: [InkStroke] = []
         for stroke in drawing.strokes {
+            // Pencil ink carries its visible weight in OPACITY (pressure);
+            // its point size is just the constant tip footprint. Serializing
+            // size would turn pencil marks into hairlines, so pressure maps
+            // to the papier radius instead — calibrated to the reMarkable
+            // pen's typical 1.7–3.1 page-px range. Other inks (monoline
+            // imports) carry true geometry in size and round-trip directly.
+            let isPencil = stroke.ink.inkType == .pencil
             // ~2.2 display-pt steps: dense enough for smooth e-ink redraw,
             // sparse enough to keep page files small.
             let pts = stroke.path.interpolatedPoints(by: .distance(2.2)).map { p -> InkPoint in
                 let loc = p.location.applying(stroke.transform)
+                let r: Double
+                if isPencil {
+                    let pressure = Double(max(0.15, min(1.0, p.opacity)))
+                    r = 2.4 * (0.55 + 0.75 * pressure)   // page units: 1.7…3.1
+                } else {
+                    r = Double(max(0.8, min(6.0, (max(p.size.width, p.size.height) / 2) / scale)))
+                }
                 return InkPoint(x: Double(loc.x / scale),
                                 y: Double(loc.y / scale),
-                                r: Double(max(0.8, min(6.0, (p.size.width / 2) / scale))))
+                                r: r)
             }
             guard !pts.isEmpty else { continue }
             out.append(InkStroke(id: id, gray: 0, points: Array(pts)))
