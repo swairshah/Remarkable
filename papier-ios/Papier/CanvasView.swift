@@ -51,6 +51,9 @@ struct CanvasView: UIViewRepresentable {
     let isActive: Bool
     let hub: CanvasHub
     let onChanged: (PKDrawing) -> Void
+    /// Fired for taps of ANY input type (pencil included — the canvas
+    /// swallows pencil touches, so SwiftUI gestures never see them).
+    var onTap: ((CGPoint) -> Void)?
 
     func makeUIView(context: Context) -> PKCanvasView {
         let canvas = PKCanvasView()
@@ -66,12 +69,19 @@ struct CanvasView: UIViewRepresentable {
         context.coordinator.programmatic = true
         canvas.drawing = initialDrawing
         context.coordinator.programmatic = false
+        let tap = UITapGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.tapped(_:)))
+        tap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue),
+                                 NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+        tap.delegate = context.coordinator
+        canvas.addGestureRecognizer(tap)
         apply(to: canvas)
         return canvas
     }
 
     func updateUIView(_ canvas: PKCanvasView, context: Context) {
         apply(to: canvas)
+        context.coordinator.onTap = onTap
         if isActive { hub.activeCanvas = canvas }
         // Adopt a rebuilt drawing ONLY on a load/rescale epoch change —
         // never on ordinary SwiftUI refreshes, which would wipe user edits.
@@ -101,22 +111,34 @@ struct CanvasView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onChanged: onChanged, lastEpoch: epoch)
+        Coordinator(onChanged: onChanged, lastEpoch: epoch, onTap: onTap)
     }
 
-    final class Coordinator: NSObject, PKCanvasViewDelegate {
+    final class Coordinator: NSObject, PKCanvasViewDelegate, UIGestureRecognizerDelegate {
         let onChanged: (PKDrawing) -> Void
         var programmatic = false
         var lastEpoch: Int
+        var onTap: ((CGPoint) -> Void)?
 
-        init(onChanged: @escaping (PKDrawing) -> Void, lastEpoch: Int) {
+        init(onChanged: @escaping (PKDrawing) -> Void, lastEpoch: Int, onTap: ((CGPoint) -> Void)?) {
             self.onChanged = onChanged
             self.lastEpoch = lastEpoch
+            self.onTap = onTap
         }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             guard !programmatic else { return }
             onChanged(canvasView.drawing)
+        }
+
+        @objc func tapped(_ g: UITapGestureRecognizer) {
+            onTap?(g.location(in: g.view))
+        }
+
+        // run alongside PencilKit's own recognizers, never instead of them
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
         }
     }
 }

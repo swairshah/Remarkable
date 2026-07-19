@@ -33,7 +33,7 @@ function readInkKeys(docDir) {
   }
 }
 
-function readSource(root, base, pending, coverEndpoint, sourcesDir) {
+function readSource(root, base, pending, coverEndpoint, sourcesDir, overlayRoot = null) {
   const docsDir = path.join(root, 'docs');
   let entries;
   try { entries = fs.readdirSync(docsDir, { withFileTypes: true }); } catch (_) { return []; }
@@ -51,7 +51,14 @@ function readSource(root, base, pending, coverEndpoint, sourcesDir) {
     const kind = meta.kind === 'notebook' ? 'notebook' : (meta.pages > 0 ? 'book' : null);
     if (!kind) continue;
 
-    const state = readJson(statePath) || {};
+    // The inbound overlay is the freshest truth for state (iPad page-adds,
+    // pi note inserts) and holds new pages' ink until the tablet pulls.
+    // Without this, a page added on the iPad VANISHES on reopen: its seq
+    // entry only exists in the overlay's state.json.
+    const overlayDir = overlayRoot ? path.join(overlayRoot, 'docs', id) : null;
+    const overlayState = overlayDir ? path.join(overlayDir, 'state.json') : null;
+    const effectiveStatePath = overlayState && fs.existsSync(overlayState) ? overlayState : statePath;
+    const state = readJson(effectiveStatePath) || {};
     const seq = Array.isArray(state.seq) ? state.seq : [];
     const first = seq[0] || (kind === 'book' ? { p: 0 } : { n: 1 });
     const thumbPath = path.join(docDir, 'thumb.png');
@@ -67,19 +74,20 @@ function readSource(root, base, pending, coverEndpoint, sourcesDir) {
     const srcMtime = sourcePdf ? mtimeMs(sourcePdf) : 0;
     const inkDir = path.join(docDir, 'ink');
     const pagesDir = path.join(docDir, 'pages');
-    const versionFiles = [docDir, metaPath, statePath, thumbPath, inkDir, pagesDir];
+    const versionFiles = [docDir, metaPath, effectiveStatePath, thumbPath, inkDir, pagesDir];
+    if (overlayDir) versionFiles.push(overlayDir, path.join(overlayDir, 'ink'));
 
     docs.push({
       id,
       base,
       pending,
       meta: { ...meta, kind },
-      mtime: Math.max(mtimeMs(metaPath), mtimeMs(statePath), mtimeMs(docDir)),
+      mtime: Math.max(mtimeMs(metaPath), mtimeMs(effectiveStatePath), mtimeMs(docDir)),
       version: versionOf(versionFiles),
       cover,
       coverVersion,
       seq,
-      ink: readInkKeys(docDir),
+      ink: [...new Set([...readInkKeys(docDir), ...(overlayDir ? readInkKeys(overlayDir) : [])])].sort(),
       hasSource: srcMtime > 0,
       srcVersion: srcMtime > 0 ? Math.trunc(srcMtime).toString(36) : null,
     });
@@ -88,7 +96,7 @@ function readSource(root, base, pending, coverEndpoint, sourcesDir) {
 }
 
 function buildLibrary({ mirror, inbound, sources = null, dataBase = '/papier/data/', inboundBase = '/papier/inbound/', coverEndpoint = '/papier/api/cover' }) {
-  const mirrored = readSource(mirror, dataBase, false, coverEndpoint, sources);
+  const mirrored = readSource(mirror, dataBase, false, coverEndpoint, sources, inbound);
   const pending = readSource(inbound, inboundBase, true, coverEndpoint, sources);
   const have = new Set(mirrored.map((doc) => doc.id));
   const docs = mirrored.concat(pending.filter((doc) => !have.has(doc.id)));

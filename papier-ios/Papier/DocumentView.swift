@@ -62,6 +62,10 @@ struct DocumentView: View {
                     }
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
+                // Eraser/lasso own the touches — swiping pages out from
+                // under a region capture or an erase pass is maddening.
+                // (Nav chevrons + GoTo stay available on the rail.)
+                .scrollDisabled(tool != .pencil)
                 .ignoresSafeArea(edges: .bottom)
 
                 toolRail
@@ -322,7 +326,14 @@ private struct PageScreen: View {
                            interactionEnabled: !capturing && selection == nil,
                            isActive: active,
                            hub: hub,
-                           onChanged: { model.drawingChanged($0) })
+                           onChanged: { model.drawingChanged($0) },
+                           onTap: { p in
+                               // pencil taps never reach SwiftUI gestures —
+                               // this is the reliable erase-pi-ink path
+                               if tool == .eraser && eraserMode != .region {
+                                   model.erasePatch(at: p)
+                               }
+                           })
             } else {
                 ProgressView()
             }

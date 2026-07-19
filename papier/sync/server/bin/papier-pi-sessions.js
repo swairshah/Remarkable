@@ -34,6 +34,8 @@ const TRANSCRIBE_EXT = process.env.PAPIER_TRANSCRIBE_EXT || '/home/exedev/bin/pa
 const METRICS_EXT = process.env.PAPIER_METRICS_EXT || '/home/exedev/bin/papier-metrics.ts';
 const PROMPT_MD = process.env.PAPIER_PI_PROMPT || '/home/exedev/bin/papier-cloud-prompt.md';
 const PI_BIN = process.env.PI_BIN || 'pi';
+const PI_PROVIDER = process.env.PAPIER_PI_PROVIDER || 'openai-codex';
+const PI_MODEL = process.env.PAPIER_PI_MODEL || 'gpt-5.6-luna:low';
 const PI_HOME = process.env.PAPIER_PI_HOME || path.join(os.homedir(), 'papier-pi');
 const TURN_TIMEOUT_MS = 240_000;
 const IDLE_MS = 30 * 60_000;
@@ -155,6 +157,7 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     if (cmd.cmd === 'insert_note' && injected.after_page == null) injected.after_page = s.page;
     const r = await canvasCall(s, injected);
     if (r && r.ok) {
+      s.turnActivity = true;
       if (cmd.cmd === 'draw' || cmd.cmd === 'underline' || cmd.cmd === 'erase') {
         emit(s, { type: 'patch', page: r.page || injected.page });
       }
@@ -223,11 +226,9 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
       '--no-extensions', '-e', CANVAS_EXT,
     ];
     // Continued sessions pin their birth model; force the configured one
-    // (the user's subscription auth) even on resume.
-    const provider = process.env.PAPIER_PI_PROVIDER || 'anthropic';
+    // (the user's Codex subscription) even on resume.
     // :low thinking — margin notes, not dissertations; keeps turns snappy.
-    const model = process.env.PAPIER_PI_MODEL || 'claude-fable-5:low';
-    args.push('--provider', provider, '--model', model);
+    args.push('--provider', PI_PROVIDER, '--model', PI_MODEL);
     if (fs.existsSync(METRICS_EXT)) args.push('-e', METRICS_EXT);
     if (fs.existsSync(TRANSCRIBE_EXT)) args.push('-e', TRANSCRIBE_EXT);
     if (resumed) args.push('--continue');
@@ -278,6 +279,7 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
       case 'agent_start':
         s.busy = true;
         s.turnText = '';
+        s.turnActivity = false;
         emit(s, { type: 'turn', state: 'start' });
         break;
       case 'message_update': {
@@ -306,6 +308,11 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
         const said = (s.turnText || '').trim();
         if (said && said.toLowerCase() !== 'pass' && said.length < 600) {
           emit(s, { type: 'notice', text: said });
+        }
+        // A dead model fails SILENTLY (empty answer, no tools). Say so —
+        // silence must be pi's choice, never an outage.
+        if (!said && !s.turnActivity) {
+          emit(s, { type: 'notice', text: '[pi returned nothing — possible model outage; check /pi/health]' });
         }
         emit(s, { type: 'turn', state: 'end' });
         const p = s.pending;
@@ -353,7 +360,7 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
       workDir: path.join(PI_HOME, id, 'work'),
       events: [], nextEvent: 0,
       epoch: Date.now(),   // clients reset their event cursor when this moves
-      busy: false, pending: null, pi: null, turnText: '', watchdog: null,
+      busy: false, pending: null, pi: null, turnText: '', turnActivity: false, watchdog: null,
       mode: 'auto', font: 'serif', page: 1,
       canvas: null, canvasQueue: [],
       lastUsed: Date.now(),
@@ -391,9 +398,33 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     return { ok: true, busy: s.busy, mode: s.mode, font: s.font, epoch: s.epoch };
   }
 
+  // GET /pi/health — a REAL 1-token model call (cached 10 min): a dead
+  // model becomes visible instantly instead of masquerading as silence.
+  let healthCache = null;
+  function handleHealth(res) {
+    if (healthCache && Date.now() - healthCache.at < 600_000) {
+      json(res, 200, healthCache.body);
+      return;
+    }
+    const child = spawn(PI_BIN, ['-p', '--no-session', '--provider', PI_PROVIDER,
+      '--model', PI_MODEL, 'reply with exactly: ok'], {
+      cwd: os.tmpdir(), env: { ...process.env, ...dotEnv() }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 90_000);
+    child.on('exit', () => {
+      clearTimeout(t);
+      const ok = out.trim().toLowerCase().includes('ok');
+      healthCache = { at: Date.now(), body: { ok, provider: PI_PROVIDER, model: PI_MODEL, output: out.trim().slice(0, 100) } };
+      json(res, ok ? 200 : 503, healthCache.body);
+    });
+  }
+
   // Returns true when the request was handled.
   function handle(req, res, p, u) {
     if (!p.startsWith('/pi/')) return false;
+    if (req.method === 'GET' && p === '/pi/health') { handleHealth(res); return true; }
     const id = u.searchParams.get('id') || '';
     if (!/^[a-z0-9][a-z0-9_-]{0,100}$/.test(id) || !docExists(id)) {
       json(res, 404, { ok: false, error: 'unknown doc' });
