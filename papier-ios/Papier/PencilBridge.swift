@@ -48,10 +48,12 @@ enum PencilBridge {
             let w: CGFloat
             let opacity: CGFloat
             if isPencilTagged {
-                // inverse of the export map: r = 2.4 * (0.55 + 0.75*pressure)
-                let pressure = max(0.15, min(1.0, (p.r / 2.4 - 0.55) / 0.75))
-                opacity = CGFloat(0.25 + 0.75 * pressure)
-                w = 4.5   // the live tool's tip width — weight comes from opacity
+                // EXACT inverse of the export map r = 2.4*(0.55 + 0.75*o):
+                // recover the original per-point opacity — no re-shaping.
+                opacity = CGFloat(max(0.15, min(1.0, (p.r / 2.4 - 0.55) / 0.75)))
+                // The live pencil's tip footprint (measured: r ≈ 1.2 page px),
+                // scaled to this display — weight comes from opacity+texture.
+                w = max(1.3, 2 * 1.2 * scale)
             } else {
                 opacity = 1
                 w = max(1.5, CGFloat(p.r) * 2 * scale)
