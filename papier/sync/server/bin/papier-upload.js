@@ -252,6 +252,29 @@ function handleStateWrite(req, res, id) {
   });
 }
 
+// POST /patch-erase?id=&file=&patch=N — the user rubbed out one of pi's
+// patches (tablet parity: the user may erase ANY ink). Removes it from the
+// effective ink file and writes the result to inbound.
+function handlePatchErase(res, id, file, patchId) {
+  id = safeId(id);
+  const pid = Number(patchId);
+  if (!id || !/^(?:pdf|note)-\d{4}\.json$/.test(file || '') || !Number.isInteger(pid))
+    return json(res, 400, { ok: false, error: 'bad request' });
+  let page;
+  try { page = JSON.parse(fs.readFileSync(effectiveInkPath(id, file), 'utf8')); }
+  catch (_) { return json(res, 404, { ok: false, error: 'no ink file' }); }
+  const before = (page.patches || []).length;
+  page.patches = (page.patches || []).filter((p) => p.id !== pid);
+  if (page.patches.length === before) return json(res, 404, { ok: false, error: 'no such patch' });
+  try {
+    const dir = path.join(DOCS, id, 'ink');
+    fs.mkdirSync(dir, { recursive: true });
+    writeAtomically(path.join(dir, file), JSON.stringify(page));
+  } catch (e) { return json(res, 500, { ok: false, error: String(e) }); }
+  console.log('patch erase', id, file, '#' + pid);
+  json(res, 200, { ok: true });
+}
+
 // POST /notebook — body {title} -> a fresh notebook bundle in inbound with
 // one blank page. Fresh id (slug de-collided), so it never clobbers a doc.
 function handleNotebookCreate(req, res) {
@@ -680,6 +703,7 @@ http.createServer((req, res) => {
   if (req.method === 'POST' && p === '/ink') return handleInkWrite(req, res, u.searchParams.get('id'), u.searchParams.get('file'));
   if (req.method === 'POST' && p === '/state') return handleStateWrite(req, res, u.searchParams.get('id'));
   if (req.method === 'POST' && p === '/notebook') return handleNotebookCreate(req, res);
+  if (req.method === 'POST' && p === '/patch-erase') return handlePatchErase(res, u.searchParams.get('id'), u.searchParams.get('file'), u.searchParams.get('patch'));
   if (req.method === 'POST' && p === '/upload') return handleUpload(req, res);
   if (req.method === 'POST' && p === '/attach') return handleAttach(req, res);
   if (req.method === 'POST' && p === '/render') return handleRender(req, res);

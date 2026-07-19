@@ -25,9 +25,7 @@ struct DocumentView: View {
         _seq = State(initialValue: doc.seq.isEmpty ? [.note(1)] : doc.seq)
         let saved = UserDefaults.standard.integer(forKey: "pos-\(doc.id)")
         _index = State(initialValue: min(max(saved, 0), max((doc.seq.count) - 1, 0)))
-        _pi = StateObject(wrappedValue: PiSession(
-            docId: doc.id,
-            serverRoot: UserDefaults.standard.string(forKey: "serverRoot") ?? ""))
+        _pi = StateObject(wrappedValue: PiSession(docId: doc.id, serverRoot: ""))
     }
 
     private func model(for entry: SeqEntry) -> PageModel {
@@ -111,6 +109,7 @@ struct DocumentView: View {
     }
 
     private func wirePi() {
+        pi.serverRoot = store.serverRoot.trimmingCharacters(in: .whitespaces)
         pi.onPatch = { page in
             guard page >= 1, page <= seq.count else { return }
             let key = seq[page - 1].inkKey
@@ -246,6 +245,11 @@ private struct PageScreen: View {
                         .frame(width: fit.width, height: fit.height)
                         .background(paper)
                         .shadow(color: .black.opacity(0.14), radius: 8, y: 2)
+                        // eraser tool + a tap on pi's ink -> erase that patch
+                        // (simultaneous: does not steal the canvas's touches)
+                        .simultaneousGesture(SpatialTapGesture().onEnded { v in
+                            if tool == .eraser { model.erasePatch(at: v.location) }
+                        })
                         .task(id: fit.width) {
                             await model.load(displayWidth: fit.width)
                             model.rescale(displayWidth: fit.width)

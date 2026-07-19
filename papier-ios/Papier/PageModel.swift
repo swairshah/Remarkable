@@ -142,4 +142,38 @@ final class PageModel: ObservableObject {
         saveGeneration += 1
         Task { await flush() }
     }
+
+    // MARK: - erasing pi's ink (tablet parity: any ink is erasable)
+
+    /// Hit-test a display-space point against pi's patches; erase the whole
+    /// patch it lands on (object erase, the tablet's default mode).
+    func erasePatch(at point: CGPoint) {
+        guard loaded, scale > 0 else { return }
+        let tol: CGFloat = 14   // display points
+        let px = point.x / scale, py = point.y / scale
+        let tolPage = tol / scale
+        for patch in base.patches {
+            var hit = false
+            for s in patch.strokes where !hit {
+                for p in s.points where abs(p.x - px) < tolPage && abs(p.y - py) < tolPage {
+                    hit = true; break
+                }
+            }
+            if !hit {
+                for t in patch.texts where !hit {
+                    let w = CGFloat(t.text.count) * t.size * 0.55
+                    if px >= t.x - tolPage, px <= t.x + w + tolPage,
+                       py >= t.y - t.size - tolPage, py <= t.y + tolPage { hit = true }
+                }
+            }
+            guard hit else { continue }
+            let id = patch.id
+            base.patches.removeAll { $0.id == id }
+            patches = base.patches
+            Task {
+                try? await store.client.erasePatch(docId: doc.id, file: entry.inkKey + ".json", patchId: id)
+            }
+            return
+        }
+    }
 }

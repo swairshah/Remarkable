@@ -86,6 +86,11 @@ struct PapierClient {
         try await post("/state?id=\(docId)", body: state.serialized())
     }
 
+    /// Erase one of pi's patches (tablet parity: the user may erase any ink).
+    func erasePatch(docId: String, file: String, patchId: UInt64) async throws {
+        try await post("/patch-erase?id=\(docId)&file=\(file)&patch=\(patchId)", body: Data())
+    }
+
     func createNotebook(title: String) async throws -> String {
         guard let url = URL(string: api + "/notebook") else { throw PapierAPIError(message: "bad server URL") }
         var req = URLRequest(url: url)

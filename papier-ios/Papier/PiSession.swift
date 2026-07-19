@@ -25,7 +25,10 @@ private struct PiStateResponse: Decodable {
 @MainActor
 final class PiSession: ObservableObject {
     let docId: String
-    private let serverRoot: String
+    /// Set from LibraryStore before open() — the SAME config the library
+    /// uses (never read UserDefaults directly: @AppStorage defaults are
+    /// not persisted, so a raw read returns nil on fresh installs).
+    var serverRoot: String
 
     @Published var busy = false
     @Published var mode: String = "auto"     // auto | quiet
