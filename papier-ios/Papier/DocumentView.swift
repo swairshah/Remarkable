@@ -162,6 +162,12 @@ private struct PageScreen: View {
     let hub: CanvasHub
 
     @EnvironmentObject private var store: LibraryStore
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("paperTone") private var paperToneRaw = PaperTone.paper.rawValue
+
+    private var paper: Color {
+        (PaperTone(rawValue: paperToneRaw) ?? .paper).color(dark: colorScheme == .dark)
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -169,8 +175,11 @@ private struct PageScreen: View {
             ZStack {
                 if near {
                     page(fit: fit)
+                        // multiply tints the page: raster/patch whites become
+                        // the paper tone, ink stays dark
+                        .colorMultiply(paper)
                         .frame(width: fit.width, height: fit.height)
-                        .background(Color.white)
+                        .background(paper)
                         .shadow(color: .black.opacity(0.14), radius: 8, y: 2)
                         .task(id: fit.width) {
                             await model.load(displayWidth: fit.width)

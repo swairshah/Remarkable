@@ -10,6 +10,7 @@ struct SettingsView: View {
     @State private var url: String = ""
     @State private var testResult: String?
     @State private var testing = false
+    @AppStorage("paperTone") private var paperToneRaw = PaperTone.paper.rawValue
 
     var body: some View {
         NavigationStack {
@@ -24,6 +25,18 @@ struct SettingsView: View {
                     Text("Papier server")
                 } footer: {
                     Text("The reMarkable cloud VM on your tailnet — the same one behind remarkable.exe.xyz. Requires Tailscale to be connected on this iPad.")
+                }
+
+                Section {
+                    Picker("Paper tone", selection: $paperToneRaw) {
+                        ForEach(PaperTone.allCases) { tone in
+                            Text(tone.label).tag(tone.rawValue)
+                        }
+                    }
+                } header: {
+                    Text("Appearance")
+                } footer: {
+                    Text("Every tone dims further in dark mode. Ink stays true black.")
                 }
 
                 Section {

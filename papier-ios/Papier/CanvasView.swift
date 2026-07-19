@@ -27,6 +27,10 @@ struct CanvasView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> PKCanvasView {
         let canvas = PKCanvasView()
+        // Pin the canvas to LIGHT appearance: PencilKit dynamically inverts
+        // ink colors for dark mode, which would wash near-black strokes out
+        // to white on our always-paper-colored page.
+        canvas.overrideUserInterfaceStyle = .light
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
         canvas.isScrollEnabled = false
