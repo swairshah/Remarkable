@@ -145,9 +145,9 @@ stay aligned.
 | URL routing under `remarkable.exe.xyz` | `server/nginx/default.conf` | `deploy/deploy-server.sh` (auto-reloads nginx) |
 | Viewer look/feel, shortcuts, sidebar | `server/web/raw/index.html` | `deploy/deploy-server.sh` |
 | Notebook-app live viewer (`/notebook/`) | `server/web/notebook/index.html` | `deploy/deploy-server.sh` |
-| Paper web viewer (`/paper/`) | `../alt-ui/sync/server/web/index.html` | `deploy/deploy-server.sh` |
-| Paper library/covers/upload/crop jobs | `../alt-ui/sync/server/bin/alt-ui-{upload,library}.js` | `deploy/deploy-server.sh` |
-| Paper ✦ Compose agent (research → article → PDF) | `../alt-ui/sync/server/bin/alt-ui-compose.sh` (prompt/pipeline), job runner in `alt-ui-upload.js` | `deploy/deploy-server.sh` |
+| Papier web viewer (`/papier/`) | `../papier/sync/server/web/index.html` | `deploy/deploy-server.sh` |
+| Papier library/covers/upload/crop jobs | `../papier/sync/server/bin/papier-{upload,library}.js` | `deploy/deploy-server.sh` |
+| Papier ✦ Compose agent (research → article → PDF) | `../papier/sync/server/bin/papier-compose.sh` (prompt/pipeline), job runner in `papier-upload.js` | `deploy/deploy-server.sh` |
 | Digest page: UI, fonts, history, `--rerender` | `server/bin/remarkable-activity-agent.ts` | `deploy/deploy-server.sh` (builds the bundle) |
 | Activity summary prompt/model/output | `server/bin/remarkable-activity-agent-hook.sh` (`-p`, `MODEL`, `OUTPUT_HTML`) | `deploy/deploy-server.sh` |
 | Notes-PDF typography (page size, fonts, margins) | `server/bin/notes-md2pdf.sh` (`RM_*` env knobs) | `deploy/deploy-server.sh` |

@@ -9,7 +9,7 @@
 #
 # Files shipped:
 #   server/bin/*.sh + built remarkable-activity-agent.js -> ~/bin/
-#   ../alt-ui/sync/server/{bin,web,systemd} -> Paper viewer + service
+#   ../papier/sync/server/{bin,web,systemd} -> Papier viewer + service
 #   server/nginx/default.conf -> ~/notes-server/default.conf
 #                                -> /etc/nginx/sites-enabled/remarkable
 #   server/web/raw/index.html -> ~/notes-server/raw/index.html
@@ -23,7 +23,7 @@ set -euo pipefail
 HOST="${SERVER_HOST:-exedev@remarkable.exe.xyz}"
 DOC_NAME="${DOC_NAME:-Notebook}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-PAPER_SERVER="$HERE/../alt-ui/sync/server"
+PAPIER_SERVER="$HERE/../papier/sync/server"
 
 RUN_EXPORT=0
 for arg in "$@"; do
@@ -44,18 +44,30 @@ bun build "$HERE/server/bin/remarkable-activity-agent.ts" \
   --target=node --format=cjs \
   --outfile "$BUILD_DIR/remarkable-activity-agent.js" >/dev/null
 
-ssh "$HOST" 'mkdir -p ~/bin ~/notes-server/raw ~/notes-server/notebook ~/notes-server/alt-ui ~/notes/updates ~/notes/notes ~/remarkable-backup/xochitl ~/remarkable-backup/notebook-app ~/remarkable-backup/alt-ui ~/remarkable-backup/alt-ui-inbound ~/remarkable-exports/notes-pdf'
+echo "[deploy-server] migrate legacy alt-ui dirs/services -> papier (one-time, idempotent)"
+ssh "$HOST" '
+  set -e
+  [ -d ~/remarkable-backup/alt-ui ]         && [ ! -d ~/remarkable-backup/papier ]         && mv ~/remarkable-backup/alt-ui ~/remarkable-backup/papier || true
+  [ -d ~/remarkable-backup/alt-ui-inbound ] && [ ! -d ~/remarkable-backup/papier-inbound ] && mv ~/remarkable-backup/alt-ui-inbound ~/remarkable-backup/papier-inbound || true
+  [ -d ~/notes-server/alt-ui ]              && [ ! -d ~/notes-server/papier ]              && mv ~/notes-server/alt-ui ~/notes-server/papier || true
+  sudo systemctl disable --now alt-ui-upload 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/alt-ui-upload.service
+  sudo systemctl daemon-reload
+  rm -f ~/bin/alt-ui-upload.js ~/bin/alt-ui-library.js ~/bin/alt-ui-preview-page.py ~/bin/alt-ui-render.sh ~/bin/alt-ui-compose.sh ~/bin/alt-ui-make-pdf.py ~/notes-server/alt-ui-upload.service
+'
+
+ssh "$HOST" 'mkdir -p ~/bin ~/notes-server/raw ~/notes-server/notebook ~/notes-server/papier ~/notes/updates ~/notes/notes ~/remarkable-backup/xochitl ~/remarkable-backup/notebook-app ~/remarkable-backup/papier ~/remarkable-backup/papier-inbound ~/remarkable-exports/notes-pdf'
 
 echo "[deploy-server] scp server/bin scripts + agent bundle"
 scp -q "$HERE"/server/bin/*.sh "$HERE"/server/bin/notebook-live-relay.js "$BUILD_DIR/remarkable-activity-agent.js" "$HOST:bin/"
 ssh "$HOST" 'chmod +x ~/bin/remarkable-post-sync.sh ~/bin/remarkable-post-sync-by-name.sh ~/bin/remarkable-activity-agent-hook.sh ~/bin/notebook-live-ingest.sh ~/bin/notes-md2pdf.sh ~/bin/notes-pdf-export.sh 2>/dev/null || true'
 
-echo "[deploy-server] scp Paper viewer + library/upload service"
-scp -q "$PAPER_SERVER"/bin/alt-ui-upload.js "$PAPER_SERVER"/bin/alt-ui-library.js \
-  "$PAPER_SERVER"/bin/alt-ui-preview-page.py "$PAPER_SERVER"/bin/alt-ui-render.sh \
-  "$PAPER_SERVER"/bin/alt-ui-compose.sh "$PAPER_SERVER"/bin/alt-ui-make-pdf.py "$HOST:bin/"
-scp -q "$PAPER_SERVER"/web/index.html "$HOST:notes-server/alt-ui/index.html"
-ssh "$HOST" 'chmod +x ~/bin/alt-ui-preview-page.py ~/bin/alt-ui-render.sh ~/bin/alt-ui-compose.sh ~/bin/alt-ui-make-pdf.py'
+echo "[deploy-server] scp Papier viewer + library/upload service"
+scp -q "$PAPIER_SERVER"/bin/papier-upload.js "$PAPIER_SERVER"/bin/papier-library.js \
+  "$PAPIER_SERVER"/bin/papier-preview-page.py "$PAPIER_SERVER"/bin/papier-render.sh \
+  "$PAPIER_SERVER"/bin/papier-compose.sh "$PAPIER_SERVER"/bin/papier-make-pdf.py "$HOST:bin/"
+scp -q "$PAPIER_SERVER"/web/index.html "$HOST:notes-server/papier/index.html"
+ssh "$HOST" 'chmod +x ~/bin/papier-preview-page.py ~/bin/papier-render.sh ~/bin/papier-compose.sh ~/bin/papier-make-pdf.py'
 
 echo "[deploy-server] ensure runtime deps (node, img2pdf, imagemagick, pandoc, chromium, fonts)"
 ssh "$HOST" '
@@ -135,16 +147,16 @@ scp -q "$HERE"/server/shelley/AGENTS.md "$HOST:.config/shelley/AGENTS.md"
 
 echo "[deploy-server] install live relay service"
 scp -q "$HERE"/server/systemd/notebook-live-relay.service "$HOST:notes-server/notebook-live-relay.service"
-scp -q "$PAPER_SERVER"/systemd/alt-ui-upload.service "$HOST:notes-server/alt-ui-upload.service"
+scp -q "$PAPIER_SERVER"/systemd/papier-upload.service "$HOST:notes-server/papier-upload.service"
 ssh "$HOST" '
   set -e
   sudo install -m 644 ~/notes-server/notebook-live-relay.service /etc/systemd/system/notebook-live-relay.service
-  sudo install -m 644 ~/notes-server/alt-ui-upload.service /etc/systemd/system/alt-ui-upload.service
+  sudo install -m 644 ~/notes-server/papier-upload.service /etc/systemd/system/papier-upload.service
   sudo systemctl daemon-reload
   sudo systemctl enable --now notebook-live-relay >/dev/null 2>&1
   sudo systemctl restart notebook-live-relay
-  sudo systemctl enable --now alt-ui-upload >/dev/null 2>&1
-  sudo systemctl restart alt-ui-upload
+  sudo systemctl enable --now papier-upload >/dev/null 2>&1
+  sudo systemctl restart papier-upload
 '
 
 echo "[deploy-server] install nginx site + reload"

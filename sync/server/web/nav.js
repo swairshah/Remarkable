@@ -16,6 +16,7 @@
     ['notes', '/notes/'],
     ['updates', '/updates/'],
     ['notebook', '/notebook/'],
+    ['papier', '/papier/'],
   ];
   var path = location.pathname;
 

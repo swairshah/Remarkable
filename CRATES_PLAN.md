@@ -1,17 +1,17 @@
 # Crate extraction plan (libreink-*)
 
-Design for pulling the shared code out of alt-ui / notebook / reader into a
+Design for pulling the shared code out of papier / notebook / reader into a
 Cargo workspace of library crates. Written 2026-07-11 after a full cross-app
 diff; the numbers below come from that audit.
 
 ## Why
 
 Each app duplicates ~4,800–5,400 lines across 17+ modules (~15k lines total).
-Drift is already real: alt-ui's stock-quality page-turn waveforms, the GC16
+Drift is already real: papier's stock-quality page-turn waveforms, the GC16
 temperature fix, the qtfb msync preview fix, grey text, and Garamond typeset
 output never flowed back to notebook/reader. Nowhere do two apps solve the
-same problem differently — the divergence is renames, alt-ui evolving ahead,
-and app policy embedded in shared files. So extraction is adoption of alt-ui's
+same problem differently — the divergence is renames, papier evolving ahead,
+and app policy embedded in shared files. So extraction is adoption of papier's
 versions, not a merge.
 
 ## Prior art (checked 2026-07-11)
@@ -34,8 +34,8 @@ versions, not a merge.
 |---|---|---|
 | A: byte-identical | fb, font, hershey_data, png (+png_dec in alt/reader) | move verbatim (~1,166 lines) |
 | B: app-name strings only | touch, pen, power, ipc (4–8 lines each) | one `AppId` config (env prefix + log tag) |
-| C: alt-ui strict superset | display (Wave::Page/Print), rm2fb (gc16_partial + 25°C temp pin, gl16_full), qtfb (msync), draw (blend_toward), text (grey levels, fallbacks), svg_ink (PiFont/Garamond), hershey (Face picker) | adopt alt-ui's copy; nb/rd inherit upgrades |
-| D: structural | ink.rs — alt-ui superset (TextRun, Owner/OwnedStroke undo+move); notebook's `Notebook` container is app model, moves out; reader is minimal subset. pi_rpc.rs — transport identical; ~90% of the 277-line diff is SYSTEM_PROMPT/AGENT.md/library prose + config (extension path, session dir, env names); tiny deltas (alt kill(), nb send_page()) | ink: take superset, evict Notebook; pi: extract transport, parameterize prompts/config |
+| C: papier strict superset | display (Wave::Page/Print), rm2fb (gc16_partial + 25°C temp pin, gl16_full), qtfb (msync), draw (blend_toward), text (grey levels, fallbacks), svg_ink (PiFont/Garamond), hershey (Face picker) | adopt papier's copy; nb/rd inherit upgrades |
+| D: structural | ink.rs — papier superset (TextRun, Owner/OwnedStroke undo+move); notebook's `Notebook` container is app model, moves out; reader is minimal subset. pi_rpc.rs — transport identical; ~90% of the 277-line diff is SYSTEM_PROMPT/AGENT.md/library prose + config (extension path, session dir, env names); tiny deltas (alt kill(), nb send_page()) | ink: take superset, evict Notebook; pi: extract transport, parameterize prompts/config |
 
 ## The crates
 
@@ -54,19 +54,19 @@ Structure decision: 7 focused crates, no facade (add one later if it hurts).
 | Crate | From | Contents | Deps |
 |---|---|---|---|
 | `libreink-core` | fb, draw, font, png, png_dec | Framebuffer (RGB565), clip, fills/blends incl. blend_toward, 5×7 chrome font, PNG enc/dec, `AppId` config seam | libc |
-| `libreink-display` | display, qtfb, rm2fb (alt-ui's) | `Wave` {Ink,Text,Page,Print}, backend trait update/update_all/full_refresh, runtime qtfb-vs-rm2fb selection, native swtfb client w/ temp pinning, qtfb client w/ input + msync | libreink-core, libc |
+| `libreink-display` | display, qtfb, rm2fb (papier's) | `Wave` {Ink,Text,Page,Print}, backend trait update/update_all/full_refresh, runtime qtfb-vs-rm2fb selection, native swtfb client w/ temp pinning, qtfb client w/ input + msync | libreink-core, libc |
 | `libreink-input` | touch, pen, power (kb later) | multitouch slots + flips + 5-finger quit, Wacom + EVIOCGRAB, grabbed power button + suspend | libreink-core, libc |
-| `libreink-hershey` | hershey, hershey_data (alt-ui's) | stroke fonts, glyph→polylines, Face picker API | — |
-| `libreink-text` | text (alt-ui's) | fontdue typesetting, glyph cache, grey-level draw, fallback chains; embedded EB Garamond + Google Sans Code as defaults, caller-suppliable fonts | libreink-core, fontdue |
-| `libreink-page` | ink (alt-ui superset) | Pt/Stroke/Patch/TextRun/Rect/Band, darkest-wins stamping, re-render-from-vectors, JSON persistence, undo/move machinery (unconditional) | libreink-core, serde_json, libreink-text (feature `typeset`) |
-| `libreink-svg` | svg_ink (alt-ui's) | SVG string → strokes + text runs in page coords: viewBox remap, path flatten, fill hatching, Hershey text, Garamond TextRuns. Zero device deps | libreink-page, libreink-hershey, libreink-text |
+| `libreink-hershey` | hershey, hershey_data (papier's) | stroke fonts, glyph→polylines, Face picker API | — |
+| `libreink-text` | text (papier's) | fontdue typesetting, glyph cache, grey-level draw, fallback chains; embedded EB Garamond + Google Sans Code as defaults, caller-suppliable fonts | libreink-core, fontdue |
+| `libreink-page` | ink (papier superset) | Pt/Stroke/Patch/TextRun/Rect/Band, darkest-wins stamping, re-render-from-vectors, JSON persistence, undo/move machinery (unconditional) | libreink-core, serde_json, libreink-text (feature `typeset`) |
+| `libreink-svg` | svg_ink (papier's) | SVG string → strokes + text runs in page coords: viewBox remap, path flatten, fill hatching, Hershey text, Garamond TextRuns. Zero device deps | libreink-page, libreink-hershey, libreink-text |
 | `libreink-pi` | pi_rpc minus prose, ipc | `Pi` child (spawn `pi --mode rpc`, JSONL, drain/translate/PiEvent, image msgs, kill) + nonblocking unix tool socket. `PiConfig`: system prompt, extension path, session dir, socket env, AGENT.md bootstrap | serde_json, libc |
 
 (That's 8 rows; libreink-pi is the +1 "independent" crate.)
 
 Stays in apps: main.rs, prompts, tool semantics, UI chrome (home/doc/store/
 toolbar/statusbar, library/live/md_view, book/import/xochitl), notebook's
-`Notebook` page container, alt-ui's kb/select/undo.
+`Notebook` page container, papier's kb/select/undo.
 
 Shared but non-Rust (alongside, later): TS helper for pi extensions (the 3
 canvas.ts files are near-copies), consolidated preview harness
@@ -107,19 +107,19 @@ libreink-svg — plain `cargo test` on the host.
 ## Migration order
 
 1. Workspace + move Bucket A verbatim (zero risk, proves plumbing).
-   **DONE 2026-07-11**: libreink-core (fb/draw/font/png/png_dec, alt-ui's
+   **DONE 2026-07-11**: libreink-core (fb/draw/font/png/png_dec, papier's
    copies) extracted; all three apps build against it and pass their QEMU
    previews. One API change: `Framebuffer::clip()` accessor replaces direct
-   field reads. `make test-host` in alt-ui also runs the crate suite.
+   field reads. `make test-host` in papier also runs the crate suite.
 2. Bucket B behind `AppId`. **DONE 2026-07-12**: `AppId` lives in
    libreink-core (`app.rs`); libreink-input = touch/pen/power, constructors
    take `AppId`; each app declares `pub const APP: AppId` in main.rs.
    `Phase` moved from qtfb.rs to libreink-core `event.rs` (input and display
    both need it; qtfb re-exports it so app paths didn't change).
-3. Bucket C: adopt alt-ui's display/rm2fb/qtfb/draw/text/svg_ink/hershey;
+3. Bucket C: adopt papier's display/rm2fb/qtfb/draw/text/svg_ink/hershey;
    preview-screenshot pass per app. Riskiest single item: notebook/reader
    have never run the new waveforms → on-device demo check here.
-   **display/qtfb/rm2fb DONE 2026-07-12** (libreink-display, alt-ui's
+   **display/qtfb/rm2fb DONE 2026-07-12** (libreink-display, papier's
    canonical copies): notebook/reader gained Wave::Page/Print, temp-pinned
    GC16, gl16_full, and the qtfb msync fix — available but not yet used by
    their code paths, so previews stayed pixel-identical. On-device check of
@@ -129,7 +129,7 @@ libreink-svg — plain `cargo test` on the host.
    (data.rs private, default_face takes AppId — nb's runtime FACE_OVERRIDE
    global replaced by main.rs-owned pi_font state and an explicit parse
    param); libreink-text (fonts embedded in the crate); libreink-svg is
-   alt-ui's parse(src, scale, default_font) -> (strokes, texts, notes) —
+   papier's parse(src, scale, default_font) -> (strokes, texts, notes) —
    nb/rd adapted, dropping texts (no typeset rendering there yet). Six
    geometry-invariant tests in libreink-svg (hatching, viewBox remap,
    Garamond runs, math glyphs). All previews pixel-identical.
@@ -141,7 +141,7 @@ libreink-svg — plain `cargo test` on the host.
    notebook keeps send_page as a SendPage trait. Bin-override env
    standardized to {PREFIX}_PI_BIN (nb/rd fake-qtfb.py updated). All
    previews pass. THE EXTRACTION IS COMPLETE — all 8 crates exist.
-   **libreink-page DONE 2026-07-12**: alt-ui's ink.rs verbatim (superset with
+   **libreink-page DONE 2026-07-12**: papier's ink.rs verbatim (superset with
    TextRun/undo/ids). Notebook keeps a shim ink.rs: the `Notebook` container
    + a `RenderExt` trait (fill-white + stamp_region, the old render_region/
    render_full API). nb/rd call sites: add_patch gained a texts arg

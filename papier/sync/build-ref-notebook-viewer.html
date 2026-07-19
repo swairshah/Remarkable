@@ -1,0 +1,866 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>notebook — live</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Google+Sans+Code:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
+      integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+" crossorigin="anonymous">
+<style>
+  :root {
+    --serif:'Iowan Old Style','Palatino Linotype',Palatino,'Book Antiqua',Georgia,serif;
+    --mono:'Google Sans Code',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    --bg:#111; --panel:#181818; --line:#2a2a2a; --dim:#9a9a9a;
+    --papier:#fbfaf8; --user-ink:#1c1c1c; --ai-ink:#2457c5;
+  }
+  html,body{margin:0;min-height:100%;background:var(--bg);color:#eee;font-family:var(--serif);}
+
+  /* ---- top bar ---- */
+  #bar{
+    position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:14px;
+    padding:10px 16px;background:rgba(17,17,17,.92);backdrop-filter:blur(6px);
+    border-bottom:1px solid var(--line);flex-wrap:wrap;
+  }
+  #bar h1{font-size:16px;margin:0;font-weight:normal;letter-spacing:.02em;}
+  #bar h1 .live{color:var(--dim);font-size:12px;font-family:var(--mono);margin-left:6px;}
+  #bar h1 .live::before{
+    content:'';display:inline-block;width:7px;height:7px;border-radius:50%;
+    background:#666;margin-right:5px;vertical-align:1px;
+  }
+  #bar h1 .live.on{color:#5dbb69;}
+  #bar h1 .live.on::before{
+    background:#3fa34d;
+    animation:pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse{50%{opacity:.35;}}
+  #pistatus{color:#c9a24b;font-size:12px;font-family:var(--mono);}
+  nav{display:flex;gap:2px;}
+  nav a{
+    color:#bbb;text-decoration:none;font-size:13px;font-family:var(--mono);
+    padding:5px 11px;border-radius:7px;
+  }
+  nav a:hover{background:#222;}
+  nav a.on{background:#2c3a55;color:#fff;}
+  #synced{margin-left:auto;color:var(--dim);font-size:12px;font-family:var(--mono);}
+  #inkmode{
+    background:none;border:1px solid var(--line);color:#bbb;border-radius:7px;
+    font-family:var(--mono);font-size:12px;padding:4px 9px;cursor:pointer;
+  }
+  #inkmode .sw{display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--ai-ink);vertical-align:-1px;margin-right:5px;}
+  #inkmode.mono .sw{background:#444;}
+
+  #msg{padding:40px;text-align:center;color:var(--dim);font-size:14px;}
+
+  /* ---- pages tab ---- */
+  #pages{display:flex;align-items:flex-start;gap:0;}
+  #rail{
+    position:sticky;top:57px;flex:0 0 168px;max-height:calc(100vh - 57px);
+    overflow-y:auto;padding:10px;border-right:1px solid var(--line);
+    display:flex;flex-direction:column;gap:10px;
+  }
+  #rail .thumb{cursor:pointer;border-radius:5px;padding:5px;text-align:center;}
+  #rail .thumb:hover{background:#202020;}
+  #rail .thumb.active{background:#2c3a55;}
+  #rail canvas{width:100%;border-radius:3px;background:var(--papier);display:block;}
+  #rail .lbl{font-size:11px;font-family:var(--mono);color:#bbb;margin-top:4px;}
+  #rail .thumb.fresh .lbl::after{content:' •';color:#3fa34d;}
+  #stagewrap{flex:1;display:flex;flex-direction:column;align-items:center;padding:18px;min-width:0;}
+  #stage{max-width:100%;}
+  #stage canvas{
+    max-width:100%;max-height:calc(100vh - 130px);
+    background:var(--papier);border-radius:4px;box-shadow:0 8px 30px rgba(0,0,0,.5);
+  }
+  #counter{
+    margin-top:10px;color:#bbb;font-size:13px;font-family:var(--mono);
+    font-variant-numeric:tabular-nums;
+  }
+  #legend{margin-top:4px;font-size:12px;color:var(--dim);font-family:var(--mono);}
+  #legend .u::before,#legend .a::before{
+    content:'';display:inline-block;width:8px;height:8px;border-radius:2px;margin:0 5px 0 12px;vertical-align:-1px;
+  }
+  #legend .u::before{background:#ccc;}
+  #legend .a::before{background:var(--ai-ink);}
+
+  /* ---- library / agent (markdown reader) ---- */
+  .reader{max-width:760px;margin:0 auto;padding:26px 20px 80px;}
+  .booklist{list-style:none;margin:0;padding:0;}
+  .booklist li{
+    border:1px solid var(--line);border-radius:9px;padding:14px 16px;margin-bottom:10px;
+    cursor:pointer;background:var(--panel);
+  }
+  .booklist li:hover{border-color:#3a4a6a;}
+  .booklist .t{font-size:17px;}
+  .booklist .m{font-size:12px;color:var(--dim);font-family:var(--mono);margin-top:4px;}
+  .crumb{
+    display:inline-block;margin-bottom:16px;color:#8fa8d8;cursor:pointer;
+    font-family:var(--mono);font-size:13px;text-decoration:none;
+  }
+  .crumb:hover{text-decoration:underline;}
+
+  .md{font-size:17px;line-height:1.62;color:#e6e3dd;}
+  .md h1,.md h2,.md h3,.md h4{font-weight:600;line-height:1.25;color:#f2f0ea;}
+  .md h1{font-size:27px;margin:26px 0 10px;}
+  .md h2{font-size:22px;margin:24px 0 8px;}
+  .md h3{font-size:19px;margin:20px 0 6px;}
+  .md h4{font-size:17px;margin:18px 0 6px;}
+  .md p{margin:0 0 14px;}
+  .md a{color:#8fa8d8;}
+  .md hr{border:none;border-top:1px solid var(--line);margin:22px 0;}
+  .md blockquote{
+    margin:16px 0;padding:10px 16px;border-left:3px solid #4a5a7a;
+    background:rgba(80,100,140,.09);border-radius:0 6px 6px 0;color:#d8d5cf;
+  }
+  .md blockquote p:last-child{margin-bottom:0;}
+  .md code{
+    font-family:var(--mono);font-size:.82em;background:#222;
+    padding:1px 5px;border-radius:4px;
+  }
+  .md pre{
+    background:#1b1b1b;border:1px solid var(--line);border-radius:8px;
+    padding:12px 14px;overflow-x:auto;margin:0 0 16px;
+  }
+  .md pre code{background:none;padding:0;font-size:13px;line-height:1.5;}
+  .md ul,.md ol{margin:0 0 14px;padding-left:26px;}
+  .md li{margin-bottom:4px;}
+  .md table{border-collapse:collapse;margin:0 0 16px;font-size:14px;width:100%;overflow-x:auto;display:block;}
+  .md th,.md td{border:1px solid var(--line);padding:6px 10px;text-align:left;}
+  .md th{background:#1e1e1e;font-family:var(--mono);font-size:12px;}
+  .md img{max-width:100%;}
+  .md .katex{font-size:1.04em;}
+  .fm{
+    border-bottom:1px solid var(--line);margin-bottom:18px;padding-bottom:14px;
+  }
+  .fm .t{font-size:28px;line-height:1.2;color:#f2f0ea;}
+  .fm .m{font-size:12.5px;color:var(--dim);font-family:var(--mono);margin-top:8px;}
+  .fm .m a{color:#8fa8d8;text-decoration:none;}
+
+  /* ---- sessions ---- */
+  .sesstable{width:100%;border-collapse:collapse;font-size:13.5px;font-family:var(--mono);}
+  .sesstable td,.sesstable th{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;}
+  .sesstable th{color:var(--dim);font-weight:normal;font-size:12px;}
+  .sesstable a{color:#8fa8d8;}
+  .note{color:var(--dim);font-size:13px;margin-top:18px;line-height:1.5;}
+
+  @media (max-width:640px){
+    #pages{flex-direction:column;}
+    #rail{
+      position:static;flex-direction:row;max-height:none;width:100%;box-sizing:border-box;
+      overflow-x:auto;overflow-y:hidden;border-right:none;border-bottom:1px solid var(--line);
+    }
+    #rail .thumb{flex:0 0 84px;}
+    #synced{display:none;}
+  }
+</style>
+</head>
+<body>
+
+<div id="bar">
+  <h1>notebook<span class="live" id="livelbl">mirror</span></h1>
+  <nav>
+    <a href="#pages" data-tab="pages">pages</a>
+    <a href="#library" data-tab="library">library</a>
+    <a href="#agent" data-tab="agent">agent.md</a>
+    <a href="#sessions" data-tab="sessions">sessions</a>
+  </nav>
+  <span id="pistatus"></span>
+  <span id="synced"></span>
+  <button id="inkmode" title="toggle pi-ink color"><span class="sw"></span>pi ink</button>
+</div>
+
+<div id="view"><div id="msg">loading…</div></div>
+
+<script>
+'use strict';
+/* Viewer for the notebook app's data dir, mirrored by the tablet's push-sync
+ * to /notebook/data/ (nginx JSON autoindex = the API).
+ *   pages/page-NNNN.json  {strokes:[{g,p:[x,y,r,...]}], patches:[{id,strokes}]}
+ *                         coords are x10; g=0 user ink, g>0 = pi's ink
+ *   library/*.md          pi-curated articles (frontmatter + markdown)
+ *   AGENT.md              pi's standing instructions / memory
+ *   sessions/*.jsonl      raw pi session transcripts
+ */
+const DATA = 'data/';
+const PAGE_W = 1404, PAGE_H = 1872;
+const POLL_MS = 20000;
+
+const $view = document.getElementById('view');
+const state = {
+  tab: null,
+  pages: [],          // [{name, mtime, doc}] sorted by name
+  cur: 0,             // selected page index
+  libIndex: [],       // [{name, mtime, title, meta}]
+  libOpen: null,      // filename of the open library item
+  agentMd: null,
+  sessions: [],
+  newestMtime: 0,
+  aiBlue: true,
+  fresh: new Set(),   // page names changed since load (rail dot)
+};
+
+/* ---------- data fetching ---------- */
+
+async function jidx(path) {          // nginx autoindex_format json
+  const r = await fetch(DATA + path, {cache: 'no-store'});
+  if (!r.ok) throw new Error(path + ': ' + r.status);
+  return r.json();
+}
+async function jfile(path) {
+  const r = await fetch(DATA + path, {cache: 'no-store'});
+  if (!r.ok) throw new Error(path + ': ' + r.status);
+  return r.json();
+}
+async function tfile(path) {
+  const r = await fetch(DATA + path, {cache: 'no-store'});
+  if (!r.ok) return null;
+  return r.text();
+}
+const mt = (e) => Date.parse(e.mtime) || 0;
+
+async function loadPages(initial) {
+  let idx;
+  try { idx = await jidx('pages/'); } catch (e) { idx = []; }
+  idx = idx.filter(e => e.type === 'file' && /^page-\d+\.json$/.test(e.name))
+           .sort((a, b) => a.name.localeCompare(b.name));
+  const known = new Map(state.pages.map(p => [p.name, p]));
+  const next = [];
+  for (const e of idx) {
+    const old = known.get(e.name);
+    if (old && old.mtime === e.mtime) { next.push(old); continue; }
+    let doc = null;
+    try { doc = await jfile('pages/' + e.name); } catch (err) {}
+    next.push({name: e.name, mtime: e.mtime, doc});
+    /* fresh doc already reflects on-device erasures; index-keyed erasure
+     * records would point at the wrong strokes now */
+    pageErased(next.length).mirror.clear();
+    if (!initial) state.fresh.add(e.name);
+    state.newestMtime = Math.max(state.newestMtime, mt(e));
+  }
+  const changed = next.length !== state.pages.length ||
+    next.some((p, i) => state.pages[i] !== p);
+  state.pages = next;
+  if (initial) {
+    state.newestMtime = Math.max(0, ...idx.map(mt));
+    /* open on the most recently written page */
+    let best = 0;
+    idx.forEach((e, i) => { if (mt(e) >= mt(idx[best] || e)) best = i; });
+    state.cur = best;
+  }
+  return changed;
+}
+
+async function loadLibrary() {
+  let idx;
+  try { idx = await jidx('library/'); } catch (e) { idx = []; }
+  idx = idx.filter(e => e.type === 'file' && e.name.endsWith('.md'));
+  const known = new Map(state.libIndex.map(i => [i.name, i]));
+  const next = [];
+  for (const e of idx) {
+    const old = known.get(e.name);
+    if (old && old.mtime === e.mtime) { next.push(old); continue; }
+    const text = await tfile('library/' + e.name);
+    const fm = frontmatter(text || '');
+    const h1 = /^#\s+(.+)$/m.exec(fm.body);
+    next.push({
+      name: e.name, mtime: e.mtime, text,
+      title: fm.attrs.title || (h1 && h1[1]) || e.name.replace(/\.md$/, ''),
+      source: fm.attrs.source || '', date: fm.attrs.date || '',
+    });
+    state.newestMtime = Math.max(state.newestMtime, mt(e));
+  }
+  next.sort((a, b) => mt({mtime: b.mtime}) - mt({mtime: a.mtime}));
+  const changed = next.length !== state.libIndex.length ||
+    next.some((p, i) => state.libIndex[i] !== p);
+  state.libIndex = next;
+  return changed;
+}
+
+async function loadRoot() {
+  let idx;
+  try { idx = await jidx(''); } catch (e) { return false; }
+  let changed = false;
+  const agent = idx.find(e => e.name === 'AGENT.md');
+  if (agent) {
+    state.newestMtime = Math.max(state.newestMtime, mt(agent));
+    if (agent.mtime !== state.agentMtime) {
+      state.agentMtime = agent.mtime;
+      state.agentMd = await tfile('AGENT.md');
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+async function loadSessions() {
+  let idx;
+  try { idx = await jidx('sessions/'); } catch (e) { idx = []; }
+  state.sessions = idx.filter(e => e.type === 'file')
+    .sort((a, b) => b.name.localeCompare(a.name));
+}
+
+/* ---------- page rendering ---------- */
+
+function drawDoc(canvas, doc, scale, skip) {
+  canvas.width = Math.round(PAGE_W * scale);
+  canvas.height = Math.round(PAGE_H * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--papier');
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!doc) return;
+  ctx.lineCap = ctx.lineJoin = 'round';
+  ctx.scale(scale, scale);
+  const strokes = [];
+  (doc.strokes || []).forEach((s, i) => strokes.push([s, false, 's:' + i]));
+  (doc.patches || []).forEach((p, j) =>
+    (p.strokes || []).forEach((s, k) => strokes.push([s, true, 'p:' + j + ':' + k])));
+  for (const [s, isAI, key] of strokes) {
+    if (skip && skip.has(key)) continue;
+    const f = s.p;
+    if (!f || f.length < 3) continue;
+    const ai = isAI || s.g > 0;
+    ctx.strokeStyle = ctx.fillStyle = ai && state.aiBlue ? '#2457c5' : '#1c1c1c';
+    if (f.length === 3) {           /* single point: a dot */
+      ctx.beginPath();
+      ctx.arc(f[0] / 10, f[1] / 10, Math.max(f[2] / 10, 1), 0, 7);
+      ctx.fill();
+      continue;
+    }
+    /* group consecutive points into width buckets so pressure still shows */
+    ctx.beginPath();
+    ctx.lineWidth = Math.max((f[2] / 10) * 2, 1.4);
+    ctx.moveTo(f[0] / 10, f[1] / 10);
+    for (let i = 3; i < f.length; i += 3) ctx.lineTo(f[i] / 10, f[i + 1] / 10);
+    ctx.stroke();
+  }
+}
+
+/* ---------- markdown (small, self-contained) ---------- */
+
+function esc(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+/* library markdown comes from web articles pi fetched — treat every URL in
+ * it as untrusted: only plain web/relative destinations survive */
+function safeUrl(u) {
+  return /^(https?:|mailto:|#|\/|\.\/|[\w.-]+(\/|$))/i.test(u) && !/^javascript:/i.test(u)
+    ? u : '#';
+}
+function frontmatter(text) {
+  const m = /^---\n([\s\S]*?)\n---\n?/.exec(text);
+  if (!m) return {attrs: {}, body: text};
+  const attrs = {};
+  for (const line of m[1].split('\n')) {
+    const kv = /^(\w[\w-]*):\s*(.*)$/.exec(line.trim());
+    if (kv) attrs[kv[1]] = kv[2].replace(/^["']|["']$/g, '');
+  }
+  return {attrs, body: text.slice(m[0].length)};
+}
+function inline(s) {
+  s = esc(s);
+  const codes = [];
+  const SEP = String.fromCharCode(1);
+  s = s.replace(/`([^`]+)`/g, (_, c) => SEP + (codes.push(c) - 1) + SEP);
+  s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img alt="$1" src="$2">');
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
+  s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+  s = s.replace(new RegExp(SEP + '(\\d+)' + SEP, 'g'), (_, i) => '<code>' + codes[+i] + '</code>');
+  return s;
+}
+function markdown(src) {
+  const lines = src.split('\n');
+  const out = [];
+  let i = 0, para = [];
+  const flush = () => {
+    if (para.length) { out.push('<p>' + inline(para.join(' ')) + '</p>'); para = []; }
+  };
+  while (i < lines.length) {
+    const L = lines[i];
+    if (/^\s*$/.test(L)) { flush(); i++; continue; }
+    if (/^```/.test(L)) {
+      flush();
+      const buf = []; i++;
+      while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
+      i++;
+      out.push('<pre><code>' + esc(buf.join('\n')) + '</code></pre>');
+      continue;
+    }
+    const h = /^(#{1,6})\s+(.*)$/.exec(L);
+    if (h) { flush(); const n = Math.min(h[1].length, 4); out.push(`<h${n}>` + inline(h[2]) + `</h${n}>`); i++; continue; }
+    if (/^(\s*[-*_]){3,}\s*$/.test(L)) { flush(); out.push('<hr>'); i++; continue; }
+    if (/^>/.test(L)) {
+      flush();
+      const buf = [];
+      while (i < lines.length && /^>/.test(lines[i])) buf.push(lines[i++].replace(/^>\s?/, ''));
+      out.push('<blockquote>' + markdown(buf.join('\n')) + '</blockquote>');
+      continue;
+    }
+    if (/^\s*([-*+]|\d+\.)\s+/.test(L)) {
+      flush();
+      const ordered = /^\s*\d+\./.test(L);
+      const items = [];
+      while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
+        let item = lines[i++].replace(/^\s*([-*+]|\d+\.)\s+/, '');
+        while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !/^\s*([-*+]|\d+\.)\s+/.test(lines[i]))
+          item += ' ' + lines[i++].trim();
+        items.push('<li>' + inline(item) + '</li>');
+      }
+      out.push((ordered ? '<ol>' : '<ul>') + items.join('') + (ordered ? '</ol>' : '</ul>'));
+      continue;
+    }
+    if (/^\|.*\|\s*$/.test(L) && i + 1 < lines.length && /^\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+      flush();
+      const cells = (row) => row.trim().replace(/^\||\|$/g, '').split('|').map(c => inline(c.trim()));
+      const head = cells(L); i += 2;
+      let html = '<table><thead><tr>' + head.map(c => '<th>' + c + '</th>').join('') + '</tr></thead><tbody>';
+      while (i < lines.length && /^\|.*\|\s*$/.test(lines[i]))
+        html += '<tr>' + cells(lines[i++]).map(c => '<td>' + c + '</td>').join('') + '</tr>';
+      out.push(html + '</tbody></table>');
+      continue;
+    }
+    para.push(L.trim()); i++;
+  }
+  flush();
+  return out.join('\n');
+}
+function renderMath(el) {
+  if (window.renderMathInElement) {
+    try {
+      renderMathInElement(el, {
+        delimiters: [
+          {left: '$$', right: '$$', display: true},
+          {left: '\\[', right: '\\]', display: true},
+          {left: '\\(', right: '\\)', display: false},
+          {left: '$', right: '$', display: false},
+        ],
+        throwOnError: false,
+      });
+    } catch (e) {}
+  }
+}
+
+/* ---------- views ---------- */
+
+function setTab(tab) {
+  state.tab = tab;
+  document.querySelectorAll('nav a').forEach(a =>
+    a.classList.toggle('on', a.dataset.tab === tab));
+  render();
+}
+
+function render() {
+  if (state.tab === 'pages') renderPages();
+  else if (state.tab === 'library') renderLibrary();
+  else if (state.tab === 'agent') renderAgent();
+  else if (state.tab === 'sessions') renderSessions();
+}
+
+function pageAt(i) {
+  /* the live stream can be on a page the 5-min mirror hasn't shipped yet:
+   * pad with blank placeholders so it still has a canvas to land on */
+  return state.pages[i] || {name: 'live-' + (i + 1), mtime: 0, doc: null};
+}
+function pageTotal() {
+  return Math.max(state.pages.length, live.page || 0);
+}
+
+function renderPages() {
+  if (!pageTotal()) {
+    $view.innerHTML = '<div id="msg">no pages synced yet — write something on the tablet</div>';
+    return;
+  }
+  state.cur = Math.min(state.cur, pageTotal() - 1);
+  $view.innerHTML = `
+    <div id="pages">
+      <div id="rail"></div>
+      <div id="stagewrap">
+        <div id="stage"><canvas></canvas></div>
+        <div id="counter"></div>
+        <div id="legend"><span class="u"></span>you<span class="a"></span>pi</div>
+      </div>
+    </div>`;
+  const rail = document.getElementById('rail');
+  for (let i = 0; i < pageTotal(); i++) {
+    const p = pageAt(i);
+    const d = document.createElement('div');
+    d.className = 'thumb' + (i === state.cur ? ' active' : '') +
+      (state.fresh.has(p.name) ? ' fresh' : '');
+    const c = document.createElement('canvas');
+    d.appendChild(c);
+    const l = document.createElement('div');
+    l.className = 'lbl';
+    l.textContent = 'page ' + (i + 1);
+    d.appendChild(l);
+    d.onclick = () => { state.cur = i; live.follow = (i === (live.page || 0) - 1); location.hash = '#pages/' + (i + 1); renderPages(); };
+    rail.appendChild(d);
+    drawDoc(c, p.doc, 148 / PAGE_W, pageErased(i + 1).mirror);
+    liveReplay(c, i + 1, live.lastThumb);
+  }
+  const active = rail.children[state.cur];
+  if (active) active.scrollIntoView({block: 'nearest'});
+  const big = document.querySelector('#stage canvas');
+  drawDoc(big, pageAt(state.cur).doc, 1.0, pageErased(state.cur + 1).mirror);
+  liveReplay(big, state.cur + 1, live.last);
+  document.getElementById('counter').textContent =
+    `page ${state.cur + 1} / ${pageTotal()}`;
+}
+
+function renderLibrary() {
+  const item = state.libOpen && state.libIndex.find(x => x.name === state.libOpen);
+  if (item) {
+    const fm = frontmatter(item.text || '');
+    let srcline = '';
+    if (item.source) {
+      let host = item.source;
+      try { host = new URL(item.source).hostname; } catch (e) {}
+      srcline = `<a href="${esc(item.source)}" target="_blank" rel="noopener">${esc(host)}</a>`;
+    }
+    $view.innerHTML = `
+      <div class="reader">
+        <a class="crumb" href="#library">&larr; library</a>
+        <div class="fm">
+          <div class="t">${esc(item.title)}</div>
+          <div class="m">${srcline}${item.date ? (srcline ? ' · ' : '') + esc(item.date) : ''}</div>
+        </div>
+        <div class="md">${markdown(fm.body)}</div>
+      </div>`;
+    renderMath($view.querySelector('.md'));
+    return;
+  }
+  if (!state.libIndex.length) {
+    $view.innerHTML = '<div id="msg">library is empty — ask pi to save something</div>';
+    return;
+  }
+  $view.innerHTML = `
+    <div class="reader">
+      <ul class="booklist">
+        ${state.libIndex.map(x => `
+          <li data-name="${esc(x.name)}">
+            <div class="t">${esc(x.title)}</div>
+            <div class="m">${esc(x.name)}${x.date ? ' · ' + esc(x.date) : ''}</div>
+          </li>`).join('')}
+      </ul>
+    </div>`;
+  $view.querySelectorAll('.booklist li').forEach(li => {
+    li.onclick = () => { location.hash = '#library/' + li.dataset.name; };
+  });
+}
+
+function renderAgent() {
+  if (!state.agentMd) {
+    $view.innerHTML = '<div id="msg">no AGENT.md synced yet</div>';
+    return;
+  }
+  $view.innerHTML = `<div class="reader"><div class="md">${markdown(state.agentMd)}</div></div>`;
+  renderMath($view.querySelector('.md'));
+}
+
+function renderSessions() {
+  if (!state.sessions.length) {
+    $view.innerHTML = '<div id="msg">no sessions synced yet</div>';
+    return;
+  }
+  const kb = n => n > 1 << 20 ? (n / (1 << 20)).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB';
+  const rows = state.sessions.map(s => {
+    const d = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})/.exec(s.name);
+    const when = d ? `${d[1]} ${d[2]}:${d[3]}` : s.name;
+    return `<tr><td>${when}</td><td>${kb(s.size)}</td>
+      <td><a href="${DATA}sessions/${encodeURIComponent(s.name)}" download>download</a></td></tr>`;
+  }).join('');
+  $view.innerHTML = `
+    <div class="reader">
+      <table class="sesstable">
+        <thead><tr><th>session</th><th>size</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="note">Raw pi transcripts (JSONL). For the annotated view with page
+      images and per-turn cost, run <code>make trace</code> in the notebook repo.</p>
+    </div>`;
+}
+
+/* ---------- live stroke stream (SSE from the tablet's LIVE toggle) ---------- */
+
+const live = {
+  on: false,        /* a tablet is streaming right now */
+  page: null,       /* the page it's on (1-based) */
+  status: 'idle',   /* pi: think | draw | idle */
+  follow: true,     /* auto-turn to the page being written */
+  buf: new Map(),   /* page -> stroke events since connect (replayed on redraw) */
+  last: new Map(),  /* "t:id" -> previous point on the big canvas */
+  lastThumb: new Map(), /* same, for the rail thumbnail (separate pen position) */
+  erased: new Map(),/* page -> {mirror:Set, live:Set} of erased stroke keys */
+};
+const ERASER_R = 22;  /* device rubber radius (main.rs ERASER_R) */
+
+function pageErased(pg) {
+  let e = live.erased.get(pg);
+  if (!e) live.erased.set(pg, e = {mirror: new Set(), live: new Set()});
+  return e;
+}
+
+/* the device's erase rule (ink.rs erase_at): a stroke goes when the rub
+ * point is within stroke_radius + ERASER_R of any of its segments. The
+ * viewer applies the identical test to its copy, so the web page erases
+ * whole strokes exactly like the e-ink page does. */
+function segHit(pts, rx, ry) {
+  const n = Math.floor(pts.length / 3);
+  if (!n) return false;
+  const X = i => pts[i * 3] / 10, Y = i => pts[i * 3 + 1] / 10;
+  const R = i => (pts[i * 3 + 2] || 14) / 10 + ERASER_R;
+  if (n === 1) {
+    const dx = X(0) - rx, dy = Y(0) - ry, rr = R(0);
+    return dx * dx + dy * dy <= rr * rr;
+  }
+  for (let i = 0; i + 1 < n; i++) {
+    const ax = X(i), ay = Y(i);
+    const vx = X(i + 1) - ax, vy = Y(i + 1) - ay;
+    const qx = rx - ax, qy = ry - ay;
+    const len2 = vx * vx + vy * vy;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, (qx * vx + qy * vy) / len2)) : 0;
+    const dx = qx - vx * t, dy = qy - vy * t, rr = R(i);
+    if (dx * dx + dy * dy <= rr * rr) return true;
+  }
+  return false;
+}
+
+/* a rub event: erase whole strokes from the mirror doc + live overlay */
+function applyRub(pg, ev) {
+  const er = pageErased(pg);
+  const doc = (state.pages[pg - 1] || {}).doc;
+  const p = ev.p || [];
+  let hit = false;
+  for (let i = 0; i + 1 < p.length; i += 2) {
+    const rx = p[i] / 10, ry = p[i + 1] / 10;
+    if (doc) {
+      (doc.strokes || []).forEach((s, si) => {
+        const k = 's:' + si;
+        if (!er.mirror.has(k) && segHit(s.p || [], rx, ry)) { er.mirror.add(k); hit = true; }
+      });
+      (doc.patches || []).forEach((pa, pj) => (pa.strokes || []).forEach((s, sk) => {
+        const k = 'p:' + pj + ':' + sk;
+        if (!er.mirror.has(k) && segHit(s.p || [], rx, ry)) { er.mirror.add(k); hit = true; }
+      }));
+    }
+    const buf = live.buf.get(pg) || [];
+    const byKey = new Map();
+    for (const e of buf) {
+      const k = e.t + ':' + (e.id || 0);
+      if (er.live.has(k)) continue;
+      let a = byKey.get(k);
+      if (!a) byKey.set(k, a = []);
+      a.push(...(e.p || []));
+    }
+    for (const [k, pts] of byKey) {
+      if (segHit(pts, rx, ry)) { er.live.add(k); hit = true; }
+    }
+  }
+  return hit;
+}
+
+function liveBadge() {
+  const el = document.getElementById('livelbl');
+  el.textContent = live.on ? 'LIVE' : 'mirror';
+  el.classList.toggle('on', live.on);
+  document.getElementById('pistatus').textContent =
+    live.on && live.status === 'think' ? 'pi is thinking…' :
+    live.on && live.status === 'draw' ? 'pi is writing…' : '';
+}
+
+function liveStroke(ctx, ev, last) {
+  const p = ev.p;
+  if (!p || !p.length) return;
+  const key = ev.t + ':' + (ev.id || 0);
+  ctx.lineCap = ctx.lineJoin = 'round';
+  ctx.strokeStyle = ctx.fillStyle =
+    ev.t === 'ai' ? (state.aiBlue ? '#2457c5' : '#1c1c1c') : '#1c1c1c';
+  let prev = last.get(key);
+  for (let i = 0; i + 2 < p.length; i += 3) {
+    const x = p[i] / 10, y = p[i + 1] / 10;
+    const w = Math.max((p[i + 2] / 10) * 2, 1.4);
+    if (prev) {
+      ctx.beginPath();
+      ctx.lineWidth = w;
+      ctx.moveTo(prev.x, prev.y);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.arc(x, y, w / 2, 0, 7);
+      ctx.fill();
+    }
+    prev = {x, y};
+  }
+  last.set(key, prev);
+}
+
+/* redraws wipe the canvas back to mirror state: replay live ink on top,
+ * minus anything erased. (duplicated strokes land on identical pixels)
+ * `persist` carries each stroke's final point forward so later incremental
+ * batches connect instead of restarting with a dot. */
+function liveReplay(canvas, pg, persist) {
+  const buf = live.buf.get(pg);
+  if (!buf || !buf.length) return;
+  const er = pageErased(pg);
+  const ctx = canvas.getContext('2d');
+  const last = new Map();
+  for (const ev of buf) {
+    if (!er.live.has(ev.t + ':' + (ev.id || 0))) liveStroke(ctx, ev, last);
+  }
+  if (persist) for (const [k, v] of last) persist.set(k, v);
+}
+
+function thumbCanvas(pg) {
+  return document.querySelectorAll('#rail canvas')[pg - 1];
+}
+
+/* redraw a page in place (mirror minus erasures, then live ink) */
+function liveRedraw(pg) {
+  if (state.tab !== 'pages') return;
+  const thumb = thumbCanvas(pg);
+  if (thumb) {
+    drawDoc(thumb, pageAt(pg - 1).doc, 148 / PAGE_W, pageErased(pg).mirror);
+    liveReplay(thumb, pg, live.lastThumb);
+  }
+  if (state.cur !== pg - 1) return;
+  const big = document.querySelector('#stage canvas');
+  if (!big) return;
+  drawDoc(big, pageAt(state.cur).doc, 1.0, pageErased(pg).mirror);
+  liveReplay(big, pg, live.last);
+}
+
+function liveFollow() {
+  if (!live.page) return;
+  if (state.tab === 'pages' && live.follow) {
+    state.cur = live.page - 1;
+    renderPages();
+  }
+}
+
+function onLiveEvent(data) {
+  let ev;
+  try { ev = JSON.parse(data); } catch (e) { return; }
+  switch (ev.t) {
+    case 'live':
+      live.on = ev.on;
+      if (typeof ev.page === 'number') live.page = ev.page;
+      if (!ev.on) live.status = 'idle';
+      liveBadge();
+      if (ev.on) { live.follow = true; liveFollow(); }
+      return;
+    case 'hi':
+      live.on = true;
+      live.page = ev.page || live.page;
+      live.follow = true;
+      live.last.clear();
+      live.lastThumb.clear();
+      liveBadge();
+      liveFollow();
+      return;
+    case 'bye':
+      live.on = false;
+      live.status = 'idle';
+      liveBadge();
+      return;
+    case 'page':
+      live.page = ev.n;
+      live.last.clear();
+      live.lastThumb.clear();
+      liveFollow();
+      return;
+    case 'st':
+      live.status = ev.s;
+      liveBadge();
+      return;
+    case 'rub': {
+      const pg = live.page || state.cur + 1;
+      if (applyRub(pg, ev)) liveRedraw(pg);
+      return;
+    }
+    case 's': case 'ai': {
+      const pg = live.page || state.cur + 1;
+      let buf = live.buf.get(pg);
+      if (!buf) live.buf.set(pg, buf = []);
+      buf.push(ev);
+      if (buf.length > 8000) buf.splice(0, buf.length - 8000);
+      if (pageErased(pg).live.has(ev.t + ':' + (ev.id || 0))) return;
+      if (state.tab === 'pages') {
+        const thumb = thumbCanvas(pg);
+        if (thumb) liveStroke(thumb.getContext('2d'), ev, live.lastThumb);
+        if (state.cur === pg - 1) {
+          const big = document.querySelector('#stage canvas');
+          if (big) liveStroke(big.getContext('2d'), ev, live.last);
+        }
+      }
+      return;
+    }
+  }
+}
+
+function liveConnect() {
+  const es = new EventSource('live/events');
+  es.onmessage = (m) => onLiveEvent(m.data);
+  es.onerror = () => {
+    /* EventSource retries on its own; show mirror state meanwhile */
+    if (live.on) { live.on = false; liveBadge(); }
+  };
+}
+
+/* ---------- routing / live loop ---------- */
+
+function applyHash() {
+  const h = location.hash.replace(/^#/, '') || 'pages';
+  const [tab, arg] = [h.split('/')[0], decodeURIComponent(h.split('/').slice(1).join('/'))];
+  if (tab === 'pages' && arg) state.cur = Math.max(0, (parseInt(arg, 10) || 1) - 1);
+  state.libOpen = tab === 'library' && arg ? arg : null;
+  setTab(['pages', 'library', 'agent', 'sessions'].includes(tab) ? tab : 'pages');
+}
+window.addEventListener('hashchange', applyHash);
+
+function tickSynced() {
+  const el = document.getElementById('synced');
+  if (!state.newestMtime) { el.textContent = ''; return; }
+  const s = Math.max(0, (Date.now() - state.newestMtime) / 1000);
+  el.textContent = 'activity ' + (
+    s < 90 ? 'just now' :
+    s < 3600 ? Math.round(s / 60) + 'm ago' :
+    s < 86400 ? Math.round(s / 3600) + 'h ago' :
+    Math.round(s / 86400) + 'd ago');
+}
+
+document.getElementById('inkmode').onclick = function () {
+  state.aiBlue = !state.aiBlue;
+  this.classList.toggle('mono', !state.aiBlue);
+  if (state.tab === 'pages') renderPages();
+};
+
+async function poll(initial) {
+  const results = await Promise.all([
+    loadPages(initial),
+    loadLibrary(),
+    loadRoot(),
+    loadSessions(),
+  ]).catch(() => [false, false, false]);
+  tickSynced();
+  if (initial) applyHash();
+  else if (results.some(Boolean)) render();
+}
+
+poll(true).catch(e => {
+  $view.innerHTML = '<div id="msg">could not load /notebook/data/ — has the tablet synced yet?<br><br>' +
+    esc(String(e)) + '</div>';
+});
+setInterval(() => poll(false), POLL_MS);
+setInterval(tickSynced, 10000);
+liveConnect();
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"
+        integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+        integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk" crossorigin="anonymous"
+        onload="if(document.querySelector('.md'))renderMath(document.querySelector('.md'))"></script>
+</body>
+</html>

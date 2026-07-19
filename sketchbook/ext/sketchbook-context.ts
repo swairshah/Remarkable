@@ -1,14 +1,14 @@
 /**
  * sketchbook-context.ts — image→inventory context compression for pi.
  *
- * Adapted from alt-ui's paper-transcribe.ts (context-management/transcribe),
+ * Adapted from papier's papier-transcribe.ts (context-management/transcribe),
  * reshaped for a drawing app: instead of transcribing handwriting, the
  * second model call writes a SCENE INVENTORY — what the user sketched and
  * where, their handwritten words, and what each of pi's outputs depicts —
  * so later turns keep full knowledge of what was created without carrying
  * a single old image.
  *
- * Three compounding ideas (same architecture as paper-transcribe):
+ * Three compounding ideas (same architecture as papier-transcribe):
  *
  *   1) INVENTORY FORK — right after the model answers a pause, a fork call
  *      (same context; prefix rides the provider cache byte-for-byte) asks

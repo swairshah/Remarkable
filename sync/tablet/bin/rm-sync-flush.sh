@@ -5,6 +5,6 @@
 #
 # Pure push: no pulls here — wake handles those (rm-sync-wake.sh).
 
-[ -x /home/root/bin/alt-ui-sync.sh ] && /home/root/bin/alt-ui-sync.sh push
+[ -x /home/root/bin/papier-sync.sh ] && /home/root/bin/papier-sync.sh push
 [ -x /home/root/bin/remarkable-push-sync.sh ] && /home/root/bin/remarkable-push-sync.sh
 exit 0
