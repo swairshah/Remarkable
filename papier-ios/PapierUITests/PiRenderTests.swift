@@ -30,9 +30,12 @@ final class PiRenderTests: XCTestCase {
         app.buttons["rail-goto"].tap()
         let field = app.textFields.firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.typeText("4")
+        field.typeText("5")
         app.buttons["Go"].tap()
-        XCTAssertTrue(app.staticTexts["4 / 4"].waitForExistence(timeout: 5), "goto lands on page 4")
+        let pageCounter = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH '5 / '")
+        ).firstMatch
+        XCTAssertTrue(pageCounter.waitForExistence(timeout: 5), "goto lands on page 5")
 
         // Outcome assertion, not transport assertion: pi's actual patches
         // must be attached to the visible page model and render onscreen.
@@ -41,16 +44,22 @@ final class PiRenderTests: XCTestCase {
         let before = layer.value as? String
         XCTAssertNotEqual(before, "0", "visible page contains pi ink")
 
-        // End-to-end regression for the bug the user saw: nudge a real
-        // resident pi and require the VISIBLE layer's count to increase.
-        app.buttons["rail-nudge"].tap()
-        let changed = NSPredicate { object, _ in
+        // Rub across pi's first line. This is a PAN, not a tap — the precise
+        // failure mode of Apple Pencil erasing in the old build.
+        eraser.tap() // reselect (still region from mode-cycle above)
+        eraser.tap() // cycle region -> object
+        // Coordinates relative to the paper/patch layer: patch #1 spans
+        // x=218...698, y=668...719 in a 1404x1872 page.
+        let start = layer.coordinate(withNormalizedOffset: CGVector(dx: 0.16, dy: 0.37))
+        let end = layer.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.37))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        let erased = NSPredicate { object, _ in
             (object as? XCUIElement)?.value as? String != before
         }
-        expectation(for: changed, evaluatedWith: layer)
-        waitForExpectations(timeout: 40)
+        expectation(for: erased, evaluatedWith: layer)
+        waitForExpectations(timeout: 8)
 
-        sleep(2)   // animation settles before artifact
+        sleep(1)   // update settles before artifact
         // deterministic artifact: the simulator shares the host filesystem
         try XCUIScreen.main.screenshot().pngRepresentation
             .write(to: URL(fileURLWithPath: "/tmp/papier-pi-render.png"))

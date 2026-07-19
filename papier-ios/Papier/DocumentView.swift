@@ -363,6 +363,14 @@ private struct PageScreen: View {
             } else {
                 ProgressView()
             }
+            // Native Apple-Pencil touch capture limited to pi's patch bounds.
+            // It sits above PencilKit only where pi ink exists; elsewhere user
+            // strokes retain normal object/pixel eraser behavior.
+            if active && tool == .eraser && eraserMode != .region {
+                PatchEraseOverlay(patches: model.patches, scale: model.scale) { id in
+                    model.erasePatches(ids: [id])
+                }
+            }
             if capturing {
                 CaptureView(dashed: true) { poly in
                     if tool == .lasso { lassoCompleted(poly) } else { regionErase(poly) }

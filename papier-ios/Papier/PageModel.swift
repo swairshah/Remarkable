@@ -201,14 +201,31 @@ final class PageModel: ObservableObject {
     /// patch it lands on (object erase, the tablet's default mode).
     func erasePatch(at point: CGPoint) {
         guard loaded, scale > 0 else { return }
-        let tol: CGFloat = 14   // display points
+        let tol: CGFloat = 24   // display points; Pencil's eraser has a broad nib
         let px = point.x / scale, py = point.y / scale
         let tolPage = tol / scale
+        let target = CGPoint(x: px, y: py)
+
+        func distanceToSegment(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
+            let dx = b.x - a.x, dy = b.y - a.y
+            let length2 = dx * dx + dy * dy
+            guard length2 > 0.0001 else { return hypot(p.x - a.x, p.y - a.y) }
+            let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length2))
+            return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+        }
+
         for patch in base.patches {
             var hit = false
             for s in patch.strokes where !hit {
-                for p in s.points where abs(p.x - px) < tolPage && abs(p.y - py) < tolPage {
-                    hit = true; break
+                guard let first = s.points.first else { continue }
+                var previous = CGPoint(x: first.x, y: first.y)
+                if hypot(target.x - previous.x, target.y - previous.y) <= tolPage { hit = true; continue }
+                for p in s.points.dropFirst() {
+                    let current = CGPoint(x: p.x, y: p.y)
+                    if distanceToSegment(target, previous, current) <= tolPage {
+                        hit = true; break
+                    }
+                    previous = current
                 }
             }
             if !hit {

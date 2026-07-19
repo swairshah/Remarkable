@@ -325,7 +325,13 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
   }
 
   async function runTurn(s, page, kind) {
-    if (s.busy) { s.pending = { page, kind }; return; }
+    if (s.busy) {
+      // User intent beats background automation. Previously a save-triggered
+      // pause could overwrite a queued NUDGE, making the sparkle button look
+      // unreliable until it was tapped 2–3 times.
+      if (kind === 'nudge' || !s.pending) s.pending = { page, kind };
+      return;
+    }
     s.page = page;
     try {
       const view = await canvasCall(s, { cmd: 'view', page });
@@ -370,6 +376,12 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     startSocket(s);
     startCanvas(s);
     sessions.set(id, s);
+    // Give the Unix socket one tick to bind, then resume pi before the user
+    // asks for it. Events polling after a service restart also triggers this.
+    const warm = setTimeout(() => {
+      if (sessions.get(id) === s && !s.pi) ensurePi(s);
+    }, 100);
+    warm.unref?.();
     return s;
   }
 
@@ -442,6 +454,9 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
 
     switch (p) {
       case '/pi/open':
+        // Hide cold-start cost while the user is reading/writing. Previously
+        // the first nudge paid ~14s to spawn + resume pi; warm turns are ~4s.
+        ensurePi(s);
         json(res, 200, state(s));
         return true;
       case '/pi/page':

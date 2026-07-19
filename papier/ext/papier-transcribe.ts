@@ -165,6 +165,38 @@ export default function (pi: ExtensionAPI) {
   // in-context fork reuses this verbatim so its prefix hits the provider cache.
   let lastLlm: { systemPrompt?: string; tools?: any[]; messages: any[]; imageKeys: Set<string> } | null = null;
 
+  // Transcription is context maintenance, NOT part of the visible response.
+  // Never hold agent_end / the iPad spinner open while a second model call
+  // runs. Coalesce rapid saves to the newest image and process in background.
+  let transcriptRunning = false;
+  let transcriptTimer: NodeJS.Timeout | null = null;
+  let pendingTranscript: (() => Promise<void>) | null = null;
+  function scheduleTranscript() {
+    if (transcriptRunning || !pendingTranscript) return;
+    if (transcriptTimer) clearTimeout(transcriptTimer);
+    // Only spend the second model call after the user has been idle. Starting
+    // immediately competed with the next nudge and made later turns crawl.
+    transcriptTimer = setTimeout(() => {
+      transcriptTimer = null;
+      const next = pendingTranscript;
+      pendingTranscript = null;
+      if (!next) return;
+      transcriptRunning = true;
+      void next().catch((e: any) => {
+        process.stderr.write(`[transcribe] background error: ${String(e?.message || e)}\n`);
+      }).finally(() => {
+        transcriptRunning = false;
+        scheduleTranscript();
+      });
+    }, 5_000);
+    transcriptTimer.unref?.();
+  }
+  function enqueueTranscript(job: () => Promise<void>) {
+    // Coalesce rapid saves/turns: only the newest page image matters.
+    pendingTranscript = job;
+    scheduleTranscript();
+  }
+
   async function ensureTranscribed(ctx: any, imgs: ReturnType<typeof imagesIn>, signal?: AbortSignal) {
     const todo = imgs.filter((im) => !store[sk(im.key)]);
     if (!todo.length) return 0;
@@ -208,34 +240,34 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ---- online: after the model answers, fork IN CONTEXT to transcribe the
-  // current page. The fork = last request prefix (cached!) + the answer + a
-  // transcribe prompt — the image is already in that prefix, so it isn't resent.
-  pi.on("message_end", async (event: any, ctx: any) => {
+  // current page. Crucially this is BACKGROUND work: awaiting it kept Papier's
+  // busy spinner up for 20–35 seconds after a 2-second `pass` response.
+  pi.on("message_end", (event: any, ctx: any) => {
     const am = event?.message;
     if (am?.role !== "assistant") return;
-    // mid-turn assistant messages end in toolCalls; forking there would leave a
-    // dangling tool_use (API error). Wait for the final text-only answer.
+    // mid-turn assistant messages end in toolCalls; wait for final text-only.
     if (Array.isArray(am.content) && am.content.some((b: any) => b?.type === "toolCall")) return;
 
     const msgs = (ctx.sessionManager?.getEntries?.() ?? []).map((e: any) => e.message).filter(Boolean);
     const imgs = imagesIn(msgs);
-    if (!imgs.length) return;
-    let n = 0;
-
-    // current page image → in-context fork (rides the cache, sees the chat)
     const cur = imgs[imgs.length - 1];
-    if (!store[sk(cur.key)] && lastLlm?.imageKeys.has(cur.key)) {
-      const text = await callModel(ctx, {
-        systemPrompt: lastLlm.systemPrompt,
-        tools: lastLlm.tools,
-        messages: [...lastLlm.messages, am, { role: "user", content: [{ type: "text", text: CTX_PROMPT }], timestamp: Date.now() }],
-      }, ctx.signal).catch(() => null);
-      if (text) { store[sk(cur.key)] = text; saveStore(store); n++; }
-    }
+    const snapshot = lastLlm;
+    if (!cur || store[sk(cur.key)] || !snapshot?.imageKeys.has(cur.key)) return;
 
-    // stragglers (fast flips, missed turns) → standalone per-image calls
-    n += await ensureTranscribed(ctx, imgs, ctx.signal);
-    if (n) process.stderr.write(`[transcribe] +${n} transcription(s) after turn\n`);
+    enqueueTranscript(async () => {
+      // A newer queued page replaces this one before it starts.
+      if (store[sk(cur.key)]) return;
+      const text = await callModel(ctx, {
+        systemPrompt: snapshot.systemPrompt,
+        tools: snapshot.tools,
+        messages: [...snapshot.messages, am, { role: "user", content: [{ type: "text", text: CTX_PROMPT }], timestamp: Date.now() }],
+      }).catch(() => null);
+      if (text) {
+        store[sk(cur.key)] = text;
+        saveStore(store);
+        process.stderr.write("[transcribe] +1 background transcription\n");
+      }
+    });
     return undefined;
   });
 

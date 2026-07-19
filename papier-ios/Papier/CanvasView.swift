@@ -69,12 +69,25 @@ struct CanvasView: UIViewRepresentable {
         context.coordinator.programmatic = true
         canvas.drawing = initialDrawing
         context.coordinator.programmatic = false
+        let touchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue),
+                          NSNumber(value: UITouch.TouchType.pencil.rawValue)]
         let tap = UITapGestureRecognizer(target: context.coordinator,
                                          action: #selector(Coordinator.tapped(_:)))
-        tap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue),
-                                 NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+        tap.allowedTouchTypes = touchTypes
+        tap.cancelsTouchesInView = false
         tap.delegate = context.coordinator
         canvas.addGestureRecognizer(tap)
+
+        // A real eraser gesture is a RUB, not a stationary tap. PencilKit
+        // consumes pencil drags, so observe one simultaneously and feed every
+        // point to the pi-patch hit tester.
+        let rub = UIPanGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.rubbed(_:)))
+        rub.allowedTouchTypes = touchTypes
+        rub.maximumNumberOfTouches = 1
+        rub.cancelsTouchesInView = false
+        rub.delegate = context.coordinator
+        canvas.addGestureRecognizer(rub)
         apply(to: canvas)
         return canvas
     }
@@ -132,6 +145,11 @@ struct CanvasView: UIViewRepresentable {
         }
 
         @objc func tapped(_ g: UITapGestureRecognizer) {
+            onTap?(g.location(in: g.view))
+        }
+
+        @objc func rubbed(_ g: UIPanGestureRecognizer) {
+            guard g.state == .began || g.state == .changed else { return }
             onTap?(g.location(in: g.view))
         }
 
