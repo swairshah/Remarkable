@@ -26,42 +26,22 @@ enum PencilBridge {
         PKDrawing(strokes: page.strokes.map { stroke(from: $0, scale: scale) })
     }
 
-    /// gray==1 is the invisible "iPad-pencil authored" watermark: it renders
-    /// identically to black on the tablet/web, but tells us to bring the
-    /// pencil texture back on reload (pressure reconstructed from radius).
-    static let pencilGrayTag = 1
-
     private static func stroke(from s: InkStroke, scale: CGFloat) -> PKStroke {
-        let isPencilTagged = s.gray == pencilGrayTag
-        let color = (s.gray == 0 || isPencilTagged)
-            ? inkBlack : UIColor(white: CGFloat(s.gray) / 255.0, alpha: 1)
-        // Tablet/web-authored ink: monoline — a crisp geometric stroke,
-        // matching how the tablet and the web viewer render it. (Pencil
-        // texture through the pencil brush looks blotchy at the
-        // reMarkable's stroke widths.) iPad-pencil-tagged ink: pencil brush,
-        // so the pencily vibe survives the sync round trip.
-        let ink = PKInk(isPencilTagged ? .pencil : .monoline, color: color)
+        let color = s.gray == 0 ? inkBlack : UIColor(white: CGFloat(s.gray) / 255.0, alpha: 1)
+        // Monoline: a crisp geometric stroke, matching how the tablet and the
+        // web viewer render this ink. (Pencil texture is for LIVE drawing
+        // only — imported strokes through the pencil brush look blotchy at
+        // the reMarkable's stroke widths.)
+        let ink = PKInk(.monoline, color: color)
         var points: [PKStrokePoint] = []
         points.reserveCapacity(max(s.points.count, 1))
         var t: TimeInterval = 0
         for p in s.points {
-            let w: CGFloat
-            let opacity: CGFloat
-            if isPencilTagged {
-                // EXACT inverse of the export map r = 2.4*(0.55 + 0.75*o):
-                // recover the original per-point opacity — no re-shaping.
-                opacity = CGFloat(max(0.15, min(1.0, (p.r / 2.4 - 0.55) / 0.75)))
-                // The live pencil's tip footprint (measured: r ≈ 1.2 page px),
-                // scaled to this display — weight comes from opacity+texture.
-                w = max(1.3, 2 * 1.2 * scale)
-            } else {
-                opacity = 1
-                w = max(1.5, CGFloat(p.r) * 2 * scale)
-            }
+            let w = max(1.5, CGFloat(p.r) * 2 * scale)
             points.append(PKStrokePoint(location: CGPoint(x: p.x * scale, y: p.y * scale),
                                         timeOffset: t,
                                         size: CGSize(width: w, height: w),
-                                        opacity: opacity, force: 1, azimuth: 0, altitude: .pi / 2))
+                                        opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2))
             t += 0.008
         }
         if points.isEmpty {
@@ -103,9 +83,7 @@ enum PencilBridge {
                                 r: r)
             }
             guard !pts.isEmpty else { continue }
-            out.append(InkStroke(id: id,
-                                 gray: isPencil ? pencilGrayTag : 0,
-                                 points: Array(pts)))
+            out.append(InkStroke(id: id, gray: 0, points: Array(pts)))
             id += 1
         }
         return out
