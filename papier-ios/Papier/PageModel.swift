@@ -15,7 +15,9 @@ final class PageModel: ObservableObject {
     let entry: SeqEntry
     private let store: LibraryStore
 
-    @Published var patchesImage: UIImage?
+    @Published var patches: [InkPatch] = []
+    @Published var animateIds: Set<UInt64> = []
+    @Published var animateStart = Date.distantPast
     @Published var initialDrawing: PKDrawing?
     /// Bumped ONLY when initialDrawing is genuinely (re)built (load/rescale):
     /// the canvas adopts a pushed drawing solely on epoch change, so user
@@ -28,6 +30,10 @@ final class PageModel: ObservableObject {
     private var loaded = false
     private var saveGeneration = 0
     private var latestDrawing = PKDrawing()
+
+    /// Called after a successful cloud save — DocumentView reports the
+    /// pause to remote pi.
+    var onSaved: (() -> Void)?
 
     init(doc: PapierDoc, entry: SeqEntry, store: LibraryStore) {
         self.doc = doc
@@ -45,14 +51,36 @@ final class PageModel: ObservableObject {
 
         if let pending = store.pendingInk(docId: doc.id, key: key, currentVersion: doc.version) {
             base = pending
-        } else if (doc.ink ?? []).contains(key) {
-            base = (try? await store.client.fetchInk(doc, key: key)) ?? InkPage()
+            // even with local pending strokes, the server may hold newer
+            // pi patches — they are server-authoritative
+            if let remote = try? await store.client.fetchInk(doc, key: key) {
+                base.patches = remote.patches
+                base.nextPatch = max(base.nextPatch, remote.nextPatch)
+            }
+        } else {
+            base = (try? await store.client.fetchInk(doc, key: key)).flatMap { $0 } ?? InkPage()
         }
         initialDrawing = PencilBridge.drawing(from: base, scale: scale)
         latestDrawing = initialDrawing ?? PKDrawing()
-        patchesImage = PencilBridge.patchesImage(page: base, pageSize: pageSize, scale: scale)
+        patches = base.patches
         drawingEpoch += 1
         sync = .clean
+    }
+
+    /// Cloud pi drew/erased on this page: adopt the server's patches
+    /// (user strokes stay local truth) and animate the new ones in.
+    func refreshPatches() async {
+        guard loaded else { return }
+        guard let remote = try? await store.client.fetchInk(doc, key: entry.inkKey) else { return }
+        let known = Set(base.patches.map(\.id))
+        base.patches = remote.patches
+        base.nextPatch = max(base.nextPatch, remote.nextPatch)
+        let fresh = Set(remote.patches.map(\.id)).subtracting(known)
+        patches = base.patches
+        if !fresh.isEmpty {
+            animateIds = fresh
+            animateStart = Date()
+        }
     }
 
     /// Rotation / resize: rebuild the display-space drawing from page space.
@@ -65,7 +93,7 @@ final class PageModel: ObservableObject {
         base = current
         initialDrawing = PencilBridge.drawing(from: current, scale: scale)
         latestDrawing = initialDrawing ?? PKDrawing()
-        patchesImage = PencilBridge.patchesImage(page: current, pageSize: pageSize, scale: scale)
+        patches = base.patches
         drawingEpoch += 1
     }
 
@@ -103,6 +131,7 @@ final class PageModel: ObservableObject {
             store.rememberPending(docId: doc.id, key: entry.inkKey, page: page, baseVersion: doc.version)
             base = page
             sync = .saved
+            onSaved?()
         } catch {
             sync = .error(error.localizedDescription)
         }

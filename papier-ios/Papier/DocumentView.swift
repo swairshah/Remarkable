@@ -18,17 +18,25 @@ struct DocumentView: View {
     @State private var fingerDraws = false
     @State private var models: [String: PageModel] = [:]
     @StateObject private var hub = CanvasHub()
+    @StateObject private var pi: PiSession
 
     init(doc: PapierDoc) {
         self.doc = doc
         _seq = State(initialValue: doc.seq.isEmpty ? [.note(1)] : doc.seq)
         let saved = UserDefaults.standard.integer(forKey: "pos-\(doc.id)")
         _index = State(initialValue: min(max(saved, 0), max((doc.seq.count) - 1, 0)))
+        _pi = StateObject(wrappedValue: PiSession(
+            docId: doc.id,
+            serverRoot: UserDefaults.standard.string(forKey: "serverRoot") ?? ""))
     }
 
     private func model(for entry: SeqEntry) -> PageModel {
         if let m = models[entry.inkKey] { return m }
         let m = PageModel(doc: doc, entry: entry, store: store)
+        m.onSaved = { [weak pi] in
+            // the debounced save just landed — that IS the writing pause
+            if let i = seq.firstIndex(of: entry) { pi?.pause(page: i + 1) }
+        }
         DispatchQueue.main.async { models[entry.inkKey] = m }
         return m
     }
@@ -57,7 +65,19 @@ struct DocumentView: View {
                 toolRail
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                     .padding(.trailing, 10)
+
+                if let toast = pi.toast {
+                    Text(toast)
+                        .font(.callout)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(.regularMaterial, in: Capsule())
+                        .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
+                        .padding(.top, 8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
+            .animation(.spring(duration: 0.35), value: pi.toast)
         }
         .navigationTitle(doc.meta.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -76,12 +96,38 @@ struct DocumentView: View {
         .onChange(of: index) { old, _ in
             UserDefaults.standard.set(index, forKey: "pos-\(doc.id)")
             if old < seq.count { models[seq[old].inkKey]?.flushNow() }
+            pi.reportPage(index + 1)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { flushAll() }
         }
-        .onDisappear { flushAll(); store.startPolling() }
-        .onAppear { store.stopPolling() }
+        .onDisappear { flushAll(); pi.close(); store.startPolling() }
+        .onAppear {
+            store.stopPolling()
+            wirePi()
+            pi.open()
+            pi.reportPage(index + 1)
+        }
+    }
+
+    private func wirePi() {
+        pi.onPatch = { page in
+            guard page >= 1, page <= seq.count else { return }
+            let key = seq[page - 1].inkKey
+            Task { await models[key]?.refreshPatches() }
+        }
+        pi.onGoto = { page in
+            guard page >= 1, page <= seq.count else { return }
+            withAnimation { index = page - 1 }
+        }
+        pi.onSeqChanged = {
+            Task {
+                await store.refresh()
+                if let fresh = store.docs.first(where: { $0.id == doc.id }), !fresh.seq.isEmpty {
+                    seq = fresh.seq
+                }
+            }
+        }
     }
 
     private var currentModel: PageModel? { models[seq[index].inkKey] }
@@ -115,6 +161,25 @@ struct DocumentView: View {
             railButton("arrow.uturn.forward", active: false) {
                 hub.activeCanvas?.undoManager?.redo()
             }
+            Divider().frame(width: 22)
+            // pi: busy dot / nudge / quiet toggle / pi's writing face
+            ZStack {
+                railButton("sparkles", active: false) { pi.nudge(page: index + 1) }
+                    .accessibilityIdentifier("rail-nudge")
+                    .opacity(pi.busy ? 0.25 : 1)
+                if pi.busy { ProgressView().controlSize(.small) }
+            }
+            railButton(pi.mode == "quiet" ? "moon.zzz.fill" : "moon.zzz", active: pi.mode == "quiet") {
+                pi.toggleMode()
+            }
+            .accessibilityIdentifier("rail-pimode")
+            Button { pi.cycleFont() } label: {
+                Text(String(pi.font.prefix(2)).capitalized)
+                    .font(.system(size: 13, weight: .semibold, design: .serif))
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("rail-pifont")
         }
         .padding(.vertical, 14)
         .padding(.horizontal, 8)
@@ -205,9 +270,10 @@ private struct PageScreen: View {
                     }
                 }
             }
-            if let patches = model.patchesImage {
-                Image(uiImage: patches).resizable().scaledToFit()
-            }
+            PatchLayer(patches: model.patches,
+                       scale: model.scale,
+                       animateIds: model.animateIds,
+                       animateStart: model.animateStart)
             if let drawing = model.initialDrawing {
                 CanvasView(initialDrawing: drawing,
                            epoch: model.drawingEpoch,

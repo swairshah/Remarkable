@@ -48,11 +48,15 @@ struct PapierClient {
         return URL(string: serverRoot + doc.base + "docs/\(doc.id)/pages/\(name)?v=\(doc.version)")
     }
 
-    /// Fetch a page's ink file; nil when the page has no ink yet.
+    /// Fetch a page's ink file from the MERGED truth (inbound overlay —
+    /// where iPad + cloud-pi writes land — falling back to the tablet
+    /// mirror). nil when the page has no ink yet.
     func fetchInk(_ doc: PapierDoc, key: String) async throws -> InkPage? {
-        guard let url = URL(string: serverRoot + doc.base + "docs/\(doc.id)/ink/\(key).json?v=\(doc.version)")
+        guard let url = URL(string: api + "/ink?id=\(doc.id)&file=\(key).json&t=\(Date().timeIntervalSince1970)")
         else { return nil }
-        let (data, resp) = try await Self.session.data(from: url)
+        var req = URLRequest(url: url)
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        let (data, resp) = try await Self.session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { return nil }
         if http.statusCode == 404 { return nil }
         guard http.statusCode == 200 else { throw PapierAPIError(message: "ink HTTP \(http.statusCode)") }

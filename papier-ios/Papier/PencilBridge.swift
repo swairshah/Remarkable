@@ -89,52 +89,6 @@ enum PencilBridge {
         return out
     }
 
-    // MARK: pi patches -> background image
-
-    /// Render pi's patches (blue strokes + typeset text) at display scale,
-    /// exactly like the web viewer's overlay.
-    static func patchesImage(page: InkPage, pageSize: CGSize, scale: CGFloat) -> UIImage? {
-        guard !page.patches.isEmpty else { return nil }
-        let size = CGSize(width: pageSize.width * scale, height: pageSize.height * scale)
-        let fmt = UIGraphicsImageRendererFormat()
-        fmt.opaque = false
-        let renderer = UIGraphicsImageRenderer(size: size, format: fmt)
-        return renderer.image { ctx in
-            let cg = ctx.cgContext
-            cg.setLineCap(.round)
-            cg.setLineJoin(.round)
-            for patch in page.patches {
-                for s in patch.strokes {
-                    cg.setStrokeColor(piBlue.cgColor)
-                    guard let first = s.points.first else { continue }
-                    if s.points.count == 1 {
-                        let r = max(0.6, first.r * scale)
-                        cg.setFillColor(piBlue.cgColor)
-                        cg.fillEllipse(in: CGRect(x: first.x * scale - r, y: first.y * scale - r,
-                                                  width: r * 2, height: r * 2))
-                        continue
-                    }
-                    // stroke in segments so per-point width is honored
-                    for i in 1..<s.points.count {
-                        let a = s.points[i - 1], b = s.points[i]
-                        cg.setLineWidth(max(1.0, (a.r + b.r) * scale))
-                        cg.move(to: CGPoint(x: a.x * scale, y: a.y * scale))
-                        cg.addLine(to: CGPoint(x: b.x * scale, y: b.y * scale))
-                        cg.strokePath()
-                    }
-                }
-                for t in patch.texts {
-                    let fontSize = t.size * scale
-                    let font = UIFont(name: "EBGaramond-Regular", size: fontSize)
-                        ?? UIFont(name: "Georgia", size: fontSize)
-                        ?? UIFont.systemFont(ofSize: fontSize)
-                    let attr: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: piBlue]
-                    // papier's TextRun y is the baseline; draw() wants the top.
-                    let top = CGFloat(t.y) * scale - font.ascender
-                    NSAttributedString(string: t.text, attributes: attr)
-                        .draw(at: CGPoint(x: CGFloat(t.x) * scale, y: top))
-                }
-            }
-        }
-    }
+    // pi's patches render vector-crisp in PatchLayer.swift (SwiftUI Canvas
+    // + Core Text) — no pre-rasterized bitmap.
 }
