@@ -86,7 +86,8 @@ echo "[deploy-server] build + ship papier remote-pi (cloud-canvas + session serv
 ssh "$HOST" 'sudo systemctl stop papier-upload 2>/dev/null || true'
 scp -q "$HERE/../papier"/target/x86_64-unknown-linux-musl/release/cloud_canvas "$HOST:bin/papier-cloud-canvas"
 scp -q "$PAPIER_SERVER"/bin/papier-pi-sessions.js "$PAPIER_SERVER"/bin/papier-cloud-prompt.md \
-  "$HERE/../papier"/ext/papier-canvas.ts "$HOST:bin/"
+  "$HERE/../papier"/ext/papier-canvas.ts "$HERE/../papier"/ext/papier-transcribe.ts \
+  "$HERE/../papier"/ext/papier-metrics.ts "$HOST:bin/"
 ssh "$HOST" 'chmod +x ~/bin/papier-cloud-canvas'
 scp -q "$PAPIER_SERVER"/web/index.html "$HOST:notes-server/papier/index.html"
 ssh "$HOST" 'chmod +x ~/bin/papier-preview-page.py ~/bin/papier-render.sh ~/bin/papier-compose.sh ~/bin/papier-make-pdf.py'

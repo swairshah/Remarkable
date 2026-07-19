@@ -27,6 +27,11 @@ const { spawn } = require('child_process');
 
 const CANVAS_BIN = process.env.PAPIER_CANVAS_BIN || '/home/exedev/bin/papier-cloud-canvas';
 const CANVAS_EXT = process.env.PAPIER_CANVAS_EXT || '/home/exedev/bin/papier-canvas.ts';
+// The tablet's context solution, reused verbatim: transcribe (image->text
+// swap + page dedup + recall_page, so sessions never bloat with page PNGs)
+// and per-turn metrics.
+const TRANSCRIBE_EXT = process.env.PAPIER_TRANSCRIBE_EXT || '/home/exedev/bin/papier-transcribe.ts';
+const METRICS_EXT = process.env.PAPIER_METRICS_EXT || '/home/exedev/bin/papier-metrics.ts';
 const PROMPT_MD = process.env.PAPIER_PI_PROMPT || '/home/exedev/bin/papier-cloud-prompt.md';
 const PI_BIN = process.env.PI_BIN || 'pi';
 const PI_HOME = process.env.PAPIER_PI_HOME || path.join(os.homedir(), 'papier-pi');
@@ -202,51 +207,136 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     );
   }
 
+  // RESIDENT pi, exactly like the tablet: one `pi --mode rpc` child per
+  // session, JSONL over stdin/stdout (libreink-pi's protocol). Staying
+  // alive between turns is what lets papier-transcribe's post-answer fork
+  // land — the image→text compression that keeps long sessions fast.
+  function ensurePi(s) {
+    if (s.pi && s.pi.exitCode === null) return s.pi;
+    const resumed = fs.existsSync(s.sessionDir)
+      && fs.readdirSync(s.sessionDir).some((f) => f.endsWith('.jsonl'));
+    const args = [
+      '--mode', 'rpc',
+      '--session-dir', s.sessionDir,
+      '--name', 'papier-cloud',
+      '--append-system-prompt', PROMPT_MD,
+      '--no-extensions', '-e', CANVAS_EXT,
+    ];
+    // Continued sessions pin their birth model; force the configured one
+    // (the user's subscription auth) even on resume.
+    const provider = process.env.PAPIER_PI_PROVIDER || 'anthropic';
+    // :low thinking — margin notes, not dissertations; keeps turns snappy.
+    const model = process.env.PAPIER_PI_MODEL || 'claude-fable-5:low';
+    args.push('--provider', provider, '--model', model);
+    if (fs.existsSync(METRICS_EXT)) args.push('-e', METRICS_EXT);
+    if (fs.existsSync(TRANSCRIBE_EXT)) args.push('-e', TRANSCRIBE_EXT);
+    if (resumed) args.push('--continue');
+
+    const child = spawn(PI_BIN, args, {
+      cwd: s.workDir,
+      env: {
+        ...process.env, ...dotEnv(),
+        PAPIER_SOCK: s.sock,
+        PAPIER_TRANSCRIBE_STORE: path.join(PI_HOME, 'transcriptions.json'),
+        PAPIER_METRICS: path.join(PI_HOME, s.id, 'metrics.jsonl'),
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const errLog = path.join(PI_HOME, s.id, 'turn-stderr.log');
+    child.stderr.on('data', (d) => {
+      try {
+        fs.appendFileSync(errLog, d);
+        if (fs.statSync(errLog).size > 200_000) fs.truncateSync(errLog, 0);
+      } catch (_) {}
+    });
+    let buf = '';
+    child.stdout.on('data', (d) => {
+      buf += d.toString('utf8');
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        try { handleRpc(s, JSON.parse(line)); } catch (_) {}
+      }
+    });
+    child.on('exit', (code) => {
+      if (s.pi === child) s.pi = null;
+      if (s.busy) {
+        s.busy = false;
+        clearTimeout(s.watchdog);
+        emit(s, { type: 'notice', text: `[pi exited (${code}); next turn restarts it]` });
+        emit(s, { type: 'turn', state: 'end' });
+      }
+    });
+    s.pi = child;
+    return child;
+  }
+
+  function handleRpc(s, v) {
+    switch (v.type) {
+      case 'agent_start':
+        s.busy = true;
+        s.turnText = '';
+        emit(s, { type: 'turn', state: 'start' });
+        break;
+      case 'message_update': {
+        const ev = v.assistantMessageEvent || {};
+        if (ev.type === 'text_delta' && typeof ev.delta === 'string') s.turnText += ev.delta;
+        break;
+      }
+      case 'extension_ui_request':
+        // no keyboard in headless mode — dismiss dialogs like the tablet
+        if (['select', 'confirm', 'input', 'editor'].includes(v.method)) {
+          try { s.pi.stdin.write(JSON.stringify({ type: 'extension_ui_response', id: v.id, cancelled: true }) + '\n'); } catch (_) {}
+        } else if (v.method === 'notify') {
+          // extension warnings (e.g. transcribe auth problems) — keep them
+          try {
+            fs.appendFileSync(path.join(PI_HOME, s.id, 'turn-stderr.log'),
+              `[notify] ${v.message || ''}\n`);
+          } catch (_) {}
+        }
+        break;
+      case 'response':
+        if (v.success === false) emit(s, { type: 'notice', text: `[pi error: ${v.error || '?'}]` });
+        break;
+      case 'agent_end': {
+        s.busy = false;
+        clearTimeout(s.watchdog);
+        const said = (s.turnText || '').trim();
+        if (said && said.toLowerCase() !== 'pass' && said.length < 600) {
+          emit(s, { type: 'notice', text: said });
+        }
+        emit(s, { type: 'turn', state: 'end' });
+        const p = s.pending;
+        s.pending = null;
+        if (p) runTurn(s, p.page, p.kind);
+        break;
+      }
+      default: break;
+    }
+  }
+
   async function runTurn(s, page, kind) {
     if (s.busy) { s.pending = { page, kind }; return; }
-    s.busy = true;
     s.page = page;
-    emit(s, { type: 'turn', state: 'start' });
     try {
       const view = await canvasCall(s, { cmd: 'view', page });
-      const img = path.join(os.tmpdir(), `papier-pi-${s.key}.png`);
-      if (view && view.ok) fs.writeFileSync(img, Buffer.from(view.png_base64, 'base64'));
       const msg = await pauseMessage(s, page, kind);
-
-      const args = [
-        '-p', '--continue',
-        '--session-dir', s.sessionDir,
-        '--no-extensions', '-e', CANVAS_EXT,
-        '--append-system-prompt', PROMPT_MD,
-      ];
-      if (view && view.ok) args.push('@' + img);
-      args.push(msg);
-
-      const child = spawn(PI_BIN, args, {
-        cwd: s.workDir,
-        env: { ...process.env, ...dotEnv(), PAPIER_SOCK: s.sock },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      s.pi = child;
-      let out = '';
-      child.stdout.on('data', (d) => { out += d.toString('utf8'); if (out.length > 20000) out = out.slice(-10000); });
-      child.stderr.on('data', () => {});
-      const killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, TURN_TIMEOUT_MS);
-      await new Promise((resolve) => child.once('exit', resolve));
-      clearTimeout(killer);
-      s.pi = null;
-      const said = out.trim();
-      if (said && said.toLowerCase() !== 'pass' && said.length < 600) {
-        emit(s, { type: 'notice', text: said });
+      const child = ensurePi(s);
+      const prompt = { type: 'prompt', message: msg };
+      if (view && view.ok) {
+        prompt.images = [{ type: 'image', data: view.png_base64, mimeType: 'image/png' }];
       }
+      child.stdin.write(JSON.stringify(prompt) + '\n');
+      s.busy = true; // agent_start confirms; watchdog covers a wedged child
+      clearTimeout(s.watchdog);
+      s.watchdog = setTimeout(() => {
+        if (s.busy && s.pi) { try { s.pi.kill('SIGKILL'); } catch (_) {} }
+      }, TURN_TIMEOUT_MS);
+      s.watchdog.unref?.();
     } catch (e) {
       emit(s, { type: 'notice', text: `pi error: ${String(e.message || e)}` });
-    } finally {
-      s.busy = false;
-      emit(s, { type: 'turn', state: 'end' });
-      const p = s.pending;
-      s.pending = null;
-      if (p) runTurn(s, p.page, p.kind);
     }
   }
 
@@ -262,7 +352,8 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
       sessionDir: path.join(PI_HOME, id, 'sessions'),
       workDir: path.join(PI_HOME, id, 'work'),
       events: [], nextEvent: 0,
-      busy: false, pending: null, pi: null,
+      epoch: Date.now(),   // clients reset their event cursor when this moves
+      busy: false, pending: null, pi: null, turnText: '', watchdog: null,
       mode: 'auto', font: 'serif', page: 1,
       canvas: null, canvasQueue: [],
       lastUsed: Date.now(),
@@ -297,7 +388,7 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
   }
 
   function state(s) {
-    return { ok: true, busy: s.busy, mode: s.mode, font: s.font };
+    return { ok: true, busy: s.busy, mode: s.mode, font: s.font, epoch: s.epoch };
   }
 
   // Returns true when the request was handled.

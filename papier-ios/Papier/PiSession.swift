@@ -18,6 +18,7 @@ private struct PiStateResponse: Decodable {
     let busy: Bool
     let mode: String
     let font: String
+    let epoch: Double?
     let events: [PiEvent]?
 }
 
@@ -37,6 +38,7 @@ final class PiSession: ObservableObject {
     var onSeqChanged: (() -> Void)?  // pi inserted a note page
 
     private var since = 0
+    private var epoch: Double = 0
     private var pollTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
 
@@ -57,6 +59,12 @@ final class PiSession: ObservableObject {
 
     private func apply(_ st: PiStateResponse?) {
         guard let st else { return }
+        // The service restarted: its event ids started over — reset the
+        // cursor or we would silently filter every new event out.
+        if let e = st.epoch, e != epoch {
+            epoch = e
+            since = 0
+        }
         busy = st.busy
         mode = st.mode
         font = st.font
