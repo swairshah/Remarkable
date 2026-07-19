@@ -81,6 +81,9 @@ ssh "$HOST" '
 
 echo "[deploy-server] build + ship papier remote-pi (cloud-canvas + session service)"
 (cd "$HERE/../papier" && cargo build --release --bin cloud_canvas --target x86_64-unknown-linux-musl >/dev/null)
+# papier-upload spawns cloud-canvas as a child; overwriting the binary while
+# it runs fails with ETXTBSY, so stop the service first (restarted below).
+ssh "$HOST" 'sudo systemctl stop papier-upload 2>/dev/null || true'
 scp -q "$HERE/../papier"/target/x86_64-unknown-linux-musl/release/cloud_canvas "$HOST:bin/papier-cloud-canvas"
 scp -q "$PAPIER_SERVER"/bin/papier-pi-sessions.js "$PAPIER_SERVER"/bin/papier-cloud-prompt.md \
   "$HERE/../papier"/ext/papier-canvas.ts "$HOST:bin/"
