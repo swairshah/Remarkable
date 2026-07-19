@@ -17,14 +17,21 @@ struct PatchLayer: View {
     private static let drawInSeconds: Double = 1.4
 
     var body: some View {
-        if animateIds.isEmpty {
-            canvas(progress: 1)
-        } else {
-            TimelineView(.animation) { timeline in
-                let elapsed = timeline.date.timeIntervalSince(animateStart)
-                canvas(progress: min(1, max(0, elapsed / Self.drawInSeconds)))
+        Group {
+            if animateIds.isEmpty {
+                canvas(progress: 1)
+            } else {
+                TimelineView(.animation) { timeline in
+                    let elapsed = timeline.date.timeIntervalSince(animateStart)
+                    canvas(progress: min(1, max(0, elapsed / Self.drawInSeconds)))
+                }
             }
         }
+        // Makes "pi ink is actually on the visible page" testable instead
+        // of treating a successful HTTP request as success.
+        .accessibilityElement(children: .ignore)
+        .accessibilityIdentifier("pi-patch-layer")
+        .accessibilityValue("\(patches.count)")
     }
 
     private func canvas(progress: Double) -> some View {

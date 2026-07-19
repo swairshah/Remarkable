@@ -39,6 +39,7 @@ final class PiSession: ObservableObject {
     var onPatch: ((Int) -> Void)?    // page (1-based) got new pi ink
     var onGoto: ((Int) -> Void)?     // pi turned to page (1-based)
     var onSeqChanged: (() -> Void)?  // pi inserted a note page
+    var onTurnEnd: (() -> Void)?     // final guaranteed refresh
 
     private var since = 0
     private var epoch: Double = 0
@@ -78,7 +79,9 @@ final class PiSession: ObservableObject {
             case "goto": if let p = ev.page { onGoto?(p) }
             case "seq": onSeqChanged?()
             case "notice": if let t = ev.text, !t.isEmpty { show(toast: t) }
-            case "turn": busy = (ev.state == "start")
+            case "turn":
+                busy = (ev.state == "start")
+                if ev.state == "end" { onTurnEnd?() }
             default: break
             }
         }
@@ -101,7 +104,9 @@ final class PiSession: ObservableObject {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                let interval: Double = self.busy ? 2.0 : 5.0
+                // A half-second busy poll makes generated ink feel live.
+                // Idle polling stays light; nudge() flips busy immediately.
+                let interval: Double = self.busy ? 0.5 : 1.5
                 self.apply(await self.call("events?id=\(self.docId)&since=\(self.since)", method: "GET"))
                 try? await Task.sleep(for: .seconds(interval))
             }

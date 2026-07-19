@@ -19,7 +19,10 @@ struct DocumentView: View {
     @State private var fingerDraws = false
     @State private var askGoTo = false
     @State private var goToText = ""
-    @State private var models: [String: PageModel] = [:]
+    // Synchronous identity cache: the page onscreen and pi's event handler
+    // MUST share the exact same PageModel. An async @State insertion here
+    // used to create twins; pi refreshed the hidden twin and nothing appeared.
+    @StateObject private var models = PageModelCache()
     @StateObject private var hub = CanvasHub()
     @StateObject private var pi: PiSession
 
@@ -32,13 +35,11 @@ struct DocumentView: View {
     }
 
     private func model(for entry: SeqEntry) -> PageModel {
-        if let m = models[entry.inkKey] { return m }
-        let m = PageModel(doc: doc, entry: entry, store: store)
+        let m = models.model(doc: doc, entry: entry, store: store)
         m.onSaved = { [weak pi] in
             // the debounced save just landed — that IS the writing pause
             if let i = seq.firstIndex(of: entry) { pi?.pause(page: i + 1) }
         }
-        DispatchQueue.main.async { models[entry.inkKey] = m }
         return m
     }
 
@@ -129,8 +130,18 @@ struct DocumentView: View {
         pi.serverRoot = store.serverRoot.trimmingCharacters(in: .whitespaces)
         pi.onPatch = { page in
             guard page >= 1, page <= seq.count else { return }
-            let key = seq[page - 1].inkKey
-            Task { await models[key]?.refreshPatches() }
+            let entry = seq[page - 1]
+            // model(...) is identity-stable even if the page was not
+            // previously materialized, so a patch event cannot be lost.
+            let pageModel = models.model(doc: doc, entry: entry, store: store)
+            Task { await pageModel.refreshPatches() }
+        }
+        pi.onTurnEnd = {
+            // Belt-and-suspenders: a patch event and a turn-end both pull
+            // the active page. This makes old server/event cursors harmless.
+            guard index >= 0, index < seq.count else { return }
+            let pageModel = models.model(doc: doc, entry: seq[index], store: store)
+            Task { await pageModel.refreshPatches() }
         }
         pi.onGoto = { page in
             guard page >= 1, page <= seq.count else { return }
@@ -245,6 +256,21 @@ struct DocumentView: View {
 }
 
 // MARK: - one page
+
+@MainActor
+private final class PageModelCache: ObservableObject {
+    private var storage: [String: PageModel] = [:]
+
+    func model(doc: PapierDoc, entry: SeqEntry, store: LibraryStore) -> PageModel {
+        if let existing = storage[entry.inkKey] { return existing }
+        let created = PageModel(doc: doc, entry: entry, store: store)
+        storage[entry.inkKey] = created
+        return created
+    }
+
+    subscript(key: String) -> PageModel? { storage[key] }
+    var values: Dictionary<String, PageModel>.Values { storage.values }
+}
 
 private struct PageScreen: View {
     let doc: PapierDoc

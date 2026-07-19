@@ -106,7 +106,9 @@ final class PageModel: ObservableObject {
         saveGeneration += 1
         let gen = saveGeneration
         Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2.5))
+            // React shortly after the pencil lifts; 2.5s made auto-pi feel
+            // broken before the model had even been called.
+            try? await Task.sleep(for: .seconds(0.8))
             guard let self, self.saveGeneration == gen else { return }
             await self.flush()
         }

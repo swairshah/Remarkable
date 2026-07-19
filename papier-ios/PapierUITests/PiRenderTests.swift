@@ -30,12 +30,27 @@ final class PiRenderTests: XCTestCase {
         app.buttons["rail-goto"].tap()
         let field = app.textFields.firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.typeText("2")
+        field.typeText("4")
         app.buttons["Go"].tap()
-        sleep(2)
-        XCTAssertTrue(app.staticTexts["2 / 3"].waitForExistence(timeout: 5), "goto lands on page 2")
+        XCTAssertTrue(app.staticTexts["4 / 4"].waitForExistence(timeout: 5), "goto lands on page 4")
 
-        sleep(4)   // ink + patch layer render
+        // Outcome assertion, not transport assertion: pi's actual patches
+        // must be attached to the visible page model and render onscreen.
+        let layer = app.otherElements["pi-patch-layer"]
+        XCTAssertTrue(layer.waitForExistence(timeout: 10), "pi patch layer rendered")
+        let before = layer.value as? String
+        XCTAssertNotEqual(before, "0", "visible page contains pi ink")
+
+        // End-to-end regression for the bug the user saw: nudge a real
+        // resident pi and require the VISIBLE layer's count to increase.
+        app.buttons["rail-nudge"].tap()
+        let changed = NSPredicate { object, _ in
+            (object as? XCUIElement)?.value as? String != before
+        }
+        expectation(for: changed, evaluatedWith: layer)
+        waitForExpectations(timeout: 40)
+
+        sleep(2)   // animation settles before artifact
         // deterministic artifact: the simulator shares the host filesystem
         try XCUIScreen.main.screenshot().pngRepresentation
             .write(to: URL(fileURLWithPath: "/tmp/papier-pi-render.png"))
