@@ -27,6 +27,8 @@ targets:
       path: Papier/Info.plist
       properties:
         CFBundleDisplayName: Papier
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
