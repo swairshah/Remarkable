@@ -17,6 +17,10 @@ final class PageModel: ObservableObject {
 
     @Published var patchesImage: UIImage?
     @Published var initialDrawing: PKDrawing?
+    /// Bumped ONLY when initialDrawing is genuinely (re)built (load/rescale):
+    /// the canvas adopts a pushed drawing solely on epoch change, so user
+    /// edits are never clobbered by unrelated SwiftUI refreshes.
+    @Published var drawingEpoch = 0
     @Published var sync: SyncState = .loading
 
     private(set) var scale: CGFloat = 0
@@ -47,6 +51,7 @@ final class PageModel: ObservableObject {
         initialDrawing = PencilBridge.drawing(from: base, scale: scale)
         latestDrawing = initialDrawing ?? PKDrawing()
         patchesImage = PencilBridge.patchesImage(page: base, pageSize: pageSize, scale: scale)
+        drawingEpoch += 1
         sync = .clean
     }
 
@@ -61,6 +66,7 @@ final class PageModel: ObservableObject {
         initialDrawing = PencilBridge.drawing(from: current, scale: scale)
         latestDrawing = initialDrawing ?? PKDrawing()
         patchesImage = PencilBridge.patchesImage(page: current, pageSize: pageSize, scale: scale)
+        drawingEpoch += 1
     }
 
     // MARK: - saving

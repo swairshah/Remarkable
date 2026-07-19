@@ -36,6 +36,8 @@ struct SettingsView: View {
                     if let testResult {
                         Text(testResult).font(.footnote)
                     }
+                } footer: {
+                    Text("Papier \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"))")
                 }
             }
             .navigationTitle("Settings")

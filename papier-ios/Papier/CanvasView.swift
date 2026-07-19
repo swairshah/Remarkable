@@ -18,6 +18,7 @@ final class CanvasHub: ObservableObject {
 
 struct CanvasView: UIViewRepresentable {
     let initialDrawing: PKDrawing
+    let epoch: Int          // bumps only on genuine (re)load — see PageModel
     let tool: CanvasTool
     let fingerDraws: Bool
     let isActive: Bool
@@ -41,9 +42,10 @@ struct CanvasView: UIViewRepresentable {
     func updateUIView(_ canvas: PKCanvasView, context: Context) {
         apply(to: canvas)
         if isActive { hub.activeCanvas = canvas }
-        // Adopt a rebuilt drawing (rescale) without echoing it as an edit.
-        if context.coordinator.lastPushed != initialDrawing {
-            context.coordinator.lastPushed = initialDrawing
+        // Adopt a rebuilt drawing ONLY on a load/rescale epoch change —
+        // never on ordinary SwiftUI refreshes, which would wipe user edits.
+        if context.coordinator.lastEpoch != epoch {
+            context.coordinator.lastEpoch = epoch
             context.coordinator.programmatic = true
             canvas.drawing = initialDrawing
             context.coordinator.programmatic = false
@@ -59,22 +61,21 @@ struct CanvasView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onChanged: onChanged, lastPushed: initialDrawing)
+        Coordinator(onChanged: onChanged, lastEpoch: epoch)
     }
 
     final class Coordinator: NSObject, PKCanvasViewDelegate {
         let onChanged: (PKDrawing) -> Void
         var programmatic = false
-        var lastPushed: PKDrawing
+        var lastEpoch: Int
 
-        init(onChanged: @escaping (PKDrawing) -> Void, lastPushed: PKDrawing) {
+        init(onChanged: @escaping (PKDrawing) -> Void, lastEpoch: Int) {
             self.onChanged = onChanged
-            self.lastPushed = lastPushed
+            self.lastEpoch = lastEpoch
         }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             guard !programmatic else { return }
-            lastPushed = canvasView.drawing
             onChanged(canvasView.drawing)
         }
     }

@@ -201,6 +201,7 @@ private struct PageScreen: View {
             }
             if let drawing = model.initialDrawing {
                 CanvasView(initialDrawing: drawing,
+                           epoch: model.drawingEpoch,
                            tool: tool,
                            fingerDraws: fingerDraws,
                            isActive: active,
