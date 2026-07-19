@@ -159,6 +159,91 @@ function setOrigCrop(docDir) {
   } catch (_) {}
 }
 
+/* ---- papier-ios write-back (iPad ink -> inbound -> tablet pull) -------- */
+// Every write lands in the INBOUND tree, never the mirror: the tablet's
+// next pull rsyncs it into ~/.local/share/papier/docs/<id>/ (per-file
+// last-writer-wins, the "editable later" hook from SYNC_PLAN.md), and the
+// push after that folds it back into the mirror for every viewer.
+
+function docExists(id) {
+  return fs.existsSync(path.join(BACKUP, 'papier', 'docs', id, 'meta.json'))
+      || fs.existsSync(path.join(DOCS, id, 'meta.json'));
+}
+
+function writeAtomically(dst, data) {
+  const tmp = dst + '.tmp';
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, dst);
+}
+
+// POST /ink?id=<doc>&file=note-0001.json — body is the FULL page ink file
+// (v/next_patch/next_stroke/strokes/patches, libreink-page schema). Papier
+// heals foreign stroke ids on load, so the iPad may number strokes freely.
+function handleInkWrite(req, res, id, file) {
+  id = safeId(id);
+  if (!id) return json(res, 400, { ok: false, error: 'bad id' });
+  if (!/^(?:pdf|note)-\d{4}\.json$/.test(file || '')) return json(res, 400, { ok: false, error: 'bad ink filename' });
+  if (!docExists(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
+  readBody(req, res, (buf) => {
+    let page;
+    try { page = JSON.parse(buf.toString('utf8')); } catch (_) { return json(res, 400, { ok: false, error: 'not JSON' }); }
+    if (!page || page.v !== 1 || !Array.isArray(page.strokes) || !Array.isArray(page.patches))
+      return json(res, 400, { ok: false, error: 'not a page ink file' });
+    try {
+      const dir = path.join(DOCS, id, 'ink');
+      fs.mkdirSync(dir, { recursive: true });
+      writeAtomically(path.join(dir, file), JSON.stringify(page));
+    } catch (e) { return json(res, 500, { ok: false, error: String(e) }); }
+    console.log('ink write', id, file, `${page.strokes.length} strokes`);
+    json(res, 200, { ok: true });
+  });
+}
+
+// POST /state?id=<doc> — body is a full state.json (seq/pos/next_note).
+// Used by the iPad only after it appends a note page to a document.
+function handleStateWrite(req, res, id) {
+  id = safeId(id);
+  if (!id) return json(res, 400, { ok: false, error: 'bad id' });
+  if (!docExists(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
+  readBody(req, res, (buf) => {
+    let state;
+    try { state = JSON.parse(buf.toString('utf8')); } catch (_) { return json(res, 400, { ok: false, error: 'not JSON' }); }
+    if (!state || !Array.isArray(state.seq) || !state.seq.every((e) => e && (Number.isInteger(e.p) || Number.isInteger(e.n))))
+      return json(res, 400, { ok: false, error: 'not a state file' });
+    try {
+      fs.mkdirSync(path.join(DOCS, id), { recursive: true });
+      writeAtomically(path.join(DOCS, id, 'state.json'), JSON.stringify(state));
+    } catch (e) { return json(res, 500, { ok: false, error: String(e) }); }
+    console.log('state write', id, `${state.seq.length} entries`);
+    json(res, 200, { ok: true });
+  });
+}
+
+// POST /notebook — body {title} -> a fresh notebook bundle in inbound with
+// one blank page. Fresh id (slug de-collided), so it never clobbers a doc.
+function handleNotebookCreate(req, res) {
+  readBody(req, res, (buf) => {
+    let body;
+    try { body = JSON.parse(buf.toString('utf8') || '{}'); } catch (_) { body = {}; }
+    const title = (typeof body.title === 'string' && body.title.trim())
+      ? body.title.trim().slice(0, 120) : 'Notebook (iPad)';
+    const dir = freeDir(slugify(title) || 'notebook');
+    const id = path.basename(dir);
+    try {
+      fs.mkdirSync(path.join(dir, 'ink'), { recursive: true });
+      writeAtomically(path.join(dir, 'meta.json'), JSON.stringify({
+        created: Math.floor(Date.now() / 1000), folder: '', kind: 'notebook', title, v: 1,
+      }));
+      writeAtomically(path.join(dir, 'state.json'), JSON.stringify({ next_note: 2, pos: 0, seq: [{ n: 1 }] }));
+      writeAtomically(path.join(dir, 'ink', 'note-0001.json'), JSON.stringify({
+        v: 1, next_patch: 1, next_stroke: 1, strokes: [], patches: [],
+      }));
+    } catch (e) { return json(res, 500, { ok: false, error: String(e) }); }
+    console.log('created notebook', id, `"${title}"`);
+    json(res, 200, { ok: true, id });
+  });
+}
+
 /* ---- POST /upload ----------------------------------------------------- */
 function handleUpload(req, res) {
   const name = String(req.headers['x-filename'] || 'upload.pdf').slice(0, 200);
@@ -555,6 +640,9 @@ http.createServer((req, res) => {
   if ((req.method === 'GET' || req.method === 'HEAD') && p === '/source-pdf') return handleSourcePdf(req, res, u.searchParams.get('id'), u.searchParams.get('v'));
   if (req.method === 'POST' && p === '/compose') return handleCompose(req, res);
   if (req.method === 'GET' && p === '/compose-status') return handleComposeStatus(res, u.searchParams.get('job'));
+  if (req.method === 'POST' && p === '/ink') return handleInkWrite(req, res, u.searchParams.get('id'), u.searchParams.get('file'));
+  if (req.method === 'POST' && p === '/state') return handleStateWrite(req, res, u.searchParams.get('id'));
+  if (req.method === 'POST' && p === '/notebook') return handleNotebookCreate(req, res);
   if (req.method === 'POST' && p === '/upload') return handleUpload(req, res);
   if (req.method === 'POST' && p === '/attach') return handleAttach(req, res);
   if (req.method === 'POST' && p === '/render') return handleRender(req, res);
