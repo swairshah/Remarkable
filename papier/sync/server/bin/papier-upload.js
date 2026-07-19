@@ -275,6 +275,34 @@ function handlePatchErase(res, id, file, patchId) {
   json(res, 200, { ok: true });
 }
 
+// POST /patch-move?id=&file=&patch=N&dx=&dy= — the user lasso-moved one of
+// pi's patches (page units). Translates every stroke point and text run.
+function handlePatchMove(res, id, file, patchId, dx, dy) {
+  id = safeId(id);
+  const pid = Number(patchId);
+  dx = Number(dx); dy = Number(dy);
+  if (!id || !/^(?:pdf|note)-\d{4}\.json$/.test(file || '') || !Number.isInteger(pid)
+      || !Number.isFinite(dx) || !Number.isFinite(dy))
+    return json(res, 400, { ok: false, error: 'bad request' });
+  let page;
+  try { page = JSON.parse(fs.readFileSync(effectiveInkPath(id, file), 'utf8')); }
+  catch (_) { return json(res, 404, { ok: false, error: 'no ink file' }); }
+  const patch = (page.patches || []).find((p) => p.id === pid);
+  if (!patch) return json(res, 404, { ok: false, error: 'no such patch' });
+  const dxi = Math.round(dx * 10), dyi = Math.round(dy * 10);
+  for (const s of patch.strokes || []) {
+    for (let i = 0; i + 2 < s.p.length; i += 3) { s.p[i] += dxi; s.p[i + 1] += dyi; }
+  }
+  for (const t of patch.texts || []) { t.x += dxi; t.y += dyi; }
+  try {
+    const dir = path.join(DOCS, id, 'ink');
+    fs.mkdirSync(dir, { recursive: true });
+    writeAtomically(path.join(dir, file), JSON.stringify(page));
+  } catch (e) { return json(res, 500, { ok: false, error: String(e) }); }
+  console.log('patch move', id, file, '#' + pid, dxi / 10, dyi / 10);
+  json(res, 200, { ok: true });
+}
+
 // POST /notebook — body {title} -> a fresh notebook bundle in inbound with
 // one blank page. Fresh id (slug de-collided), so it never clobbers a doc.
 function handleNotebookCreate(req, res) {
@@ -704,6 +732,7 @@ http.createServer((req, res) => {
   if (req.method === 'POST' && p === '/state') return handleStateWrite(req, res, u.searchParams.get('id'));
   if (req.method === 'POST' && p === '/notebook') return handleNotebookCreate(req, res);
   if (req.method === 'POST' && p === '/patch-erase') return handlePatchErase(res, u.searchParams.get('id'), u.searchParams.get('file'), u.searchParams.get('patch'));
+  if (req.method === 'POST' && p === '/patch-move') return handlePatchMove(res, u.searchParams.get('id'), u.searchParams.get('file'), u.searchParams.get('patch'), u.searchParams.get('dx'), u.searchParams.get('dy'));
   if (req.method === 'POST' && p === '/upload') return handleUpload(req, res);
   if (req.method === 'POST' && p === '/attach') return handleAttach(req, res);
   if (req.method === 'POST' && p === '/render') return handleRender(req, res);

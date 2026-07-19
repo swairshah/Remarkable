@@ -15,7 +15,10 @@ struct DocumentView: View {
     @State private var seq: [SeqEntry]
     @State private var index: Int
     @State private var tool: CanvasTool = .pencil
+    @State private var eraserMode: EraserMode = .object
     @State private var fingerDraws = false
+    @State private var askGoTo = false
+    @State private var goToText = ""
     @State private var models: [String: PageModel] = [:]
     @StateObject private var hub = CanvasHub()
     @StateObject private var pi: PiSession
@@ -52,6 +55,7 @@ struct DocumentView: View {
                                    near: abs(i - index) <= 1,
                                    active: i == index,
                                    tool: tool,
+                                   eraserMode: eraserMode,
                                    fingerDraws: fingerDraws,
                                    hub: hub)
                             .tag(i)
@@ -85,11 +89,20 @@ struct DocumentView: View {
                 Text("\(index + 1) / \(seq.count)")
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.secondary)
-                if doc.isNotebook {
-                    Button { addPage() } label: { Image(systemName: "plus.square.on.square") }
-                        .help("Add a page after this one")
-                }
+                Button { addPage() } label: { Image(systemName: "plus.square.on.square") }
+                    .help("Insert a note page after this one")
             }
+        }
+        .alert("Go to page", isPresented: $askGoTo) {
+            TextField("1–\(seq.count)", text: $goToText)
+                .keyboardType(.numberPad)
+            Button("Go") {
+                if let n = Int(goToText), n >= 1, n <= seq.count {
+                    withAnimation { index = n - 1 }
+                }
+                goToText = ""
+            }
+            Button("Cancel", role: .cancel) { goToText = "" }
         }
         .onChange(of: index) { old, _ in
             UserDefaults.standard.set(index, forKey: "pos-\(doc.id)")
@@ -146,11 +159,16 @@ struct DocumentView: View {
 
     // papier's right-edge toolbar, reinterpreted as a floating rail.
     private var toolRail: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 12) {
             railButton("pencil", active: tool == .pencil) { tool = .pencil }
                 .accessibilityIdentifier("rail-pencil")
-            railButton("eraser", active: tool == .eraser) { tool = .eraser }
-                .accessibilityIdentifier("rail-eraser")
+            // eraser: tap to select; tap again to cycle Object -> Pixel -> Region
+            railButton(tool == .eraser ? eraserMode.symbol : "eraser", active: tool == .eraser) {
+                if tool == .eraser { eraserMode = eraserMode.next } else { tool = .eraser }
+            }
+            .accessibilityIdentifier("rail-eraser")
+            railButton("lasso", active: tool == .lasso) { tool = .lasso }
+                .accessibilityIdentifier("rail-lasso")
             railButton("hand.draw", active: fingerDraws) { fingerDraws.toggle() }
                 .accessibilityIdentifier("rail-finger")
             Divider().frame(width: 22)
@@ -159,6 +177,15 @@ struct DocumentView: View {
             }
             railButton("arrow.uturn.forward", active: false) {
                 hub.activeCanvas?.undoManager?.redo()
+            }
+            Divider().frame(width: 22)
+            railButton("chevron.up", active: false) {
+                if index > 0 { withAnimation { index -= 1 } }
+            }
+            railButton("number", active: false) { askGoTo = true }
+                .accessibilityIdentifier("rail-goto")
+            railButton("chevron.down", active: false) {
+                if index < seq.count - 1 { withAnimation { index += 1 } }
             }
             Divider().frame(width: 22)
             // pi: busy dot / nudge / quiet toggle / pi's writing face
@@ -222,15 +249,22 @@ private struct PageScreen: View {
     let near: Bool
     let active: Bool
     let tool: CanvasTool
+    let eraserMode: EraserMode
     let fingerDraws: Bool
     let hub: CanvasHub
 
     @EnvironmentObject private var store: LibraryStore
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("paperTone") private var paperToneRaw = PaperTone.paper.rawValue
+    @State private var selection: InkSelection?
 
     private var paper: Color {
         (PaperTone(rawValue: paperToneRaw) ?? .paper).color(dark: colorScheme == .dark)
+    }
+
+    /// A capture overlay owns the touches while lassoing or region-erasing.
+    private var capturing: Bool {
+        active && ((tool == .lasso && selection == nil) || (tool == .eraser && eraserMode == .region))
     }
 
     var body: some View {
@@ -245,10 +279,10 @@ private struct PageScreen: View {
                         .frame(width: fit.width, height: fit.height)
                         .background(paper)
                         .shadow(color: .black.opacity(0.14), radius: 8, y: 2)
-                        // eraser tool + a tap on pi's ink -> erase that patch
-                        // (simultaneous: does not steal the canvas's touches)
+                        // eraser (object/pixel) + a tap on pi's ink -> erase
+                        // that patch (simultaneous: canvas keeps its touches)
                         .simultaneousGesture(SpatialTapGesture().onEnded { v in
-                            if tool == .eraser { model.erasePatch(at: v.location) }
+                            if tool == .eraser && eraserMode != .region { model.erasePatch(at: v.location) }
                         })
                         .task(id: fit.width) {
                             await model.load(displayWidth: fit.width)
@@ -257,6 +291,7 @@ private struct PageScreen: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onChange(of: tool) { _, _ in selection = nil }
         }
     }
 
@@ -282,14 +317,98 @@ private struct PageScreen: View {
                 CanvasView(initialDrawing: drawing,
                            epoch: model.drawingEpoch,
                            tool: tool,
+                           eraserMode: eraserMode,
                            fingerDraws: fingerDraws,
+                           interactionEnabled: !capturing && selection == nil,
                            isActive: active,
                            hub: hub,
                            onChanged: { model.drawingChanged($0) })
             } else {
                 ProgressView()
             }
+            if capturing {
+                CaptureView(dashed: true) { poly in
+                    if tool == .lasso { lassoCompleted(poly) } else { regionErase(poly) }
+                }
+            }
+            if let sel = selection {
+                selectionOverlay(sel)
+            }
         }
+    }
+
+    // MARK: - lasso
+
+    private func lassoCompleted(_ poly: [CGPoint]) {
+        let drawing = model.currentDrawing
+        let strokes = InkGeometry.strokesInside(drawing, poly: poly)
+        let patches = InkGeometry.patchesInside(model.patches, poly: poly, scale: model.scale)
+        guard !strokes.isEmpty || !patches.isEmpty else { return }
+        selection = InkSelection(strokeIndices: strokes, patchIds: patches,
+                                 bbox: InkGeometry.bounds(of: poly))
+    }
+
+    private func regionErase(_ poly: [CGPoint]) {
+        let drawing = model.currentDrawing
+        let doomed = Set(InkGeometry.strokesInside(drawing, poly: poly))
+        if !doomed.isEmpty {
+            let kept = drawing.strokes.enumerated().filter { !doomed.contains($0.offset) }.map(\.element)
+            model.setDrawing(PKDrawing(strokes: kept))
+        }
+        model.erasePatches(ids: InkGeometry.patchesInside(model.patches, poly: poly, scale: model.scale))
+    }
+
+    private func selectionOverlay(_ sel: InkSelection) -> some View {
+        let rect = sel.bbox.offsetBy(dx: sel.offset.width, dy: sel.offset.height)
+        return ZStack(alignment: .topTrailing) {
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+                .gesture(
+                    DragGesture()
+                        .onChanged { v in selection?.offset = v.translation }
+                        .onEnded { v in applyMove(v.translation) }
+                )
+            HStack(spacing: 10) {
+                Button { deleteSelection() } label: {
+                    Image(systemName: "trash").font(.system(size: 15, weight: .medium))
+                }
+                Button { selection = nil } label: {
+                    Image(systemName: "xmark").font(.system(size: 15, weight: .medium))
+                }
+            }
+            .padding(8)
+            .background(.regularMaterial, in: Capsule())
+            .position(x: rect.midX, y: max(22, rect.minY - 26))
+        }
+    }
+
+    private func applyMove(_ delta: CGSize) {
+        guard let sel = selection, delta != .zero else { selection?.offset = .zero; return }
+        if !sel.strokeIndices.isEmpty {
+            var strokes = model.currentDrawing.strokes
+            let t = CGAffineTransform(translationX: delta.width, y: delta.height)
+            for i in sel.strokeIndices where i < strokes.count {
+                strokes[i].transform = strokes[i].transform.concatenating(t)
+            }
+            model.setDrawing(PKDrawing(strokes: strokes))
+        }
+        model.movePatches(ids: sel.patchIds, by: delta)
+        selection = nil
+    }
+
+    private func deleteSelection() {
+        guard let sel = selection else { return }
+        if !sel.strokeIndices.isEmpty {
+            let doomed = Set(sel.strokeIndices)
+            let kept = model.currentDrawing.strokes.enumerated()
+                .filter { !doomed.contains($0.offset) }.map(\.element)
+            model.setDrawing(PKDrawing(strokes: kept))
+        }
+        model.erasePatches(ids: sel.patchIds)
+        selection = nil
     }
 
     private func fittedSize(in container: CGSize) -> CGSize {

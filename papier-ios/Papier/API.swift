@@ -91,6 +91,11 @@ struct PapierClient {
         try await post("/patch-erase?id=\(docId)&file=\(file)&patch=\(patchId)", body: Data())
     }
 
+    /// Lasso-move one of pi's patches (page-unit delta).
+    func movePatch(docId: String, file: String, patchId: UInt64, dx: CGFloat, dy: CGFloat) async throws {
+        try await post("/patch-move?id=\(docId)&file=\(file)&patch=\(patchId)&dx=\(dx)&dy=\(dy)", body: Data())
+    }
+
     func createNotebook(title: String) async throws -> String {
         guard let url = URL(string: api + "/notebook") else { throw PapierAPIError(message: "bad server URL") }
         var req = URLRequest(url: url)

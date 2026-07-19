@@ -5,9 +5,33 @@
 import PencilKit
 import SwiftUI
 
+/// The rubber's behavior — papier's three modes (toolbar.rs EraserMode).
+enum EraserMode: String, CaseIterable {
+    case object   // whole strokes vanish at a touch
+    case pixel    // only what the rubber covers is removed
+    case region   // circle a region; on lift everything inside goes
+
+    var next: EraserMode {
+        switch self {
+        case .object: return .pixel
+        case .pixel: return .region
+        case .region: return .object
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .object: return "eraser"
+        case .pixel: return "eraser.line.dashed"
+        case .region: return "circle.dashed"
+        }
+    }
+}
+
 enum CanvasTool: Equatable {
     case pencil
     case eraser
+    case lasso
 }
 
 /// The document view's handle on whichever page canvas is active, for
@@ -20,7 +44,10 @@ struct CanvasView: UIViewRepresentable {
     let initialDrawing: PKDrawing
     let epoch: Int          // bumps only on genuine (re)load — see PageModel
     let tool: CanvasTool
+    let eraserMode: EraserMode
     let fingerDraws: Bool
+    /// false while a capture overlay (lasso / region erase) owns the touches
+    let interactionEnabled: Bool
     let isActive: Bool
     let hub: CanvasHub
     let onChanged: (PKDrawing) -> Void
@@ -58,9 +85,18 @@ struct CanvasView: UIViewRepresentable {
 
     private func apply(to canvas: PKCanvasView) {
         canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
+        canvas.isUserInteractionEnabled = interactionEnabled
         switch tool {
-        case .pencil: canvas.tool = PencilBridge.pencilTool()
-        case .eraser: canvas.tool = PKEraserTool(.vector)
+        case .pencil:
+            canvas.tool = PencilBridge.pencilTool()
+        case .eraser:
+            switch eraserMode {
+            case .object: canvas.tool = PKEraserTool(.vector)
+            case .pixel: canvas.tool = PKEraserTool(.bitmap, width: 14)
+            case .region: canvas.tool = PKEraserTool(.vector) // overlay captures instead
+            }
+        case .lasso:
+            canvas.tool = PencilBridge.pencilTool() // overlay captures instead
         }
     }
 

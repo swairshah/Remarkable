@@ -143,6 +143,56 @@ final class PageModel: ObservableObject {
         Task { await flush() }
     }
 
+    // MARK: - lasso / region edits
+
+    /// Programmatic canvas replacement (lasso move / region erase of user
+    /// strokes): push the drawing, mark dirty, schedule the save.
+    func setDrawing(_ drawing: PKDrawing) {
+        initialDrawing = drawing
+        latestDrawing = drawing
+        drawingEpoch += 1
+        drawingChanged(drawing)
+    }
+
+    var currentDrawing: PKDrawing { latestDrawing }
+
+    /// Erase a set of pi patches (local + server).
+    func erasePatches(ids: [UInt64]) {
+        guard !ids.isEmpty else { return }
+        base.patches.removeAll { ids.contains($0.id) }
+        patches = base.patches
+        for id in ids {
+            Task {
+                try? await store.client.erasePatch(docId: doc.id, file: entry.inkKey + ".json", patchId: id)
+            }
+        }
+    }
+
+    /// Move a set of pi patches by a display-space delta (local + server).
+    func movePatches(ids: [UInt64], by delta: CGSize) {
+        guard !ids.isEmpty, scale > 0 else { return }
+        let dx = delta.width / scale, dy = delta.height / scale
+        for i in base.patches.indices where ids.contains(base.patches[i].id) {
+            for s in base.patches[i].strokes.indices {
+                for p in base.patches[i].strokes[s].points.indices {
+                    base.patches[i].strokes[s].points[p].x += dx
+                    base.patches[i].strokes[s].points[p].y += dy
+                }
+            }
+            for t in base.patches[i].texts.indices {
+                base.patches[i].texts[t].x += dx
+                base.patches[i].texts[t].y += dy
+            }
+        }
+        patches = base.patches
+        for id in ids {
+            Task {
+                try? await store.client.movePatch(docId: doc.id, file: entry.inkKey + ".json",
+                                                  patchId: id, dx: dx, dy: dy)
+            }
+        }
+    }
+
     // MARK: - erasing pi's ink (tablet parity: any ink is erasable)
 
     /// Hit-test a display-space point against pi's patches; erase the whole
