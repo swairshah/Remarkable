@@ -10,7 +10,8 @@ import SwiftUI
 
 @MainActor
 final class LibraryStore: ObservableObject {
-    @AppStorage("serverRoot") var serverRoot: String = "" {
+    // The papier VM (remarkable.exe.xyz) on the tailnet; editable in Settings.
+    @AppStorage("serverRoot") var serverRoot: String = "http://100.90.235.68:8000" {
         didSet { etag = nil }
     }
 

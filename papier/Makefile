@@ -31,7 +31,7 @@
 # One-time setup: rustup target add armv7-unknown-linux-musleabihf
 # Requires pi already on the tablet (../pi/pi-harness/install.sh).
 
-HOST ?= root@192.168.1.2
+HOST ?= root@192.168.0.16
 BIN := papier
 TARGET := armv7-unknown-linux-musleabihf
 BUILT := target/$(TARGET)/release/$(BIN)
