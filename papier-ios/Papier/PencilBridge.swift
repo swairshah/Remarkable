@@ -28,7 +28,11 @@ enum PencilBridge {
 
     private static func stroke(from s: InkStroke, scale: CGFloat) -> PKStroke {
         let color = s.gray == 0 ? inkBlack : UIColor(white: CGFloat(s.gray) / 255.0, alpha: 1)
-        let ink = PKInk(.pencil, color: color)
+        // Monoline: a crisp geometric stroke, matching how the tablet and the
+        // web viewer render this ink. (Pencil texture is for LIVE drawing
+        // only — imported strokes through the pencil brush look blotchy at
+        // the reMarkable's stroke widths.)
+        let ink = PKInk(.monoline, color: color)
         var points: [PKStrokePoint] = []
         points.reserveCapacity(max(s.points.count, 1))
         var t: TimeInterval = 0
