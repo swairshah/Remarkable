@@ -50,6 +50,9 @@ ssh "$HOST" '
   [ -d ~/remarkable-backup/alt-ui ]         && [ ! -d ~/remarkable-backup/papier ]         && mv ~/remarkable-backup/alt-ui ~/remarkable-backup/papier || true
   [ -d ~/remarkable-backup/alt-ui-inbound ] && [ ! -d ~/remarkable-backup/papier-inbound ] && mv ~/remarkable-backup/alt-ui-inbound ~/remarkable-backup/papier-inbound || true
   [ -d ~/notes-server/alt-ui ]              && [ ! -d ~/notes-server/papier ]              && mv ~/notes-server/alt-ui ~/notes-server/papier || true
+  for d in sources previews covers compose derived-pdf; do
+    [ -d ~/remarkable-backup/alt-ui-$d ] && [ ! -d ~/remarkable-backup/papier-$d ] && mv ~/remarkable-backup/alt-ui-$d ~/remarkable-backup/papier-$d || true
+  done
   sudo systemctl disable --now alt-ui-upload 2>/dev/null || true
   sudo rm -f /etc/systemd/system/alt-ui-upload.service
   sudo systemctl daemon-reload
