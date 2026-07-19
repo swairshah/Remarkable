@@ -1,3 +1,11 @@
+---
+title: Papier for iPad
+description: Architecture, build instructions, and VM-backed Pi interaction tracing for the Papier iOS app.
+tags:
+  - papier
+  - ios
+  - developer-tools
+---
 # Papier for iPad
 
 The papier UX on the iPad, talking to the same cloud as the tablet app
@@ -17,6 +25,25 @@ files round-trip libreink-page's exact ink JSON.
   strokes (papier heals foreign stroke ids), pi's patches render read-only
   in pi blue, exactly like the web viewer.
 
-Build: `xcodegen generate && open Papier.xcodeproj` (project.yml is the
-source of truth). UI test drives a real draw-and-sync pass against the
-cloud via `ssh -L 18000:127.0.0.1:8000 exedev@remarkable.exe.xyz`.
+## Build
+
+`xcodegen generate && open Papier.xcodeproj` (`project.yml` is the source of truth). The UI test drives a real draw-and-sync pass against the cloud via `ssh -L 18000:127.0.0.1:8000 exedev@remarkable.exe.xyz`.
+
+## Pi interaction traces
+
+The developer `Makefile` can pull the iOS → VM → Pi history and open the shared HTML timeline with notebook images, model responses, canvas tool calls, latency/token/cost metrics, Pi stderr, and the VM service journal:
+
+```bash
+# From the Remarkable repository root — all active document sessions
+make -C papier-ios trace
+
+# One document only
+make -C papier-ios trace DOC=ipad-sync-test
+```
+
+The generated viewer is `papier-ios/build/trace.html`. Override the SSH destination with `VM=user@host` when needed. For live logs:
+
+```bash
+make -C papier-ios log
+make -C papier-ios log-pi DOC=ipad-sync-test
+```
