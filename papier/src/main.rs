@@ -203,10 +203,13 @@ fn in_rect(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
     x >= rx && x < rx + rw && y >= ry && y < ry + rh
 }
 
-/// Brush radius for a pen frame: a fixed medium nib plus a little from
-/// real pressure (0..4095).
+/// Brush radius for a pen frame: a fine nib where most of the width comes
+/// from real pressure (0..4095). The gamma bend (>1) keeps light-handed
+/// writing slender — the iPad-like fluid feel — while pressing hard still
+/// reaches nearly the old maximum.  1.6..3.5 (was a flat-feeling 2.0..3.6).
 fn brush_r(pressure: i32) -> f32 {
-    2.0 + pressure as f32 / 4096.0 * 1.6
+    let p = (pressure as f32 / 4096.0).clamp(0.0, 1.0);
+    1.6 + p.powf(1.5) * 1.9
 }
 
 /* ---- settings ------------------------------------------------------------- */
