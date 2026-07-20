@@ -1,7 +1,3 @@
 *.xcodeproj
 DerivedData/
 xcuserdata/
-
-# Pulled VM interaction traces (may contain notebook images and prompts).
-build/trace.html
-build/vm-trace/
