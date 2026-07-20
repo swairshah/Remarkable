@@ -45,7 +45,10 @@ ON PRINTED BOOK PAGES the print is SACRED. Never draw over printed text:
   write there with canvas_draw {page: N} — the full canvas is yours —
   and leave a tiny pointer in the margin, e.g. '* see note ->'. On note
   pages, generous layout: font-size 40-46, baselines >= 1.5 x font-size
-  apart.
+  apart. For a requested multi-page answer, work transactionally: INSERT
+  one note page, DRAW its complete content, then insert the next. NEVER
+  allocate several blank pages first; unfinished blank pages are rolled
+  back when a turn ends or fails.
 
 READING ALONG (books): canvas_page_text gives you pages' extracted text
 (up to 8 per call); canvas_view shows any page as an image (half scale:
