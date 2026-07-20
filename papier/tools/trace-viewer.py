@@ -154,7 +154,11 @@ def render_session(path, out):
                 except ValueError:
                     pass
     header = entries[0] if entries and entries[0].get("type") == "session" else {}
-    out.append(f"<h1 id='{esc(os.path.basename(path))}'>session {esc(os.path.basename(path))}</h1>")
+    basename = os.path.basename(path)
+    session_anchor = re.sub(r"[^a-zA-Z0-9_-]+", "-", basename)
+    doc_label = basename.split("--", 1)[0] if "--" in basename else ""
+    heading = f"{doc_label} · " if doc_label else ""
+    out.append(f"<h1 id='{esc(session_anchor)}'>{esc(heading)}session {esc(basename)}</h1>")
     out.append(f"<div class='usage'>cwd {esc(header.get('cwd', '?'))} · {len(entries)} entries</div>")
 
     last_page_img = None   # data URI of the most recent page image pi was shown
@@ -185,8 +189,9 @@ def render_session(path, out):
         if role == "user":
             turn += 1
             pause_at = parse_ts(e)
-            anchor = f"t{turn}"
-            nav.append(f"<a href='#{anchor}'>#{turn} {ts}</a>")
+            anchor = f"{session_anchor}-t{turn}"
+            nav_label = f"{doc_label} #{turn} {ts}" if doc_label else f"#{turn} {ts}"
+            nav.append(f"<a href='#{anchor}'>{esc(nav_label)}</a>")
             out.append(f"<div class='turnhdr' id='{anchor}'>— pause #{turn} · {ts} —</div>")
             out.append("<div class='card user'><div class='role'>page → pi</div>")
             for b in content_blocks(msg.get("content")):
@@ -287,6 +292,7 @@ def render_metrics(path, out):
     if not turns and not tools:
         return
 
+    has_docs = any(r.get("doc") for r in turns)
     rows = []
     tot_cost = tot_in = tot_out = 0
     for r in turns:
@@ -295,8 +301,9 @@ def render_metrics(path, out):
         tot_cost += cost or 0
         tot_in += (r.get("in") or 0) + (r.get("cacheR") or 0)
         tot_out += r.get("out") or 0
+        doc_cell = f"<td>{esc(r.get('doc', ''))}</td>" if has_docs else ""
         rows.append(
-            f"<tr><td>{esc((r.get('ts') or '')[11:19])}</td><td><b>{lat}</b></td>"
+            f"<tr>{doc_cell}<td>{esc((r.get('ts') or '')[11:19])}</td><td><b>{lat}</b></td>"
             f"<td>{r.get('in', 0):,}</td><td>{r.get('cacheR', 0):,}</td>"
             f"<td>{r.get('out', 0):,}</td>"
             f"<td>{(r.get('sentBytes') or 0) / 1e6:.1f}MB / {r.get('sentImgs', 0)}img</td>"
@@ -315,12 +322,13 @@ def render_metrics(path, out):
         f"<td>{s[2] / 1000:.1f}s</td></tr>"
         for n, s in sorted(tool_stats.items(), key=lambda kv: -kv[1][1]))
 
+    doc_header = "<th>document</th>" if has_docs else ""
     out.append(
-        "<div class='card meta'><div class='role'>device metrics — per pi turn</div>"
+        "<div class='card meta'><div class='role'>pi metrics — per turn</div>"
         f"<div class='usage'>{len(turns)} turns · {tot_in:,} tok in (incl. cache) · "
         f"{tot_out:,} tok out · ${tot_cost:.4f}</div>"
         "<table style='border-collapse:collapse;font-size:12px;width:100%'>"
-        "<tr style='text-align:left;opacity:.6'><th>time</th><th>latency</th><th>in</th>"
+        f"<tr style='text-align:left;opacity:.6'>{doc_header}<th>time</th><th>latency</th><th>in</th>"
         "<th>cache</th><th>out</th><th>payload sent</th><th>cost</th><th>stop</th></tr>"
         f"{''.join(rows)}</table>"
         + (f"<details><summary>tool timings</summary><table style='border-collapse:collapse;font-size:12px'>"
@@ -343,7 +351,7 @@ def render_device_log(path, out):
             cls = " style='color:#b03232'"
         marked.append(f"<span{cls}>{esc(ln)}</span>")
     out.append(
-        "<div class='card meta'><div class='role'>device log — /tmp/reader.log "
+        f"<div class='card meta'><div class='role'>app / agent log — {esc(os.path.basename(path))} "
         f"(last {len(lines)} lines)</div><details open><summary>toggle</summary>"
         f"<pre style='max-height:340px;overflow:auto'>{chr(10).join(marked)}</pre>"
         "</details></div>")
@@ -352,6 +360,11 @@ def render_device_log(path, out):
 def main():
     args = [a for a in sys.argv[1:]]
     out_path = "trace.html"
+    title = "reader · pi traces"
+    if "--title" in args:
+        i = args.index("--title")
+        title = args[i + 1]
+        del args[i:i + 2]
     log_path = None
     if "-o" in args:
         i = args.index("-o")
@@ -387,7 +400,7 @@ def main():
             body.append("<hr class='sess'>")
         all_nav += render_session(f, body)
 
-    doc = (f"<!doctype html><meta charset='utf-8'><title>reader · pi traces</title>"
+    doc = (f"<!doctype html><meta charset='utf-8'><title>{esc(title)}</title>"
            f"<style>{CSS}</style>"
            f"<div class='nav'>{''.join(all_nav)}</div>"
            f"<div class='wrap'>{''.join(body)}</div>")

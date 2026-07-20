@@ -324,6 +324,83 @@ fn req_page(req: &Value, count: usize) -> Result<usize, Value> {
     }
 }
 
+/// Match the tablet's measured placement context: image understanding says
+/// what is written; these numbers tell pi where it can safely add ink.
+fn layout_hints(d: &DocView, entry: Entry, ink: &Page) -> String {
+    let mut s = match entry {
+        Entry::Pdf(p) => {
+            let words = d.words(p);
+            if words.is_empty() {
+                String::from("No printed-text geometry on this page. ")
+            } else {
+                let tx0 = words.iter().map(|w| w.x0).min().unwrap();
+                let tx1 = words.iter().map(|w| w.x1).max().unwrap();
+                let ty0 = words.iter().map(|w| w.y0).min().unwrap();
+                let ty1 = words.iter().map(|w| w.y1).max().unwrap();
+                let mut hs: Vec<i32> = words.iter().map(|w| (w.y1 - w.y0).clamp(8, 80)).collect();
+                hs.sort_unstable();
+                let lh = hs[hs.len() / 2];
+                let (left, right) = (tx0, SCREEN_W - tx1);
+                let (top, bottom) = (ty0, SCREEN_H - ty1);
+                let fs = ((lh * 9) / 10).clamp(24, 42);
+                let best = if right >= left && right >= 100 {
+                    format!("the RIGHT margin (x{}-{}) is your writing zone", tx1 + 12, SCREEN_W - 10)
+                } else if left > right && left >= 100 {
+                    format!("the LEFT margin (x10-{}) is your writing zone", tx0 - 12)
+                } else if bottom >= 140 {
+                    format!("margins are narrow — use the BOTTOM strip (y{}-{})", ty1 + 20, SCREEN_H - 16)
+                } else {
+                    "margins are narrow — prefer canvas_underline + a note page".to_string()
+                };
+                format!(
+                    "Printed block x{tx0}-{tx1}, y{ty0}-{ty1}; print line-height ~{lh}px. \
+                     Margins: left {left}px, right {right}px, top {top}px, bottom {bottom}px; \
+                     {best}. Write at font-size ~{fs} and keep lines short. "
+                )
+            }
+        }
+        Entry::Note(_) => String::new(),
+    };
+
+    let bands = ink.ink_bands();
+    if bands.is_empty() {
+        if s.is_empty() { s = "The page is blank — the full 1404x1872 canvas is yours.".into(); }
+        else { s.push_str("No ink on this page yet."); }
+        return s;
+    }
+
+    let mut rows: Vec<String> = bands.iter().map(|b| {
+        format!("y{}-{} (x{}-{}{})", b.y0, b.y1, b.x0, b.x1,
+                if b.user { "" } else { ", yours" })
+    }).collect();
+    if rows.len() > 12 {
+        let extra = rows.len() - 11;
+        rows.truncate(11);
+        rows.push(format!("and {extra} more"));
+    }
+    s.push_str(&format!("Ink rows: {}.", rows.join(", ")));
+
+    if matches!(entry, Entry::Note(_)) {
+        let mut free: Vec<String> = Vec::new();
+        if bands[0].y0 > 130 { free.push(format!("y0-{} (top)", bands[0].y0 - 24)); }
+        for pair in bands.windows(2) {
+            if pair[1].y0 - pair[0].y1 >= 96 {
+                free.push(format!("y{}-{}", pair[0].y1 + 24, pair[1].y0 - 24));
+            }
+        }
+        let last = bands.last().unwrap();
+        if last.y1 < SCREEN_H - 130 {
+            free.push(format!("y{}-{} (bottom)", last.y1 + 24, SCREEN_H - 24));
+        }
+        if !free.is_empty() { s.push_str(&format!(" Free bands (full width): {}.", free.join(", "))); }
+        if let Some(lh) = ink.user_line_height() {
+            let fs = (lh * 9 / 10).clamp(30, 90);
+            s.push_str(&format!(" User handwriting rows are ~{lh}px tall: write at font-size ~{fs} with ~{}px between baselines.", fs * 3 / 2));
+        }
+    }
+    s
+}
+
 fn default_font() -> PiFont {
     std::env::var("PAPIER_CLOUD_FONT")
         .ok()
@@ -347,6 +424,7 @@ fn handle(d: &DocView, req: &Value) -> Value {
             let idx = match req_page(req, count) { Ok(i) => i, Err(e) => return e };
             let e = seq[idx];
             let ink = d.load_ink(e);
+            let layout = layout_hints(d, e, &ink);
             let raster = match e {
                 Entry::Pdf(p) => d.load_raster(p),
                 Entry::Note(_) => None,
@@ -372,6 +450,7 @@ fn handle(d: &DocView, req: &Value) -> Value {
                 "image_scale": SNAP_DIV,
                 "png_base64": png::base64(&data),
                 "patches": patches,
+                "layout": layout,
             })
         }
         "draw" => {

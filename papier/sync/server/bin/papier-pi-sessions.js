@@ -35,7 +35,9 @@ const METRICS_EXT = process.env.PAPIER_METRICS_EXT || '/home/exedev/bin/papier-m
 const PROMPT_MD = process.env.PAPIER_PI_PROMPT || '/home/exedev/bin/papier-cloud-prompt.md';
 const PI_BIN = process.env.PI_BIN || 'pi';
 const PI_PROVIDER = process.env.PAPIER_PI_PROVIDER || 'openai-codex';
-const PI_MODEL = process.env.PAPIER_PI_MODEL || 'gpt-5.6-luna:low';
+// Use the exact user-selected Codex model. `:low` made the cloud companion
+// noticeably shallower than the tablet agent.
+const PI_MODEL = process.env.PAPIER_PI_MODEL || 'gpt-5.6-luna';
 const PI_HOME = process.env.PAPIER_PI_HOME || path.join(os.homedir(), 'papier-pi');
 const TURN_TIMEOUT_MS = 240_000;
 const IDLE_MS = 30 * 60_000;
@@ -151,6 +153,12 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     }
     // tools without an explicit page act on the iPad's current page
     const injected = { ...cmd };
+    // The font picker is authoritative. Models often copy an old explicit
+    // font-family="script" from session history, which otherwise overrides GA.
+    // Removing it makes cloud-canvas apply PAPIER_CLOUD_FONT consistently.
+    if (cmd.cmd === 'draw' && typeof injected.svg === 'string') {
+      injected.svg = injected.svg.replace(/\s+font-family\s*=\s*(["'])[^"']*\1/gi, '');
+    }
     if (injected.page == null && cmd.cmd !== 'insert_note' && cmd.cmd !== 'page_text') {
       injected.page = s.page;
     }
@@ -191,7 +199,7 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
 
   /* ---- pi turns --------------------------------------------------------- */
 
-  async function pauseMessage(s, page, kind) {
+  async function pauseMessage(s, page, kind, view) {
     const { meta, seq } = docState(s.id);
     const e = seq[page - 1] || {};
     const pageKind = e.p != null ? `a printed BOOK page (p.${e.p + 1} of the PDF)` : 'a NOTEBOOK page';
@@ -203,10 +211,15 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     const lead = kind === 'nudge'
       ? 'The user NUDGED you — they want you to engage with this page now.'
       : 'The user paused writing.';
+    const patches = Array.isArray(view && view.patches) && view.patches.length
+      ? view.patches.map((p) => `#${p.id} at ${JSON.stringify(p.bbox)}`).join(', ')
+      : 'none';
+    const layout = view && view.layout ? view.layout : 'Use the visible free space in the page image.';
     return (
       `${lead} They are on page ${page} of ${seq.length} of "${meta.title || s.id}" — ${pageKind}. ` +
       `The attached image is the current page at half scale (multiply image coordinates by 2 ` +
-      `for page coordinates); your earlier ink appears gray.${text}`
+      `for page coordinates); your earlier ink appears gray.${text}\n\n` +
+      `Your existing patches here: ${patches}. Measured layout (page coordinates — trust these numbers): ${layout}`
     );
   }
 
@@ -229,8 +242,10 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     // (the user's Codex subscription) even on resume.
     // :low thinking — margin notes, not dissertations; keeps turns snappy.
     args.push('--provider', PI_PROVIDER, '--model', PI_MODEL);
-    if (fs.existsSync(METRICS_EXT)) args.push('-e', METRICS_EXT);
+    // Context hooks run in extension order. Transcription must compact page
+    // images before metrics observes the payload, matching the tablet path.
     if (fs.existsSync(TRANSCRIBE_EXT)) args.push('-e', TRANSCRIBE_EXT);
+    if (fs.existsSync(METRICS_EXT)) args.push('-e', METRICS_EXT);
     if (resumed) args.push('--continue');
 
     const child = spawn(PI_BIN, args, {
@@ -335,7 +350,7 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     s.page = page;
     try {
       const view = await canvasCall(s, { cmd: 'view', page });
-      const msg = await pauseMessage(s, page, kind);
+      const msg = await pauseMessage(s, page, kind, view);
       const child = ensurePi(s);
       const prompt = { type: 'prompt', message: msg };
       if (view && view.ok) {
@@ -359,6 +374,8 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     let s = sessions.get(id);
     if (s) { s.lastUsed = Date.now(); return s; }
     const key = id.replace(/[^a-z0-9-]/g, '').slice(0, 40) || 'doc';
+    const prefsFile = path.join(PI_HOME, id, 'settings.json');
+    const prefs = readJson(prefsFile) || {};
     s = {
       id, key,
       sock: path.join(os.tmpdir(), `papier-pi-${key}.sock`),
@@ -367,7 +384,9 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
       events: [], nextEvent: 0,
       epoch: Date.now(),   // clients reset their event cursor when this moves
       busy: false, pending: null, pi: null, turnText: '', turnActivity: false, watchdog: null,
-      mode: 'auto', font: 'serif', page: 1,
+      mode: prefs.mode === 'quiet' ? 'quiet' : 'auto',
+      font: FONTS.includes(prefs.font) ? prefs.font : 'serif',
+      prefsFile, page: 1,
       canvas: null, canvasQueue: [],
       lastUsed: Date.now(),
     };
@@ -383,6 +402,15 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     }, 100);
     warm.unref?.();
     return s;
+  }
+
+  function savePrefs(s) {
+    try {
+      fs.mkdirSync(path.dirname(s.prefsFile), { recursive: true });
+      const tmp = s.prefsFile + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify({ mode: s.mode, font: s.font }));
+      fs.renameSync(tmp, s.prefsFile);
+    } catch (_) {}
   }
 
   function drop(s) {
@@ -474,13 +502,13 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
         return true;
       case '/pi/mode': {
         const m = u.searchParams.get('mode');
-        if (m === 'auto' || m === 'quiet') s.mode = m;
+        if (m === 'auto' || m === 'quiet') { s.mode = m; savePrefs(s); }
         json(res, 200, state(s));
         return true;
       }
       case '/pi/font': {
         const f = u.searchParams.get('font');
-        if (FONTS.includes(f)) { s.font = f; startCanvas(s); }
+        if (FONTS.includes(f)) { s.font = f; savePrefs(s); startCanvas(s); }
         json(res, 200, state(s));
         return true;
       }
