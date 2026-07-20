@@ -37,7 +37,7 @@ const PI_BIN = process.env.PI_BIN || 'pi';
 const PI_PROVIDER = process.env.PAPIER_PI_PROVIDER || 'openai-codex';
 // Use the exact user-selected Codex model. `:low` made the cloud companion
 // noticeably shallower than the tablet agent.
-const PI_MODEL = process.env.PAPIER_PI_MODEL || 'gpt-5.6-luna';
+const PI_MODEL = process.env.PAPIER_PI_MODEL || 'gpt-5.6-sol';
 const PI_HOME = process.env.PAPIER_PI_HOME || path.join(os.homedir(), 'papier-pi');
 const TURN_TIMEOUT_MS = 240_000;
 const IDLE_MS = 30 * 60_000;
