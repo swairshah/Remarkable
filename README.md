@@ -12,6 +12,7 @@ with its own README.
 | [`pi/`](pi/) | Running a headless Raspberry Pi from the reMarkable 2 |
 | [`pi-collab/`](pi-collab/) | Handwriting chat app: write on the tablet, pi answers via RPC (code/markdown/SVG rendered in-place) |
 | [`agent/`](agent/) | RBot — standalone Flue agent |
+| [`coder/`](coder/) | Sketch-first code review: repos in the sidebar, pi draws each codebase's architecture, handwritten questions get diagram answers, sketched change requests become branches/PRs on the VM |
 
 ## Conventions
 
