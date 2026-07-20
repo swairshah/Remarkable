@@ -90,7 +90,11 @@ struct DocumentView: View {
                           hub: hub,
                           onPencilDoubleTap: togglePencilEraser,
                           onPageDrag: active ? handlePageDrag : { _ in })
-            .id("\(active ? "active" : "neighbor")-\(entry.inkKey)")
+            // ONE id per page regardless of role: at flip commit the
+            // neighbor sheet BECOMES the active sheet in place. Distinct
+            // neighbor/active ids rebuilt the page after landing — raster
+            // refetch + canvas recreation = the visible flash.
+            .id(entry.inkKey)
     }
 
     var body: some View {
