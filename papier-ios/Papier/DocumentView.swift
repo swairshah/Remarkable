@@ -58,7 +58,8 @@ struct DocumentView: View {
                                    tool: tool,
                                    eraserMode: eraserMode,
                                    fingerDraws: fingerDraws,
-                                   hub: hub)
+                                   hub: hub,
+                                   onPencilDoubleTap: togglePencilEraser)
                             .tag(i)
                     }
                 }
@@ -175,6 +176,18 @@ struct DocumentView: View {
     // papier's right-edge toolbar, reinterpreted as a floating rail.
     private var toolRail: some View {
         VStack(spacing: 12) {
+            // Same static working dot as the tablet, occupying the rail's top.
+            Circle()
+                .fill(Color.primary.opacity(0.62))
+                .frame(width: 8, height: 8)
+                .scaleEffect(pi.busy ? 1 : 0.25)
+                .opacity(pi.busy ? 1 : 0)
+                .blur(radius: pi.busy ? 0 : 4)
+                .animation(.easeOut(duration: 0.22), value: pi.busy)
+                .accessibilityIdentifier("rail-busy-dot")
+                .accessibilityLabel("Pi working")
+                .accessibilityHidden(!pi.busy)
+
             railButton("pencil", active: tool == .pencil) { tool = .pencil }
                 .accessibilityIdentifier("rail-pencil")
             // eraser: tap to select; tap again to cycle Object -> Pixel -> Region
@@ -203,17 +216,13 @@ struct DocumentView: View {
                 if index < seq.count - 1 { withAnimation { index += 1 } }
             }
             Divider().frame(width: 22)
-            // pi: busy dot / nudge / quiet toggle / pi's writing face
-            ZStack {
-                railButton("sparkles", active: false) { pi.nudge(page: index + 1) }
-                    .accessibilityIdentifier("rail-nudge")
-                    .opacity(pi.busy ? 0.25 : 1)
-                if pi.busy { ProgressView().controlSize(.small) }
-            }
-            railButton(pi.mode == "quiet" ? "moon.zzz.fill" : "moon.zzz", active: pi.mode == "quiet") {
-                pi.toggleMode()
-            }
-            .accessibilityIdentifier("rail-pimode")
+            // Exact tablet glyphs: block-pixel Pi mode, then hand-squiggle Nudge.
+            papierRailButton(.pi, active: pi.mode == "auto") { pi.toggleMode() }
+                .accessibilityIdentifier("rail-pimode")
+                .accessibilityLabel(pi.mode == "auto" ? "Pi automatic" : "Pi quiet")
+            papierRailButton(.nudge, active: false) { pi.nudge(page: index + 1) }
+                .accessibilityIdentifier("rail-nudge")
+                .accessibilityLabel("Nudge Pi")
             Button { pi.cycleFont() } label: {
                 Text(String(pi.font.prefix(2)).capitalized)
                     .font(.system(size: 13, weight: .semibold, design: .serif))
@@ -228,6 +237,31 @@ struct DocumentView: View {
         .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
     }
 
+    private enum PapierRailIcon { case pi, nudge }
+
+    private func papierRailButton(_ icon: PapierRailIcon, active: Bool,
+                                  action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Group {
+                switch icon {
+                case .pi:
+                    PapierPiGlyph().fill(Color.primary)
+                        .frame(width: 20, height: 25)
+                case .nudge:
+                    PapierNudgeGlyph().stroke(Color.primary,
+                        style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                        .frame(width: 27, height: 24)
+                }
+            }
+            .frame(width: 30, height: 30)
+            .background(active ? Color.accentColor.opacity(0.18) : .clear,
+                        in: RoundedRectangle(cornerRadius: 8))
+            .frame(width: 40, height: 40)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     private func railButton(_ symbol: String, active: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
@@ -235,8 +269,16 @@ struct DocumentView: View {
                 .frame(width: 30, height: 30)
                 .background(active ? Color.accentColor.opacity(0.18) : .clear,
                             in: RoundedRectangle(cornerRadius: 8))
+                .frame(width: 40, height: 40)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private func togglePencilEraser() {
+        withAnimation(.easeOut(duration: 0.16)) {
+            tool = tool == .pencil ? .eraser : .pencil
+        }
     }
 
     private func flushAll() {
@@ -282,6 +324,7 @@ private struct PageScreen: View {
     let eraserMode: EraserMode
     let fingerDraws: Bool
     let hub: CanvasHub
+    let onPencilDoubleTap: () -> Void
 
     @EnvironmentObject private var store: LibraryStore
     @Environment(\.colorScheme) private var colorScheme
@@ -353,6 +396,7 @@ private struct PageScreen: View {
                            isActive: active,
                            hub: hub,
                            onChanged: { model.drawingChanged($0) },
+                           onPencilDoubleTap: onPencilDoubleTap,
                            onTap: { p in
                                // pencil taps never reach SwiftUI gestures —
                                // this is the reliable erase-pi-ink path

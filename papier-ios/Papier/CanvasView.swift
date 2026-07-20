@@ -51,6 +51,8 @@ struct CanvasView: UIViewRepresentable {
     let isActive: Bool
     let hub: CanvasHub
     let onChanged: (PKDrawing) -> Void
+    /// Apple Pencil side double-tap: toggle pencil ↔ last eraser mode.
+    var onPencilDoubleTap: (() -> Void)?
     /// Fired for taps of ANY input type (pencil included — the canvas
     /// swallows pencil touches, so SwiftUI gestures never see them).
     var onTap: ((CGPoint) -> Void)?
@@ -66,6 +68,9 @@ struct CanvasView: UIViewRepresentable {
         canvas.isScrollEnabled = false
         canvas.contentInsetAdjustmentBehavior = .never
         canvas.delegate = context.coordinator
+        let pencilInteraction = UIPencilInteraction()
+        pencilInteraction.delegate = context.coordinator
+        canvas.addInteraction(pencilInteraction)
         context.coordinator.programmatic = true
         canvas.drawing = initialDrawing
         context.coordinator.programmatic = false
@@ -95,6 +100,8 @@ struct CanvasView: UIViewRepresentable {
     func updateUIView(_ canvas: PKCanvasView, context: Context) {
         apply(to: canvas)
         context.coordinator.onTap = onTap
+        context.coordinator.onPencilDoubleTap = onPencilDoubleTap
+        context.coordinator.isActive = isActive
         if isActive { hub.activeCanvas = canvas }
         // Adopt a rebuilt drawing ONLY on a load/rescale epoch change —
         // never on ordinary SwiftUI refreshes, which would wipe user edits.
@@ -124,18 +131,25 @@ struct CanvasView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onChanged: onChanged, lastEpoch: epoch, onTap: onTap)
+        Coordinator(onChanged: onChanged, lastEpoch: epoch, isActive: isActive,
+                    onPencilDoubleTap: onPencilDoubleTap, onTap: onTap)
     }
 
-    final class Coordinator: NSObject, PKCanvasViewDelegate, UIGestureRecognizerDelegate {
+    final class Coordinator: NSObject, PKCanvasViewDelegate, UIGestureRecognizerDelegate,
+                             UIPencilInteractionDelegate {
         let onChanged: (PKDrawing) -> Void
         var programmatic = false
         var lastEpoch: Int
+        var isActive: Bool
+        var onPencilDoubleTap: (() -> Void)?
         var onTap: ((CGPoint) -> Void)?
 
-        init(onChanged: @escaping (PKDrawing) -> Void, lastEpoch: Int, onTap: ((CGPoint) -> Void)?) {
+        init(onChanged: @escaping (PKDrawing) -> Void, lastEpoch: Int, isActive: Bool,
+             onPencilDoubleTap: (() -> Void)?, onTap: ((CGPoint) -> Void)?) {
             self.onChanged = onChanged
             self.lastEpoch = lastEpoch
+            self.isActive = isActive
+            self.onPencilDoubleTap = onPencilDoubleTap
             self.onTap = onTap
         }
 
@@ -151,6 +165,23 @@ struct CanvasView: UIViewRepresentable {
         @objc func rubbed(_ g: UIPanGestureRecognizer) {
             guard g.state == .began || g.state == .changed else { return }
             onTap?(g.location(in: g.view))
+        }
+
+        private func handlePencilDoubleTap() {
+            guard isActive else { return }
+            onPencilDoubleTap?()
+        }
+
+        // iOS 17.0–17.4 / older Pencil API.
+        func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+            handlePencilDoubleTap()
+        }
+
+        // iOS 17.5+ API. When both exist UIKit calls only this one.
+        @available(iOS 17.5, *)
+        func pencilInteraction(_ interaction: UIPencilInteraction,
+                               didReceiveTap tap: UIPencilInteraction.Tap) {
+            handlePencilDoubleTap()
         }
 
         // run alongside PencilKit's own recognizers, never instead of them

@@ -46,9 +46,22 @@ final class PiSession: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
 
+    private var forceBusyForUITest: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["PAPIER_UI_TEST_FORCE_BUSY"] == "1"
+        #else
+        false
+        #endif
+    }
+
     init(docId: String, serverRoot: String) {
         self.docId = docId
         self.serverRoot = serverRoot
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["PAPIER_UI_TEST_FORCE_BUSY"] == "1" {
+            busy = true
+        }
+        #endif
     }
 
     private func call(_ pathAndQuery: String, method: String = "POST") async -> PiStateResponse? {
@@ -69,7 +82,7 @@ final class PiSession: ObservableObject {
             epoch = e
             since = 0
         }
-        busy = st.busy
+        busy = forceBusyForUITest ? true : st.busy
         mode = st.mode
         font = st.font
         for ev in st.events ?? [] {
@@ -80,7 +93,7 @@ final class PiSession: ObservableObject {
             case "seq": onSeqChanged?()
             case "notice": if let t = ev.text, !t.isEmpty { show(toast: t) }
             case "turn":
-                busy = (ev.state == "start")
+                if !forceBusyForUITest { busy = (ev.state == "start") }
                 if ev.state == "end" { onTurnEnd?() }
             default: break
             }
@@ -99,6 +112,9 @@ final class PiSession: ObservableObject {
     // MARK: - lifecycle
 
     func open() {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["PAPIER_UI_TEST_FORCE_BUSY"] == "1" { return }
+        #endif
         Task { apply(await call("open?id=\(docId)")) }
         pollTask?.cancel()
         pollTask = Task { [weak self] in
