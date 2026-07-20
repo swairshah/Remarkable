@@ -39,6 +39,14 @@ enum CanvasTool: Equatable {
     case lasso
 }
 
+/// Collab's pager contract: stream the finger drag so the current and
+/// neighboring sheets track it, then decide whether to commit on release.
+enum PageDragPhase {
+    case changed(CGFloat)
+    case ended(translation: CGFloat, velocity: CGFloat)
+    case cancelled
+}
+
 /// The document view's handle on the active page canvas, for undo/redo.
 final class CanvasHub: ObservableObject {
     weak var activeCanvas: PKCanvasView?
@@ -83,8 +91,8 @@ struct CanvasView: UIViewRepresentable {
     let onChanged: (PKDrawing) -> Void
     /// Apple Pencil side double-tap: toggle pencil ↔ last eraser mode.
     var onPencilDoubleTap: (() -> Void)?
-    /// Finger-only horizontal page flip: -1 previous, +1 next.
-    var onPageSwipe: ((Int) -> Void)?
+    /// Finger-only horizontal page drag. Pencil never reaches this callback.
+    var onPageDrag: ((PageDragPhase) -> Void)?
     /// Continuous eraser rub in DISPLAY coordinates; PageModel converts it.
     var onErase: ((CGPoint) -> Void)?
 
@@ -195,11 +203,18 @@ struct CanvasView: UIViewRepresentable {
         // MARK: finger-only pager
 
         @objc func paged(_ gesture: UIPanGestureRecognizer) {
-            guard gesture.state == .ended else { return }
-            let translation = gesture.translation(in: gesture.view).x
-            let velocity = gesture.velocity(in: gesture.view).x
-            if translation < -90 || velocity < -600 { parent.onPageSwipe?(1) }
-            else if translation > 90 || velocity > 600 { parent.onPageSwipe?(-1) }
+            switch gesture.state {
+            case .began, .changed:
+                parent.onPageDrag?(.changed(gesture.translation(in: gesture.view).x))
+            case .ended:
+                parent.onPageDrag?(.ended(
+                    translation: gesture.translation(in: gesture.view).x,
+                    velocity: gesture.velocity(in: gesture.view).x))
+            case .cancelled, .failed:
+                parent.onPageDrag?(.cancelled)
+            default:
+                break
+            }
         }
 
         // MARK: continuous pi-ink eraser

@@ -19,7 +19,11 @@ struct DocumentView: View {
     @State private var fingerDraws = false
     @State private var askGoTo = false
     @State private var goToText = ""
-    @State private var pageDirection = 1
+    @State private var dragX: CGFloat = 0
+    @State private var flipAnimating = false
+    @State private var flipTarget: Int?
+    @State private var pageWidth: CGFloat = UIScreen.main.bounds.width
+    private let pageGap: CGFloat = 24
     // Synchronous identity cache: the page onscreen and pi's event handler
     // MUST share the exact same PageModel. An async @State insertion here
     // used to create twins; pi refreshed the hidden twin and nothing appeared.
@@ -44,33 +48,60 @@ struct DocumentView: View {
         return m
     }
 
+    @ViewBuilder
+    private func pageDeck(in size: CGSize) -> some View {
+        let distance = size.width + pageGap
+        ZStack {
+            if dragX > 0 {
+                let neighbor = flipTarget ?? index - 1
+                if seq.indices.contains(neighbor) {
+                    pageScreen(at: neighbor, active: false)
+                        .offset(x: -distance + dragX)
+                }
+            }
+            if dragX < 0 {
+                let neighbor = flipTarget ?? index + 1
+                if seq.indices.contains(neighbor) {
+                    pageScreen(at: neighbor, active: false)
+                        .offset(x: distance + dragX)
+                }
+            }
+            if seq.indices.contains(index) {
+                pageScreen(at: index, active: true)
+                    .offset(x: dragX)
+            }
+        }
+        .clipped()
+        .onAppear { pageWidth = size.width }
+        .onChange(of: size.width) { _, width in pageWidth = width }
+    }
+
+    private func pageScreen(at pageIndex: Int, active: Bool) -> some View {
+        let entry = seq[pageIndex]
+        return PageScreen(doc: doc,
+                          entry: entry,
+                          model: model(for: entry),
+                          near: true,
+                          active: active,
+                          tool: tool,
+                          eraserMode: eraserMode,
+                          fingerDraws: fingerDraws,
+                          hub: hub,
+                          onPencilDoubleTap: togglePencilEraser,
+                          onPageDrag: active ? handlePageDrag : { _ in })
+            .id("\(active ? "active" : "neighbor")-\(entry.inkKey)")
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 Color(uiColor: .systemGray6).ignoresSafeArea()
 
-                // A single active sheet. Paging lives inside CanvasView as a
-                // DIRECT-FINGER-only recognizer, so Apple Pencil can never
-                // move the page while drawing or erasing.
-                if seq.indices.contains(index) {
-                    let entry = seq[index]
-                    PageScreen(doc: doc,
-                               entry: entry,
-                               model: model(for: entry),
-                               near: true,
-                               active: true,
-                               tool: tool,
-                               eraserMode: eraserMode,
-                               fingerDraws: fingerDraws,
-                               hub: hub,
-                               onPencilDoubleTap: togglePencilEraser,
-                               onPageSwipe: changePage)
-                        .id(entry.inkKey)
-                        .transition(.asymmetric(
-                            insertion: .move(edge: pageDirection > 0 ? .trailing : .leading),
-                            removal: .move(edge: pageDirection > 0 ? .leading : .trailing)))
-                        .ignoresSafeArea(edges: .bottom)
-                }
+                // Collab's live two-sheet pager: the active sheet tracks the
+                // finger and the neighbor follows beside it. Pencil never
+                // reaches this finger-only drag state machine.
+                pageDeck(in: geo.size)
+                    .ignoresSafeArea(edges: .bottom)
 
                 toolRail
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
@@ -89,6 +120,10 @@ struct DocumentView: View {
             }
             .animation(.spring(duration: 0.35), value: pi.toast)
         }
+        // NavigationStack's edge-pop gesture used to race a reverse page
+        // swipe and dismiss the whole document. Disable it only while this
+        // document is onscreen; the visible Back button still works.
+        .background(InteractivePopBlocker())
         .navigationTitle(doc.meta.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -106,8 +141,7 @@ struct DocumentView: View {
                 .keyboardType(.numberPad)
             Button("Go") {
                 if let n = Int(goToText), n >= 1, n <= seq.count {
-                    pageDirection = (n - 1) >= index ? 1 : -1
-                    withAnimation(.easeOut(duration: 0.24)) { index = n - 1 }
+                    animatePage(to: n - 1)
                 }
                 goToText = ""
             }
@@ -149,8 +183,7 @@ struct DocumentView: View {
         }
         pi.onGoto = { page in
             guard page >= 1, page <= seq.count else { return }
-            pageDirection = (page - 1) >= index ? 1 : -1
-            withAnimation(.easeOut(duration: 0.24)) { index = page - 1 }
+            animatePage(to: page - 1)
         }
         pi.onSeqChanged = {
             Task {
@@ -287,11 +320,59 @@ struct DocumentView: View {
         }
     }
 
+    private func handlePageDrag(_ phase: PageDragPhase) {
+        guard !flipAnimating else { return }
+        switch phase {
+        case .changed(let translation):
+            flipTarget = nil
+            let beyondFirst = index == 0 && translation > 0
+            let beyondLast = index == seq.count - 1 && translation < 0
+            dragX = (beyondFirst || beyondLast) ? translation * 0.25 : translation
+        case .ended(let translation, let velocity):
+            let threshold = pageWidth * 0.18
+            let next = dragX < 0 && (translation < -threshold || velocity < -600)
+            let previous = dragX > 0 && (translation > threshold || velocity > 600)
+            if next && index + 1 < seq.count {
+                commitPageFlip(1, target: index + 1)
+            } else if previous && index > 0 {
+                commitPageFlip(-1, target: index - 1)
+            } else {
+                withAnimation(.spring(duration: 0.3)) { dragX = 0 }
+            }
+        case .cancelled:
+            withAnimation(.spring(duration: 0.3)) { dragX = 0 }
+        }
+    }
+
     private func changePage(_ delta: Int) {
-        let target = index + delta
-        guard seq.indices.contains(target) else { return }
-        pageDirection = delta
-        withAnimation(.easeOut(duration: 0.24)) { index = target }
+        commitPageFlip(delta, target: index + delta)
+    }
+
+    private func animatePage(to target: Int) {
+        guard target != index, seq.indices.contains(target) else { return }
+        commitPageFlip(target > index ? 1 : -1, target: target)
+    }
+
+    private func commitPageFlip(_ direction: Int, target: Int) {
+        guard !flipAnimating, seq.indices.contains(target), target != index else {
+            withAnimation(.spring(duration: 0.3)) { dragX = 0 }
+            return
+        }
+        flipAnimating = true
+        flipTarget = target
+        currentModel?.flushNow()
+        withAnimation(.easeOut(duration: 0.24)) {
+            dragX = CGFloat(-direction) * (pageWidth + pageGap)
+        } completion: {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                index = target
+                dragX = 0
+                flipTarget = nil
+            }
+            flipAnimating = false
+        }
     }
 
     private func flushAll() {
@@ -303,11 +384,8 @@ struct DocumentView: View {
         let nextNote = (seq.compactMap { if case .note(let n) = $0 { n } else { nil } }.max() ?? 0) + 1
         seq.insert(.note(nextNote), at: index + 1)
         let state = DocState(nextNote: nextNote + 1, pos: index + 1, seq: seq)
-        Task {
-            try? await store.client.postState(docId: doc.id, state: state)
-            pageDirection = 1
-            withAnimation(.easeOut(duration: 0.24)) { index += 1 }
-        }
+        commitPageFlip(1, target: index + 1)
+        Task { try? await store.client.postState(docId: doc.id, state: state) }
     }
 }
 
@@ -339,7 +417,7 @@ private struct PageScreen: View {
     let fingerDraws: Bool
     let hub: CanvasHub
     let onPencilDoubleTap: () -> Void
-    let onPageSwipe: (Int) -> Void
+    let onPageDrag: (PageDragPhase) -> Void
 
     @EnvironmentObject private var store: LibraryStore
     @Environment(\.colorScheme) private var colorScheme
@@ -377,6 +455,9 @@ private struct PageScreen: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // .contain keeps children (pi-patch-layer) visible to XCUI.
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(active ? "page-surface" : "neighbor-page")
             .onChange(of: tool) { _, _ in selection = nil }
         }
     }
@@ -410,7 +491,7 @@ private struct PageScreen: View {
                            hub: hub,
                            onChanged: { model.drawingChanged($0) },
                            onPencilDoubleTap: onPencilDoubleTap,
-                           onPageSwipe: onPageSwipe,
+                           onPageDrag: onPageDrag,
                            onErase: { point in
                                model.erasePiInk(atDisplayPoint: point, mode: eraserMode)
                            })
@@ -507,5 +588,53 @@ private struct PageScreen: View {
         let margin: CGFloat = 12
         let w = min(container.width - margin * 2, (container.height - margin * 2) * aspect)
         return CGSize(width: max(w, 1), height: max(w / aspect, 1))
+    }
+}
+
+// MARK: - navigation gesture isolation
+
+/// A horizontal page drag must never become NavigationStack's interactive
+/// back gesture. The normal navigation-bar Back button remains available.
+private struct InteractivePopBlocker: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> PopBlockerController {
+        PopBlockerController()
+    }
+
+    func updateUIViewController(_ controller: PopBlockerController, context: Context) {
+        controller.disablePopGesture()
+    }
+
+    static func dismantleUIViewController(_ controller: PopBlockerController,
+                                           coordinator: Void) {
+        controller.restorePopGesture()
+    }
+}
+
+private final class PopBlockerController: UIViewController {
+    private weak var blockedGesture: UIGestureRecognizer?
+    private var previousEnabled = true
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        disablePopGesture()
+    }
+
+    override func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+        DispatchQueue.main.async { [weak self] in self?.disablePopGesture() }
+    }
+
+    func disablePopGesture() {
+        guard let gesture = navigationController?.interactivePopGestureRecognizer else { return }
+        if blockedGesture !== gesture {
+            blockedGesture = gesture
+            previousEnabled = gesture.isEnabled
+        }
+        gesture.isEnabled = false
+    }
+
+    func restorePopGesture() {
+        blockedGesture?.isEnabled = previousEnabled
+        blockedGesture = nil
     }
 }
