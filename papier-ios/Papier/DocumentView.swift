@@ -49,27 +49,33 @@ struct DocumentView: View {
         return m
     }
 
+    private struct DeckSlot: Hashable {
+        let idx: Int
+        let slot: Int
+    }
+
+    /// prev/current/next stay PERMANENTLY mounted (like the old TabView
+    /// pager). Mounting the incoming sheet mid-gesture is what flashed:
+    /// it appeared blank, then its raster/ink popped in while sliding.
+    private var deckSlots: [DeckSlot] {
+        var slots: [DeckSlot] = []
+        if let target = flipTarget, target != index {
+            slots.append(DeckSlot(idx: target, slot: target > index ? 1 : -1))
+        } else {
+            if index > 0 { slots.append(DeckSlot(idx: index - 1, slot: -1)) }
+            if index + 1 < seq.count { slots.append(DeckSlot(idx: index + 1, slot: 1)) }
+        }
+        if seq.indices.contains(index) { slots.append(DeckSlot(idx: index, slot: 0)) }
+        return slots
+    }
+
     @ViewBuilder
     private func pageDeck(in size: CGSize) -> some View {
         let distance = size.width + pageGap
         ZStack {
-            if dragX > 0 {
-                let neighbor = flipTarget ?? index - 1
-                if seq.indices.contains(neighbor) {
-                    pageScreen(at: neighbor, active: false)
-                        .offset(x: -distance + dragX)
-                }
-            }
-            if dragX < 0 {
-                let neighbor = flipTarget ?? index + 1
-                if seq.indices.contains(neighbor) {
-                    pageScreen(at: neighbor, active: false)
-                        .offset(x: distance + dragX)
-                }
-            }
-            if seq.indices.contains(index) {
-                pageScreen(at: index, active: true)
-                    .offset(x: dragX)
+            ForEach(deckSlots, id: \.idx) { slot in
+                pageScreen(at: slot.idx, active: slot.idx == index)
+                    .offset(x: CGFloat(slot.slot) * distance + dragX)
             }
         }
         .clipped()
