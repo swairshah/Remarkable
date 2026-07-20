@@ -568,7 +568,42 @@ fn handle(d: &DocView, req: &Value) -> Value {
             }
             let mut blank = Page::default();
             let _ = d.save_ink(Entry::Note(next_note), &mut blank);
-            json!({ "ok": true, "page": after + 2, "page_count": count + 1 })
+            json!({ "ok": true, "page": after + 2, "page_count": count + 1, "note": next_note })
+        }
+        // Internal compensating action used by the session host. It refuses
+        // to remove anything that acquired content, so a killed model turn
+        // can roll back only the blank pages it just created.
+        "remove_empty_note" => {
+            let Some(note) = req["note"].as_u64() else {
+                return json!({ "ok": false, "error": "note required" });
+            };
+            let Some(idx) = seq.iter().position(|e| matches!(e, Entry::Note(n) if *n == note)) else {
+                return json!({ "ok": false, "error": format!("no note {note}") });
+            };
+            let page = d.load_ink(Entry::Note(note));
+            if !page.strokes.is_empty() || !page.patches.is_empty() {
+                return json!({ "ok": false, "error": format!("note {note} is not empty") });
+            }
+            let new_seq: Vec<Value> = seq.iter().enumerate().filter_map(|(i, e)| {
+                if i == idx { return None; }
+                Some(match e { Entry::Pdf(p) => json!({ "p": p }), Entry::Note(n) => json!({ "n": n }) })
+            }).collect();
+            let pos = d.read_json("state.json")
+                .and_then(|s| s["pos"].as_u64())
+                .unwrap_or(0)
+                .min(new_seq.len().saturating_sub(1) as u64);
+            let state = json!({ "next_note": next_note, "pos": pos, "seq": new_seq });
+            let state_path = d.write_path("state.json");
+            if let Err(e) = std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()) {
+                return json!({ "ok": false, "error": format!("state save: {e}") });
+            }
+            let ink_path = d.write_path(&format!("ink/note-{note:04}.json"));
+            match std::fs::remove_file(&ink_path) {
+                Ok(()) => {},
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+                Err(e) => return json!({ "ok": false, "error": format!("ink remove: {e}") }),
+            }
+            json!({ "ok": true, "page": idx + 1, "page_count": count - 1, "note": note })
         }
         "page_text" => {
             let from = req["from"].as_u64().unwrap_or(0);

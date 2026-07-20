@@ -39,7 +39,12 @@ const PI_PROVIDER = process.env.PAPIER_PI_PROVIDER || 'openai-codex';
 // noticeably shallower than the tablet agent.
 const PI_MODEL = process.env.PAPIER_PI_MODEL || 'gpt-5.6-sol';
 const PI_HOME = process.env.PAPIER_PI_HOME || path.join(os.homedir(), 'papier-pi');
-const TURN_TIMEOUT_MS = 240_000;
+// Automatic marginalia stays bounded; an explicit Nudge may legitimately
+// research a paper. Both also carry an inactivity deadline so a wedged call
+// dies without counting productive tool activity against one wall clock.
+const AUTO_TURN_TIMEOUT_MS = 240_000;
+const NUDGE_TURN_TIMEOUT_MS = 600_000;
+const TURN_INACTIVITY_MS = 180_000;
 const IDLE_MS = 30 * 60_000;
 const FONTS = ['serif', 'script', 'sans', 'garamond'];
 
@@ -136,11 +141,97 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     if (s.events.length > 200) s.events.splice(0, s.events.length - 200);
   }
 
+  function clearTurnTimers(s) {
+    clearTimeout(s.watchdog);
+    clearTimeout(s.inactivityWatchdog);
+    s.watchdog = null;
+    s.inactivityWatchdog = null;
+  }
+
+  function killTurn(s, reason) {
+    if (!s.busy || !s.pi) return;
+    s.killReason = reason;
+    try { s.pi.kill('SIGKILL'); } catch (_) {}
+  }
+
+  function touchTurnTimer(s) {
+    if (!s.busy) return;
+    clearTimeout(s.inactivityWatchdog);
+    s.inactivityWatchdog = setTimeout(() => {
+      killTurn(s, `no pi activity for ${TURN_INACTIVITY_MS / 1000}s`);
+    }, TURN_INACTIVITY_MS);
+    s.inactivityWatchdog.unref?.();
+  }
+
+  function armTurnTimers(s, kind) {
+    clearTurnTimers(s);
+    s.killReason = null;
+    const hardMs = kind === 'nudge' ? NUDGE_TURN_TIMEOUT_MS : AUTO_TURN_TIMEOUT_MS;
+    s.watchdog = setTimeout(() => {
+      killTurn(s, `${kind} exceeded ${hardMs / 1000}s`);
+    }, hardMs);
+    s.watchdog.unref?.();
+    touchTurnTimer(s);
+  }
+
+  async function rollbackEmptyNotes(s) {
+    const inserted = s.turnInsertedNotes.splice(0).reverse();
+    let removed = 0;
+    for (const item of inserted) {
+      try {
+        const r = await canvasCall(s, { cmd: 'remove_empty_note', note: item.note });
+        if (r && r.ok) {
+          removed++;
+          emit(s, { type: 'seq', page: Math.max(1, r.page - 1) });
+        }
+      } catch (_) {}
+    }
+    const { seq } = docState(s.id);
+    s.page = Math.min(s.page, Math.max(1, seq.length));
+    return removed;
+  }
+
+  async function finishTurn(s, { said = '', exitCode } = {}) {
+    if (s.finishing) return;
+    s.finishing = true;
+    s.busy = false;
+    clearTurnTimers(s);
+    const removed = await rollbackEmptyNotes(s);
+    if (removed) {
+      emit(s, { type: 'notice', text: `[removed ${removed} unfinished blank page${removed === 1 ? '' : 's'}]` });
+    }
+    if (exitCode !== undefined) {
+      const why = s.killReason ? `: ${s.killReason}` : '';
+      emit(s, { type: 'notice', text: `[pi exited (${exitCode})${why}; next turn restarts it]` });
+    } else {
+      const text = (said || '').trim();
+      if (text && text.toLowerCase() !== 'pass' && text.length < 600) {
+        emit(s, { type: 'notice', text });
+      }
+      if (!text && !s.turnActivity) {
+        emit(s, { type: 'notice', text: '[pi returned nothing — possible model outage; check /pi/health]' });
+      }
+    }
+    s.killReason = null;
+    emit(s, { type: 'turn', state: 'end' });
+    const pending = s.pending;
+    s.pending = null;
+    s.finishing = false;
+    if (pending) runTurn(s, pending.page, pending.kind);
+  }
+
   /* ---- the per-session tool socket (tablet protocol) ------------------- */
 
   async function handleTool(s, cmd) {
     s.lastUsed = Date.now();
+    touchTurnTimer(s);
     const { seq } = docState(s.id);
+    // Never let a model allocate its whole outline first and write later.
+    // It must make each inserted page durable before asking for another.
+    if (cmd.cmd === 'insert_note' && s.turnInsertedNotes.length) {
+      const pending = s.turnInsertedNotes[0];
+      return { ok: false, error: `draw on newly inserted page ${pending.page} before inserting another note page` };
+    }
     if (cmd.cmd === 'goto') {
       const p = Number(cmd.page);
       if (!Number.isInteger(p) || p < 1 || p > seq.length) {
@@ -169,8 +260,15 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
       if (cmd.cmd === 'draw' || cmd.cmd === 'underline' || cmd.cmd === 'erase') {
         emit(s, { type: 'patch', page: r.page || injected.page });
       }
-      if (cmd.cmd === 'insert_note') emit(s, { type: 'seq', page: r.page });
+      if (cmd.cmd === 'insert_note') {
+        s.turnInsertedNotes.push({ page: r.page, note: r.note });
+        emit(s, { type: 'seq', page: r.page });
+      }
+      if (cmd.cmd === 'draw' && r.bbox != null) {
+        s.turnInsertedNotes = s.turnInsertedNotes.filter((x) => x.page !== (r.page || injected.page));
+      }
     }
+    touchTurnTimer(s);
     return r;
   }
 
@@ -278,24 +376,21 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     });
     child.on('exit', (code) => {
       if (s.pi === child) s.pi = null;
-      if (s.busy) {
-        s.busy = false;
-        clearTimeout(s.watchdog);
-        emit(s, { type: 'notice', text: `[pi exited (${code}); next turn restarts it]` });
-        emit(s, { type: 'turn', state: 'end' });
-      }
+      if (s.busy) void finishTurn(s, { exitCode: code });
     });
     s.pi = child;
     return child;
   }
 
   function handleRpc(s, v) {
+    touchTurnTimer(s);
     switch (v.type) {
       case 'agent_start':
         s.busy = true;
         s.turnText = '';
         s.turnActivity = false;
         emit(s, { type: 'turn', state: 'start' });
+        touchTurnTimer(s);
         break;
       case 'message_update': {
         const ev = v.assistantMessageEvent || {};
@@ -317,30 +412,15 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
       case 'response':
         if (v.success === false) emit(s, { type: 'notice', text: `[pi error: ${v.error || '?'}]` });
         break;
-      case 'agent_end': {
-        s.busy = false;
-        clearTimeout(s.watchdog);
-        const said = (s.turnText || '').trim();
-        if (said && said.toLowerCase() !== 'pass' && said.length < 600) {
-          emit(s, { type: 'notice', text: said });
-        }
-        // A dead model fails SILENTLY (empty answer, no tools). Say so —
-        // silence must be pi's choice, never an outage.
-        if (!said && !s.turnActivity) {
-          emit(s, { type: 'notice', text: '[pi returned nothing — possible model outage; check /pi/health]' });
-        }
-        emit(s, { type: 'turn', state: 'end' });
-        const p = s.pending;
-        s.pending = null;
-        if (p) runTurn(s, p.page, p.kind);
+      case 'agent_end':
+        void finishTurn(s, { said: s.turnText });
         break;
-      }
       default: break;
     }
   }
 
   async function runTurn(s, page, kind) {
-    if (s.busy) {
+    if (s.busy || s.finishing) {
       // User intent beats background automation. Previously a save-triggered
       // pause could overwrite a queued NUDGE, making the sparkle button look
       // unreliable until it was tapped 2–3 times.
@@ -356,13 +436,10 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
       if (view && view.ok) {
         prompt.images = [{ type: 'image', data: view.png_base64, mimeType: 'image/png' }];
       }
+      s.turnInsertedNotes = [];
       child.stdin.write(JSON.stringify(prompt) + '\n');
-      s.busy = true; // agent_start confirms; watchdog covers a wedged child
-      clearTimeout(s.watchdog);
-      s.watchdog = setTimeout(() => {
-        if (s.busy && s.pi) { try { s.pi.kill('SIGKILL'); } catch (_) {} }
-      }, TURN_TIMEOUT_MS);
-      s.watchdog.unref?.();
+      s.busy = true; // agent_start confirms; timers cover a wedged child
+      armTurnTimers(s, kind);
     } catch (e) {
       emit(s, { type: 'notice', text: `pi error: ${String(e.message || e)}` });
     }
@@ -383,7 +460,9 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
       workDir: path.join(PI_HOME, id, 'work'),
       events: [], nextEvent: 0,
       epoch: Date.now(),   // clients reset their event cursor when this moves
-      busy: false, pending: null, pi: null, turnText: '', turnActivity: false, watchdog: null,
+      busy: false, pending: null, pi: null, turnText: '', turnActivity: false,
+      watchdog: null, inactivityWatchdog: null, killReason: null, finishing: false,
+      turnInsertedNotes: [],
       mode: prefs.mode === 'quiet' ? 'quiet' : 'auto',
       font: FONTS.includes(prefs.font) ? prefs.font : 'serif',
       prefsFile, page: 1,
