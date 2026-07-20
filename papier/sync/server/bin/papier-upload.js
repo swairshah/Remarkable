@@ -277,6 +277,43 @@ function handlePatchErase(res, id, file, patchId) {
 
 // POST /patch-move?id=&file=&patch=N&dx=&dy= — the user lasso-moved one of
 // pi's patches (page units). Translates every stroke point and text run.
+// POST /patch-replace?id=&file=&patch=N — continuous iPad rubber write-back.
+// Replaces only the touched pi patch (same id), preserving concurrent user
+// strokes and every other patch. Body: {patch:{id,strokes,texts},next_stroke}.
+function handlePatchReplace(req, res, id, file, patchId) {
+  id = safeId(id);
+  const pid = Number(patchId);
+  if (!id || !/^(?:pdf|note)-\d{4}\.json$/.test(file || '') || !Number.isInteger(pid))
+    return json(res, 400, { ok: false, error: 'bad request' });
+  if (!docExists(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
+  readBody(req, res, (buf) => {
+    let body;
+    try { body = JSON.parse(buf.toString('utf8')); }
+    catch (_) { return json(res, 400, { ok: false, error: 'not JSON' }); }
+    const patch = body && body.patch;
+    if (!patch || Number(patch.id) !== pid || !Array.isArray(patch.strokes) || !Array.isArray(patch.texts))
+      return json(res, 400, { ok: false, error: 'bad patch' });
+    let page;
+    try { page = JSON.parse(fs.readFileSync(effectiveInkPath(id, file), 'utf8')); }
+    catch (_) { return json(res, 404, { ok: false, error: 'no ink file' }); }
+    const index = (page.patches || []).findIndex((p) => Number(p.id) === pid);
+    if (index < 0) return json(res, 404, { ok: false, error: 'no such patch' });
+    if (patch.strokes.length || patch.texts.length) page.patches[index] = patch;
+    else page.patches.splice(index, 1);
+    if (Number.isInteger(body.next_stroke)) {
+      page.next_stroke = Math.max(page.next_stroke || 1, body.next_stroke);
+    }
+    try {
+      const dir = path.join(DOCS, id, 'ink');
+      fs.mkdirSync(dir, { recursive: true });
+      writeAtomically(path.join(dir, file), JSON.stringify(page));
+    } catch (e) { return json(res, 500, { ok: false, error: String(e) }); }
+    console.log('patch replace', id, file, '#' + pid,
+      `${patch.strokes.length} strokes/${patch.texts.length} texts`);
+    json(res, 200, { ok: true });
+  });
+}
+
 function handlePatchMove(res, id, file, patchId, dx, dy) {
   id = safeId(id);
   const pid = Number(patchId);
@@ -732,6 +769,7 @@ http.createServer((req, res) => {
   if (req.method === 'POST' && p === '/state') return handleStateWrite(req, res, u.searchParams.get('id'));
   if (req.method === 'POST' && p === '/notebook') return handleNotebookCreate(req, res);
   if (req.method === 'POST' && p === '/patch-erase') return handlePatchErase(res, u.searchParams.get('id'), u.searchParams.get('file'), u.searchParams.get('patch'));
+  if (req.method === 'POST' && p === '/patch-replace') return handlePatchReplace(req, res, u.searchParams.get('id'), u.searchParams.get('file'), u.searchParams.get('patch'));
   if (req.method === 'POST' && p === '/patch-move') return handlePatchMove(res, u.searchParams.get('id'), u.searchParams.get('file'), u.searchParams.get('patch'), u.searchParams.get('dx'), u.searchParams.get('dy'));
   if (req.method === 'POST' && p === '/upload') return handleUpload(req, res);
   if (req.method === 'POST' && p === '/attach') return handleAttach(req, res);

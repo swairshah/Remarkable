@@ -105,6 +105,34 @@ struct InkPatch {
     var id: UInt64
     var strokes: [InkStroke]
     var texts: [InkTextRun]
+
+    /// Payload for the server-authoritative partial-patch replacement route.
+    func replacementPayload(nextStroke: UInt64) -> Data {
+        func strokeJson(_ stroke: InkStroke) -> [String: Any] {
+            var flat: [Int] = []
+            flat.reserveCapacity(stroke.points.count * 3)
+            for point in stroke.points {
+                flat.append(Int((point.x * 10).rounded()))
+                flat.append(Int((point.y * 10).rounded()))
+                flat.append(Int((point.r * 10).rounded()))
+            }
+            return ["i": stroke.id, "g": stroke.gray, "p": flat]
+        }
+        let patch: [String: Any] = [
+            "id": id,
+            "strokes": strokes.map(strokeJson),
+            "texts": texts.map { text in
+                ["x": Int((text.x * 10).rounded()),
+                 "y": Int((text.y * 10).rounded()),
+                 "s": Int((text.size * 10).rounded()),
+                 "g": text.gray,
+                 "t": text.text] as [String: Any]
+            },
+        ]
+        return (try? JSONSerialization.data(withJSONObject: [
+            "patch": patch, "next_stroke": nextStroke,
+        ])) ?? Data("{}".utf8)
+    }
 }
 
 struct InkPage {

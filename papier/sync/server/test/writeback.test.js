@@ -52,13 +52,34 @@ test('ink/state/notebook write-back lands in inbound with validation', async (t)
   const base = `http://127.0.0.1:${port}`;
 
   // ink write to a mirrored doc -> inbound/docs/nb/ink/note-0001.json
-  const page = { v: 1, next_patch: 1, next_stroke: 3,
-    strokes: [{ i: 1, g: 0, p: [100, 200, 20, 110, 210, 20] }], patches: [] };
+  const page = { v: 1, next_patch: 2, next_stroke: 4,
+    strokes: [{ i: 1, g: 0, p: [100, 200, 20, 110, 210, 20] }],
+    patches: [{ id: 1,
+      strokes: [{ i: 2, g: 110, p: [200, 300, 20, 220, 320, 20] },
+                { i: 3, g: 110, p: [300, 400, 20, 320, 420, 20] }],
+      texts: [] }] }; 
   let r = await fetch(`${base}/ink?id=nb&file=note-0001.json`, { method: 'POST', body: JSON.stringify(page) });
   assert.equal(r.status, 200);
   const written = JSON.parse(fs.readFileSync(
     path.join(backup, 'papier-inbound', 'docs', 'nb', 'ink', 'note-0001.json')));
   assert.equal(written.strokes.length, 1);
+
+  // partial pi erase replaces ONE patch instead of deleting the sentence
+  const rubbed = { patch: { id: 1,
+    strokes: [{ i: 2, g: 110, p: [200, 300, 20, 205, 305, 20] }], texts: [] },
+    next_stroke: 9 };
+  r = await fetch(`${base}/patch-replace?id=nb&file=note-0001.json&patch=1`,
+    { method: 'POST', body: JSON.stringify(rubbed) });
+  assert.equal(r.status, 200);
+  const replaced = JSON.parse(fs.readFileSync(
+    path.join(backup, 'papier-inbound', 'docs', 'nb', 'ink', 'note-0001.json')));
+  assert.equal(replaced.patches.length, 1);
+  assert.equal(replaced.patches[0].strokes.length, 1);
+  assert.equal(replaced.patches[0].strokes[0].p.length, 6);
+  assert.equal(replaced.next_stroke, 9);
+  r = await fetch(`${base}/patch-replace?id=nb&file=note-0001.json&patch=1`,
+    { method: 'POST', body: JSON.stringify({ patch: { id: 2, strokes: [], texts: [] } }) });
+  assert.equal(r.status, 400);
 
   // validation: bad filename, unknown doc, malformed page
   r = await fetch(`${base}/ink?id=nb&file=../evil.json`, { method: 'POST', body: JSON.stringify(page) });

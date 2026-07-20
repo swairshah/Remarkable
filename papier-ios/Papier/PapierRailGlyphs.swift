@@ -31,21 +31,50 @@ struct PapierPiGlyph: Shape {
     }
 }
 
-/// The tablet's Nudge mark: one and a quarter hand-drawn sine waves.
+/// Nudge as an action, not an abstract sparkle: a small fingertip presses
+/// directly into the tablet's block Pi. Filled geometry keeps it legible at
+/// the rail's tiny display size.
 struct PapierNudgeGlyph: Shape {
+    private static let piRows: [[Bool]] = [
+        [true,  true,  true,  false],
+        [true,  false, true,  false],
+        [true,  true,  false, true ],
+        [true,  false, false, true ],
+        [true,  false, false, true ],
+    ]
+
     func path(in rect: CGRect) -> Path {
         var path = Path()
-        let inset: CGFloat = 2
-        let width = max(1, rect.width - inset * 2)
-        let amplitude = min(5.5, rect.height * 0.25)
-        for index in 0...20 {
-            let t = CGFloat(index) / 20
-            let point = CGPoint(
-                x: rect.minX + inset + width * t,
-                y: rect.midY + amplitude * sin(t * .pi * 2 * 1.25)
-            )
-            if index == 0 { path.move(to: point) }
-            else { path.addLine(to: point) }
+        let unit = min(rect.width / 30, rect.height / 24)
+        let x = rect.midX - 15 * unit
+        let y = rect.midY - 12 * unit
+
+        // Pointing finger: rounded fingertip touches the Pi; the small lower
+        // contour reads as a bent hand rather than an arrow.
+        path.addRoundedRect(in: CGRect(x: x + 1 * unit, y: y + 10 * unit,
+                                       width: 15 * unit, height: 4 * unit),
+                            cornerSize: CGSize(width: 2 * unit, height: 2 * unit))
+        var hand = Path()
+        hand.move(to: CGPoint(x: x + 2 * unit, y: y + 14 * unit))
+        hand.addLine(to: CGPoint(x: x + 6 * unit, y: y + 18 * unit))
+        hand.addLine(to: CGPoint(x: x + 11 * unit, y: y + 18 * unit))
+        hand.addLine(to: CGPoint(x: x + 14 * unit, y: y + 14 * unit))
+        hand.addLine(to: CGPoint(x: x + 10 * unit, y: y + 14 * unit))
+        hand.addLine(to: CGPoint(x: x + 8 * unit, y: y + 16 * unit))
+        hand.addLine(to: CGPoint(x: x + 5 * unit, y: y + 14 * unit))
+        hand.closeSubpath()
+        path.addPath(hand)
+
+        // Miniature Pi, with a one-unit air gap at the point of contact.
+        let cell = 2.6 * unit
+        let piX = x + 17 * unit
+        let piY = y + 5.5 * unit
+        for (rowIndex, row) in Self.piRows.enumerated() {
+            for (columnIndex, filled) in row.enumerated() where filled {
+                path.addRect(CGRect(x: piX + CGFloat(columnIndex) * cell,
+                                    y: piY + CGFloat(rowIndex) * cell,
+                                    width: cell, height: cell))
+            }
         }
         return path
     }

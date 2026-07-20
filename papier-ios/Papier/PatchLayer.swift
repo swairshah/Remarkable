@@ -31,7 +31,7 @@ struct PatchLayer: View {
         // of treating a successful HTTP request as success.
         .accessibilityElement(children: .ignore)
         .accessibilityIdentifier("pi-patch-layer")
-        .accessibilityValue("\(patches.count)")
+        .accessibilityValue("\(patches.count) patches, \(patches.reduce(0) { $0 + $1.strokes.count }) strokes")
     }
 
     private func canvas(progress: Double) -> some View {

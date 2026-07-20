@@ -91,6 +91,13 @@ struct PapierClient {
         try await post("/patch-erase?id=\(docId)&file=\(file)&patch=\(patchId)", body: Data())
     }
 
+    /// Replace one partially-rubbed pi patch while preserving its patch id.
+    func replacePatch(docId: String, file: String, patch: InkPatch,
+                      nextStroke: UInt64) async throws {
+        try await post("/patch-replace?id=\(docId)&file=\(file)&patch=\(patch.id)",
+                       body: patch.replacementPayload(nextStroke: nextStroke))
+    }
+
     /// Lasso-move one of pi's patches (page-unit delta).
     func movePatch(docId: String, file: String, patchId: UInt64, dx: CGFloat, dy: CGFloat) async throws {
         try await post("/patch-move?id=\(docId)&file=\(file)&patch=\(patchId)&dx=\(dx)&dy=\(dy)", body: Data())

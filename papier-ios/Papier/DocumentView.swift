@@ -19,6 +19,7 @@ struct DocumentView: View {
     @State private var fingerDraws = false
     @State private var askGoTo = false
     @State private var goToText = ""
+    @State private var pageDirection = 1
     // Synchronous identity cache: the page onscreen and pi's event handler
     // MUST share the exact same PageModel. An async @State insertion here
     // used to create twins; pi refreshed the hidden twin and nothing appeared.
@@ -48,27 +49,28 @@ struct DocumentView: View {
             ZStack {
                 Color(uiColor: .systemGray6).ignoresSafeArea()
 
-                TabView(selection: $index) {
-                    ForEach(Array(seq.enumerated()), id: \.offset) { i, entry in
-                        PageScreen(doc: doc,
-                                   entry: entry,
-                                   model: model(for: entry),
-                                   near: abs(i - index) <= 1,
-                                   active: i == index,
-                                   tool: tool,
-                                   eraserMode: eraserMode,
-                                   fingerDraws: fingerDraws,
-                                   hub: hub,
-                                   onPencilDoubleTap: togglePencilEraser)
-                            .tag(i)
-                    }
+                // A single active sheet. Paging lives inside CanvasView as a
+                // DIRECT-FINGER-only recognizer, so Apple Pencil can never
+                // move the page while drawing or erasing.
+                if seq.indices.contains(index) {
+                    let entry = seq[index]
+                    PageScreen(doc: doc,
+                               entry: entry,
+                               model: model(for: entry),
+                               near: true,
+                               active: true,
+                               tool: tool,
+                               eraserMode: eraserMode,
+                               fingerDraws: fingerDraws,
+                               hub: hub,
+                               onPencilDoubleTap: togglePencilEraser,
+                               onPageSwipe: changePage)
+                        .id(entry.inkKey)
+                        .transition(.asymmetric(
+                            insertion: .move(edge: pageDirection > 0 ? .trailing : .leading),
+                            removal: .move(edge: pageDirection > 0 ? .leading : .trailing)))
+                        .ignoresSafeArea(edges: .bottom)
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
-                // Eraser/lasso own the touches — swiping pages out from
-                // under a region capture or an erase pass is maddening.
-                // (Nav chevrons + GoTo stay available on the rail.)
-                .scrollDisabled(tool != .pencil)
-                .ignoresSafeArea(edges: .bottom)
 
                 toolRail
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
@@ -104,7 +106,8 @@ struct DocumentView: View {
                 .keyboardType(.numberPad)
             Button("Go") {
                 if let n = Int(goToText), n >= 1, n <= seq.count {
-                    withAnimation { index = n - 1 }
+                    pageDirection = (n - 1) >= index ? 1 : -1
+                    withAnimation(.easeOut(duration: 0.24)) { index = n - 1 }
                 }
                 goToText = ""
             }
@@ -146,7 +149,8 @@ struct DocumentView: View {
         }
         pi.onGoto = { page in
             guard page >= 1, page <= seq.count else { return }
-            withAnimation { index = page - 1 }
+            pageDirection = (page - 1) >= index ? 1 : -1
+            withAnimation(.easeOut(duration: 0.24)) { index = page - 1 }
         }
         pi.onSeqChanged = {
             Task {
@@ -207,14 +211,10 @@ struct DocumentView: View {
                 hub.activeCanvas?.undoManager?.redo()
             }
             Divider().frame(width: 22)
-            railButton("chevron.up", active: false) {
-                if index > 0 { withAnimation { index -= 1 } }
-            }
+            railButton("chevron.up", active: false) { changePage(-1) }
             railButton("number", active: false) { askGoTo = true }
                 .accessibilityIdentifier("rail-goto")
-            railButton("chevron.down", active: false) {
-                if index < seq.count - 1 { withAnimation { index += 1 } }
-            }
+            railButton("chevron.down", active: false) { changePage(1) }
             Divider().frame(width: 22)
             // Exact tablet glyphs: block-pixel Pi mode, then hand-squiggle Nudge.
             papierRailButton(.pi, active: pi.mode == "auto") { pi.toggleMode() }
@@ -248,9 +248,8 @@ struct DocumentView: View {
                     PapierPiGlyph().fill(Color.primary)
                         .frame(width: 20, height: 25)
                 case .nudge:
-                    PapierNudgeGlyph().stroke(Color.primary,
-                        style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-                        .frame(width: 27, height: 24)
+                    PapierNudgeGlyph().fill(Color.primary)
+                        .frame(width: 30, height: 24)
                 }
             }
             .frame(width: 30, height: 30)
@@ -281,6 +280,13 @@ struct DocumentView: View {
         }
     }
 
+    private func changePage(_ delta: Int) {
+        let target = index + delta
+        guard seq.indices.contains(target) else { return }
+        pageDirection = delta
+        withAnimation(.easeOut(duration: 0.24)) { index = target }
+    }
+
     private func flushAll() {
         for m in models.values { m.flushNow() }
     }
@@ -292,7 +298,8 @@ struct DocumentView: View {
         let state = DocState(nextNote: nextNote + 1, pos: index + 1, seq: seq)
         Task {
             try? await store.client.postState(docId: doc.id, state: state)
-            withAnimation { index += 1 }
+            pageDirection = 1
+            withAnimation(.easeOut(duration: 0.24)) { index += 1 }
         }
     }
 }
@@ -325,6 +332,7 @@ private struct PageScreen: View {
     let fingerDraws: Bool
     let hub: CanvasHub
     let onPencilDoubleTap: () -> Void
+    let onPageSwipe: (Int) -> Void
 
     @EnvironmentObject private var store: LibraryStore
     @Environment(\.colorScheme) private var colorScheme
@@ -352,11 +360,6 @@ private struct PageScreen: View {
                         .frame(width: fit.width, height: fit.height)
                         .background(paper)
                         .shadow(color: .black.opacity(0.14), radius: 8, y: 2)
-                        // eraser (object/pixel) + a tap on pi's ink -> erase
-                        // that patch (simultaneous: canvas keeps its touches)
-                        .simultaneousGesture(SpatialTapGesture().onEnded { v in
-                            if tool == .eraser && eraserMode != .region { model.erasePatch(at: v.location) }
-                        })
                         .task(id: fit.width) {
                             await model.load(displayWidth: fit.width)
                             model.rescale(displayWidth: fit.width)
@@ -392,28 +395,17 @@ private struct PageScreen: View {
                            tool: tool,
                            eraserMode: eraserMode,
                            fingerDraws: fingerDraws,
-                           interactionEnabled: !capturing && selection == nil,
+                           interactionEnabled: active && !capturing && selection == nil,
                            isActive: active,
                            hub: hub,
                            onChanged: { model.drawingChanged($0) },
                            onPencilDoubleTap: onPencilDoubleTap,
-                           onTap: { p in
-                               // pencil taps never reach SwiftUI gestures —
-                               // this is the reliable erase-pi-ink path
-                               if tool == .eraser && eraserMode != .region {
-                                   model.erasePatch(at: p)
-                               }
+                           onPageSwipe: onPageSwipe,
+                           onErase: { point in
+                               model.erasePiInk(atDisplayPoint: point, mode: eraserMode)
                            })
             } else {
                 ProgressView()
-            }
-            // Native Apple-Pencil touch capture limited to pi's patch bounds.
-            // It sits above PencilKit only where pi ink exists; elsewhere user
-            // strokes retain normal object/pixel eraser behavior.
-            if active && tool == .eraser && eraserMode != .region {
-                PatchEraseOverlay(patches: model.patches, scale: model.scale) { id in
-                    model.erasePatches(ids: [id])
-                }
             }
             if capturing {
                 CaptureView(dashed: true) { poly in

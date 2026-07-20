@@ -4,6 +4,7 @@
 
 import PencilKit
 import SwiftUI
+import UIKit
 
 enum SyncState: Equatable {
     case loading, clean, dirty, saving, saved, error(String)
@@ -29,6 +30,7 @@ final class PageModel: ObservableObject {
     private var base = InkPage()
     private var loaded = false
     private var saveGeneration = 0
+    private var patchSyncGeneration: [UInt64: Int] = [:]
     private var latestDrawing = PKDrawing()
 
     /// Called after a successful cloud save — DocumentView reports the
@@ -196,54 +198,172 @@ final class PageModel: ObservableObject {
         }
     }
 
-    // MARK: - erasing pi's ink (tablet parity: any ink is erasable)
+    // MARK: - continuous erasing of pi ink (ported from ../ipad/Collab)
 
-    /// Hit-test a display-space point against pi's patches; erase the whole
-    /// patch it lands on (object erase, the tablet's default mode).
-    func erasePatch(at point: CGPoint) {
-        guard loaded, scale > 0 else { return }
-        let tol: CGFloat = 24   // display points; Pencil's eraser has a broad nib
-        let px = point.x / scale, py = point.y / scale
-        let tolPage = tol / scale
-        let target = CGPoint(x: px, y: py)
+    /// Rub in DISPLAY coordinates. Object mode removes only touched Hershey
+    /// strokes (letters/marks), pixel mode splits strokes around the nib, and
+    /// typeset Garamond erases glyph-by-glyph. It never deletes a whole sentence.
+    func erasePiInk(atDisplayPoint displayPoint: CGPoint, mode: EraserMode) {
+        guard loaded, scale > 0, mode != .region else { return }
+        let point = CGPoint(x: displayPoint.x / scale, y: displayPoint.y / scale)
+        let radius = 26 / scale
+        var changedIds: Set<UInt64> = []
 
-        func distanceToSegment(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
-            let dx = b.x - a.x, dy = b.y - a.y
-            let length2 = dx * dx + dy * dy
-            guard length2 > 0.0001 else { return hypot(p.x - a.x, p.y - a.y) }
-            let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length2))
-            return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+        for index in base.patches.indices {
+            var patch = base.patches[index]
+            var changed = false
+
+            if mode == .pixel {
+                var survivors: [InkStroke] = []
+                for stroke in patch.strokes {
+                    let pieces = split(stroke: stroke, around: point, radius: radius)
+                    if pieces.count != 1 || pieces.first?.points.count != stroke.points.count {
+                        changed = true
+                    }
+                    survivors.append(contentsOf: pieces)
+                }
+                patch.strokes = survivors
+            } else {
+                let before = patch.strokes.count
+                patch.strokes.removeAll { strokeHit($0, point: point, radius: radius) }
+                changed = patch.strokes.count != before
+            }
+
+            var textSurvivors: [InkTextRun] = []
+            for text in patch.texts {
+                if let pieces = eraseGlyphs(from: text, at: point, radius: radius) {
+                    textSurvivors.append(contentsOf: pieces)
+                    changed = true
+                } else {
+                    textSurvivors.append(text)
+                }
+            }
+            patch.texts = textSurvivors
+
+            if changed {
+                base.patches[index] = patch
+                changedIds.insert(patch.id)
+                animateIds.remove(patch.id)
+            }
         }
 
-        for patch in base.patches {
-            var hit = false
-            for s in patch.strokes where !hit {
-                guard let first = s.points.first else { continue }
-                var previous = CGPoint(x: first.x, y: first.y)
-                if hypot(target.x - previous.x, target.y - previous.y) <= tolPage { hit = true; continue }
-                for p in s.points.dropFirst() {
-                    let current = CGPoint(x: p.x, y: p.y)
-                    if distanceToSegment(target, previous, current) <= tolPage {
-                        hit = true; break
-                    }
-                    previous = current
+        guard !changedIds.isEmpty else { return }
+        base.patches.removeAll { $0.strokes.isEmpty && $0.texts.isEmpty }
+        patches = base.patches
+        for id in changedIds { schedulePatchSync(id: id) }
+    }
+
+    private func split(stroke: InkStroke, around point: CGPoint,
+                       radius: CGFloat) -> [InkStroke] {
+        var groups: [[InkPoint]] = []
+        var current: [InkPoint] = []
+        for p in stroke.points {
+            let erased = hypot(CGFloat(p.x) - point.x, CGFloat(p.y) - point.y)
+                <= radius + CGFloat(p.r)
+            if erased {
+                if !current.isEmpty { groups.append(current); current = [] }
+            } else {
+                current.append(p)
+            }
+        }
+        if !current.isEmpty { groups.append(current) }
+        guard !(groups.count == 1 && groups[0].count == stroke.points.count) else { return [stroke] }
+
+        var pieces: [InkStroke] = []
+        for (index, points) in groups.enumerated() where !points.isEmpty {
+            let id: UInt64
+            if index == 0 { id = stroke.id }
+            else { id = base.nextStroke; base.nextStroke += 1 }
+            pieces.append(InkStroke(id: id, gray: stroke.gray, points: points))
+        }
+        return pieces
+    }
+
+    private func strokeHit(_ stroke: InkStroke, point: CGPoint, radius: CGFloat) -> Bool {
+        guard let first = stroke.points.first else { return false }
+        let firstPoint = CGPoint(x: first.x, y: first.y)
+        if stroke.points.count == 1 {
+            return hypot(firstPoint.x - point.x, firstPoint.y - point.y) <= radius + first.r
+        }
+        for pair in zip(stroke.points, stroke.points.dropFirst()) {
+            let a = CGPoint(x: pair.0.x, y: pair.0.y)
+            let b = CGPoint(x: pair.1.x, y: pair.1.y)
+            let dx = b.x - a.x, dy = b.y - a.y
+            let length2 = dx * dx + dy * dy
+            let t = length2 == 0 ? 0
+                : max(0, min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / length2))
+            let closest = CGPoint(x: a.x + t * dx, y: a.y + t * dy)
+            let inkRadius = max(CGFloat(pair.0.r), CGFloat(pair.1.r))
+            if hypot(point.x - closest.x, point.y - closest.y) <= radius + inkRadius { return true }
+        }
+        return false
+    }
+
+    /// Erase rendered Garamond one grapheme at a time and split the run around
+    /// the gap. Prefix widths come from the same bundled font PatchLayer uses.
+    private func eraseGlyphs(from text: InkTextRun, at point: CGPoint,
+                             radius: CGFloat) -> [InkTextRun]? {
+        guard point.y >= text.y - text.size - radius,
+              point.y <= text.y + text.size * 0.35 + radius else { return nil }
+        let atoms = text.text.map(String.init)
+        guard !atoms.isEmpty else { return nil }
+        let font = UIFont(name: "EBGaramond-Regular", size: text.size)
+            ?? UIFont(name: "Georgia", size: text.size)
+            ?? UIFont.systemFont(ofSize: text.size)
+        var offsets: [CGFloat] = [0]
+        var prefix = ""
+        for atom in atoms {
+            prefix += atom
+            offsets.append((prefix as NSString).size(withAttributes: [.font: font]).width)
+        }
+        guard point.x >= text.x - radius,
+              point.x <= text.x + offsets.last! + radius else { return nil }
+
+        var keep = [Bool](repeating: true, count: atoms.count)
+        var hit = false
+        for index in atoms.indices {
+            let x0 = text.x + offsets[index]
+            let x1 = text.x + offsets[index + 1]
+            if point.x + radius >= x0 && point.x - radius <= x1 {
+                keep[index] = false
+                hit = true
+            }
+        }
+        guard hit else { return nil }
+
+        var output: [InkTextRun] = []
+        var index = 0
+        while index < atoms.count {
+            guard keep[index] else { index += 1; continue }
+            let start = index
+            while index < atoms.count, keep[index] { index += 1 }
+            let value = atoms[start..<index].joined()
+            if !value.trimmingCharacters(in: .whitespaces).isEmpty {
+                output.append(InkTextRun(x: text.x + offsets[start], y: text.y,
+                                         size: text.size, gray: text.gray, text: value))
+            }
+        }
+        return output
+    }
+
+    private func schedulePatchSync(id: UInt64) {
+        patchSyncGeneration[id, default: 0] += 1
+        let generation = patchSyncGeneration[id]!
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(0.35))
+            guard let self, self.patchSyncGeneration[id] == generation else { return }
+            do {
+                if let patch = self.base.patches.first(where: { $0.id == id }) {
+                    try await self.store.client.replacePatch(
+                        docId: self.doc.id, file: self.entry.inkKey + ".json",
+                        patch: patch, nextStroke: self.base.nextStroke)
+                } else {
+                    try await self.store.client.erasePatch(
+                        docId: self.doc.id, file: self.entry.inkKey + ".json", patchId: id)
                 }
+            } catch {
+                self.sync = .error("pi erase sync: \(error.localizedDescription)")
             }
-            if !hit {
-                for t in patch.texts where !hit {
-                    let w = CGFloat(t.text.count) * t.size * 0.55
-                    if px >= t.x - tolPage, px <= t.x + w + tolPage,
-                       py >= t.y - t.size - tolPage, py <= t.y + tolPage { hit = true }
-                }
-            }
-            guard hit else { continue }
-            let id = patch.id
-            base.patches.removeAll { $0.id == id }
-            patches = base.patches
-            Task {
-                try? await store.client.erasePatch(docId: doc.id, file: entry.inkKey + ".json", patchId: id)
-            }
-            return
         }
     }
 }

@@ -1,14 +1,19 @@
-// CanvasView.swift — the PKCanvasView wrapper. Transparent, sized to the
-// page, pencil tool by default. Finger scrolls/flips pages; the Pencil
-// draws (toggleable for finger drawing).
+// CanvasView.swift — PencilKit wrapped in a gesture-owning container.
+//
+// This mirrors ../ipad/Collab's proven architecture. A raw touch observer
+// lives on the CONTAINER above PencilKit, stays `.possible` for the entire
+// touch sequence, and therefore cannot lose gesture arbitration to
+// PencilKit (the old tap-only erase bug). Page paging is a separate
+// finger-only recognizer: Apple Pencil can never move the page.
 
 import PencilKit
 import SwiftUI
+import UIKit
 
 /// The rubber's behavior — papier's three modes (toolbar.rs EraserMode).
 enum EraserMode: String, CaseIterable {
-    case object   // whole strokes vanish at a touch
-    case pixel    // only what the rubber covers is removed
+    case object   // whole touched strokes vanish
+    case pixel    // split only what the rubber covers
     case region   // circle a region; on lift everything inside goes
 
     var next: EraserMode {
@@ -34,10 +39,35 @@ enum CanvasTool: Equatable {
     case lasso
 }
 
-/// The document view's handle on whichever page canvas is active, for
-/// undo/redo from the toolbar.
+/// The document view's handle on the active page canvas, for undo/redo.
 final class CanvasHub: ObservableObject {
     weak var activeCanvas: PKCanvasView?
+}
+
+/// Reports raw touches without ever recognizing. Remaining `.possible`
+/// means PencilKit cannot starve it, cancel it, or require it to fail.
+final class TouchObserverGesture: UIGestureRecognizer {
+    var onTouch: ((CGPoint, UITouch.Phase, UITouch.TouchType) -> Void)?
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        report(touches, .began)
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        report(touches, .moved)
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        report(touches, .ended)
+        state = .failed
+    }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        report(touches, .cancelled)
+        state = .failed
+    }
+
+    private func report(_ touches: Set<UITouch>, _ phase: UITouch.Phase) {
+        guard let view, let touch = touches.first else { return }
+        onTouch?(touch.location(in: view), phase, touch.type)
+    }
 }
 
 struct CanvasView: UIViewRepresentable {
@@ -46,65 +76,75 @@ struct CanvasView: UIViewRepresentable {
     let tool: CanvasTool
     let eraserMode: EraserMode
     let fingerDraws: Bool
-    /// false while a capture overlay (lasso / region erase) owns the touches
+    /// false while a capture overlay (lasso / region erase) owns touches
     let interactionEnabled: Bool
     let isActive: Bool
     let hub: CanvasHub
     let onChanged: (PKDrawing) -> Void
     /// Apple Pencil side double-tap: toggle pencil ↔ last eraser mode.
     var onPencilDoubleTap: (() -> Void)?
-    /// Fired for taps of ANY input type (pencil included — the canvas
-    /// swallows pencil touches, so SwiftUI gestures never see them).
-    var onTap: ((CGPoint) -> Void)?
+    /// Finger-only horizontal page flip: -1 previous, +1 next.
+    var onPageSwipe: ((Int) -> Void)?
+    /// Continuous eraser rub in DISPLAY coordinates; PageModel converts it.
+    var onErase: ((CGPoint) -> Void)?
 
-    func makeUIView(context: Context) -> PKCanvasView {
+    func makeUIView(context: Context) -> UIView {
+        let container = UIView()
+        container.backgroundColor = .clear
+
         let canvas = PKCanvasView()
-        // Pin the canvas to LIGHT appearance: PencilKit dynamically inverts
-        // ink colors for dark mode, which would wash near-black strokes out
-        // to white on our always-paper-colored page.
         canvas.overrideUserInterfaceStyle = .light
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
         canvas.isScrollEnabled = false
         canvas.contentInsetAdjustmentBehavior = .never
+        canvas.showsVerticalScrollIndicator = false
+        canvas.showsHorizontalScrollIndicator = false
+        canvas.bounces = false
         canvas.delegate = context.coordinator
+        container.addSubview(canvas)
+        canvas.frame = container.bounds
+        canvas.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        context.coordinator.canvas = canvas
+
         let pencilInteraction = UIPencilInteraction()
         pencilInteraction.delegate = context.coordinator
-        canvas.addInteraction(pencilInteraction)
+        container.addInteraction(pencilInteraction)
+
+        // Page swipes are DIRECT-FINGER ONLY. Pencil never reaches this.
+        let pager = UIPanGestureRecognizer(target: context.coordinator,
+                                           action: #selector(Coordinator.paged(_:)))
+        pager.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        pager.maximumNumberOfTouches = 1
+
+        // Raw observer gets pencil/finger points through PencilKit's subtree.
+        let observer = TouchObserverGesture()
+        observer.onTouch = { [weak coordinator = context.coordinator] point, phase, type in
+            coordinator?.observedTouch(at: point, phase: phase, type: type)
+        }
+
+        for gesture in [pager, observer] as [UIGestureRecognizer] {
+            gesture.cancelsTouchesInView = false
+            gesture.delaysTouchesBegan = false
+            gesture.delaysTouchesEnded = false
+            gesture.delegate = context.coordinator
+            container.addGestureRecognizer(gesture)
+        }
+        context.coordinator.pager = pager
+
         context.coordinator.programmatic = true
         canvas.drawing = initialDrawing
         context.coordinator.programmatic = false
-        let touchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue),
-                          NSNumber(value: UITouch.TouchType.pencil.rawValue)]
-        let tap = UITapGestureRecognizer(target: context.coordinator,
-                                         action: #selector(Coordinator.tapped(_:)))
-        tap.allowedTouchTypes = touchTypes
-        tap.cancelsTouchesInView = false
-        tap.delegate = context.coordinator
-        canvas.addGestureRecognizer(tap)
-
-        // A real eraser gesture is a RUB, not a stationary tap. PencilKit
-        // consumes pencil drags, so observe one simultaneously and feed every
-        // point to the pi-patch hit tester.
-        let rub = UIPanGestureRecognizer(target: context.coordinator,
-                                         action: #selector(Coordinator.rubbed(_:)))
-        rub.allowedTouchTypes = touchTypes
-        rub.maximumNumberOfTouches = 1
-        rub.cancelsTouchesInView = false
-        rub.delegate = context.coordinator
-        canvas.addGestureRecognizer(rub)
-        apply(to: canvas)
-        return canvas
+        apply(to: canvas, coordinator: context.coordinator)
+        if isActive { hub.activeCanvas = canvas }
+        return container
     }
 
-    func updateUIView(_ canvas: PKCanvasView, context: Context) {
-        apply(to: canvas)
-        context.coordinator.onTap = onTap
-        context.coordinator.onPencilDoubleTap = onPencilDoubleTap
-        context.coordinator.isActive = isActive
+    func updateUIView(_ container: UIView, context: Context) {
+        context.coordinator.parent = self
+        guard let canvas = context.coordinator.canvas else { return }
+        apply(to: canvas, coordinator: context.coordinator)
         if isActive { hub.activeCanvas = canvas }
-        // Adopt a rebuilt drawing ONLY on a load/rescale epoch change —
-        // never on ordinary SwiftUI refreshes, which would wipe user edits.
         if context.coordinator.lastEpoch != epoch {
             context.coordinator.lastEpoch = epoch
             context.coordinator.programmatic = true
@@ -113,9 +153,10 @@ struct CanvasView: UIViewRepresentable {
         }
     }
 
-    private func apply(to canvas: PKCanvasView) {
+    private func apply(to canvas: PKCanvasView, coordinator: Coordinator) {
         canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
         canvas.isUserInteractionEnabled = interactionEnabled
+        coordinator.pager?.isEnabled = isActive && interactionEnabled && !fingerDraws
         switch tool {
         case .pencil:
             canvas.tool = PencilBridge.pencilTool()
@@ -123,71 +164,115 @@ struct CanvasView: UIViewRepresentable {
             switch eraserMode {
             case .object: canvas.tool = PKEraserTool(.vector)
             case .pixel: canvas.tool = PKEraserTool(.bitmap, width: 14)
-            case .region: canvas.tool = PKEraserTool(.vector) // overlay captures instead
+            case .region: canvas.tool = PKEraserTool(.vector)
             }
         case .lasso:
-            canvas.tool = PencilBridge.pencilTool() // overlay captures instead
+            canvas.tool = PencilBridge.pencilTool()
         }
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onChanged: onChanged, lastEpoch: epoch, isActive: isActive,
-                    onPencilDoubleTap: onPencilDoubleTap, onTap: onTap)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     final class Coordinator: NSObject, PKCanvasViewDelegate, UIGestureRecognizerDelegate,
                              UIPencilInteractionDelegate {
-        let onChanged: (PKDrawing) -> Void
+        var parent: CanvasView
+        weak var canvas: PKCanvasView?
+        var pager: UIPanGestureRecognizer?
         var programmatic = false
         var lastEpoch: Int
-        var isActive: Bool
-        var onPencilDoubleTap: (() -> Void)?
-        var onTap: ((CGPoint) -> Void)?
+        private var lastRub: CGPoint?
 
-        init(onChanged: @escaping (PKDrawing) -> Void, lastEpoch: Int, isActive: Bool,
-             onPencilDoubleTap: (() -> Void)?, onTap: ((CGPoint) -> Void)?) {
-            self.onChanged = onChanged
-            self.lastEpoch = lastEpoch
-            self.isActive = isActive
-            self.onPencilDoubleTap = onPencilDoubleTap
-            self.onTap = onTap
+        init(_ parent: CanvasView) {
+            self.parent = parent
+            self.lastEpoch = parent.epoch
         }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             guard !programmatic else { return }
-            onChanged(canvasView.drawing)
+            parent.onChanged(canvasView.drawing)
         }
 
-        @objc func tapped(_ g: UITapGestureRecognizer) {
-            onTap?(g.location(in: g.view))
+        // MARK: finger-only pager
+
+        @objc func paged(_ gesture: UIPanGestureRecognizer) {
+            guard gesture.state == .ended else { return }
+            let translation = gesture.translation(in: gesture.view).x
+            let velocity = gesture.velocity(in: gesture.view).x
+            if translation < -90 || velocity < -600 { parent.onPageSwipe?(1) }
+            else if translation > 90 || velocity > 600 { parent.onPageSwipe?(-1) }
         }
 
-        @objc func rubbed(_ g: UIPanGestureRecognizer) {
-            guard g.state == .began || g.state == .changed else { return }
-            onTap?(g.location(in: g.view))
+        // MARK: continuous pi-ink eraser
+
+        private func erase(at point: CGPoint) { parent.onErase?(point) }
+
+        func observedTouch(at point: CGPoint, phase: UITouch.Phase, type: UITouch.TouchType) {
+            guard parent.isActive, parent.tool == .eraser, parent.eraserMode != .region else {
+                lastRub = nil
+                return
+            }
+            // Pencil always erases. Finger erases only when finger drawing is enabled;
+            // otherwise that finger remains exclusively available to the pager.
+            guard type == .pencil || parent.fingerDraws else { return }
+            switch phase {
+            case .began:
+                lastRub = point
+                erase(at: point)
+            case .moved:
+                if let last = lastRub {
+                    let distance = hypot(point.x - last.x, point.y - last.y)
+                    let steps = max(1, Int(distance / 8))
+                    for index in 1...steps {
+                        let t = CGFloat(index) / CGFloat(steps)
+                        erase(at: CGPoint(x: last.x + (point.x - last.x) * t,
+                                          y: last.y + (point.y - last.y) * t))
+                    }
+                } else {
+                    erase(at: point)
+                }
+                lastRub = point
+            case .ended, .cancelled:
+                lastRub = nil
+            default:
+                break
+            }
         }
+
+        // MARK: Apple Pencil side double-tap
 
         private func handlePencilDoubleTap() {
-            guard isActive else { return }
-            onPencilDoubleTap?()
+            guard parent.isActive else { return }
+            parent.onPencilDoubleTap?()
         }
 
-        // iOS 17.0–17.4 / older Pencil API.
         func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
             handlePencilDoubleTap()
         }
 
-        // iOS 17.5+ API. When both exist UIKit calls only this one.
         @available(iOS 17.5, *)
         func pencilInteraction(_ interaction: UIPencilInteraction,
                                didReceiveTap tap: UIPencilInteraction.Tap) {
             handlePencilDoubleTap()
         }
 
-        // run alongside PencilKit's own recognizers, never instead of them
-        func gestureRecognizer(_ g: UIGestureRecognizer,
+        // MARK: recognizer arbitration
+
+        func gestureRecognizer(_ gesture: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
             true
+        }
+
+        func gestureRecognizer(_ gesture: UIGestureRecognizer,
+                               shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool { false }
+
+        func gestureRecognizer(_ gesture: UIGestureRecognizer,
+                               shouldRequireFailureOf other: UIGestureRecognizer) -> Bool { false }
+
+        func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+            guard gesture === pager, let pan = gesture as? UIPanGestureRecognizer else { return true }
+            guard parent.isActive, parent.interactionEnabled, !parent.fingerDraws else { return false }
+            let velocity = pan.velocity(in: pan.view)
+            return abs(velocity.x) > abs(velocity.y) * 1.4
         }
     }
 }
