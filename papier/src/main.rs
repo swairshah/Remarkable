@@ -638,18 +638,24 @@ impl App {
     /// toolbar is drawn into the frame (blit_toolbar, no separate push) so it
     /// repaints in step with the page instead of lagging a frame behind.
     fn render_doc_full(&mut self, flash: bool) {
-        let has_raster = {
+        let (has_raster, has_gray_ink) = {
             let Screen::Doc(dv) = &mut self.screen else { return };
             dv.ink_settle = None; /* the whole-page repaint below supersedes any settle */
             dv.ink_settle_at = None;
             dv.doc.render_full(&mut self.fb);
-            dv.doc.has_raster()
+            /* pi content is antialiased Garamond + mid-gray strokes; synced
+             * patches (iPad sessions) reach the screen ONLY through this
+             * full render, so a hard binary wave would shred them thin */
+            let gray = dv.doc.page.patches.iter().any(|p| {
+                !p.texts.is_empty() || p.strokes.iter().any(|s| s.gray != ink::USER_GRAY)
+            });
+            (dv.doc.has_raster(), gray)
         };
         self.blit_toolbar();
         if flash {
             self.disp.full_refresh();
         } else {
-            let wave = if has_raster { Wave::Print } else { Wave::Page };
+            let wave = if has_raster || has_gray_ink { Wave::Print } else { Wave::Page };
             self.disp.update(0, 0, FB_W, FB_H, wave);
         }
     }
