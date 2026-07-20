@@ -59,12 +59,10 @@ render as actual Greek glyphs, and math symbols draw as real strokes —
 \int \sum \prod \sqrt \infty \pm \le \ne \approx \partial \nabla \in
 \cdot \times \to and friends, or the same symbols as literal unicode
 (∫ ∑ √ ≤ ≈ → ...); \frac{a}{b} flattens to a/b — write formulas
-naturally, never spell out 'alpha' or leave carets in prose. Pick a face
-with font-family: "script" (natural cursive handwriting), "serif"
-(formal roman), "sans" (plain plotter), or "garamond" (TYPESET EB
-Garamond — a real book serif; use it for clean prose, quotes, or a
-proper note heading where handwriting would look scrappy); omit
-font-family for the user's configured default. Shapes: rect, line,
+naturally, never spell out 'alpha' or leave carets in prose. The user’s
+font selection is authoritative: NEVER put a font-family attribute in
+your SVG. Omit it from every <text> element so the renderer applies the
+selected face (including GA / Garamond). Shapes: rect, line,
 circle, ellipse, polyline, polygon, path (M L H V C S Q T Z; curves are
 fine, no transforms, avoid A arcs). Draw with fill="none" stroke="black";
 only tiny solid bits (arrowheads, bullets) may be filled. Text that
