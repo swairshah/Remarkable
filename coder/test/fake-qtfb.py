@@ -36,9 +36,20 @@ class CoderHarness(Harness):
         return super().launch(**base)
 
 
+def seed_empty_project():
+    """A registered-but-never-opened repo (as if cloned from the desktop):
+    exercises the blank-page welcome header + the auto-offer open event."""
+    d = "/tmp/coder-data/projects/emptyrepo"
+    os.makedirs(os.path.join(d, "pages"), exist_ok=True)
+    with open(os.path.join(d, "meta.json"), "w") as f:
+        f.write('{"name": "emptyrepo", "url": "https://github.com/example/emptyrepo",'
+                ' "branch": "main", "summary": "a tiny demo repo - one lib, one cli"}')
+
+
 def main():
     app_bin, out_png = sys.argv[1], sys.argv[2]
     h = CoderHarness(app_bin)
+    seed_empty_project()
     try:
         s = h.launch()
         time.sleep(1.5)  # first paint done (notes pad), pi spawned
@@ -77,14 +88,30 @@ def main():
         s.drain(6.0)
         write_png(out_png.replace(".png", "-notes.png"))
 
-        # sidebar again -> DOCS (row 3: after 2 project rows + INSTRUCTIONS)
+        # sidebar again -> DOCS (row 4: NOTES, MICROGRAD, EMPTYREPO, INSTRUCTIONS, DOCS)
         s.pen_tap(40, 40)
         s.drain(1.5)
-        s.pen_tap(180, 130 + 3 * 68 + 30)
+        s.pen_tap(180, 130 + 4 * 68 + 30)
         s.drain(2.0)
         s.pen_tap(400, 160)  # the micrograd summary
         s.drain(2.5)
         write_png(out_png.replace(".png", "-docs.png"))
+
+        # leave the reader (swipe right -> list, swipe left -> close) ...
+        s.swipe(190, 1150)
+        s.drain(1.5)
+        s.swipe(1150, 190)
+        s.drain(6.0)
+        # ... and open the never-touched EMPTYREPO from the sidebar: the
+        # welcome header paints AND the blank page auto-offers to pi (the
+        # open event) -> fake pi draws a compact overview onto it
+        s.pen_tap(40, 40)
+        s.drain(1.5)
+        s.pen_tap(180, 130 + 2 * 68 + 30)  # EMPTYREPO row
+        s.drain(0.8)
+        write_png(out_png.replace(".png", "-blank-open.png"))  # header + "pi is reading"
+        s.drain(14.0)
+        write_png(out_png.replace(".png", "-blank-drawn.png"))  # the drawn overview
     finally:
         h.cleanup()
 

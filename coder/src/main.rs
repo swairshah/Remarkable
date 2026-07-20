@@ -543,6 +543,14 @@ struct App {
 
     /* LIVE web stream (sidebar toggle; off at launch) */
     live: live::Live,
+
+    /* blank-page-1 welcome chrome (name/url/summary + status) — drawn over
+     * the empty paper, never part of the page model, cleared when ink
+     * arrives. The rect is what needs repainting to remove it. */
+    blank_header: Option<Rect>,
+    /* projects auto-offered to pi this run ("user opened it, page 1 blank,
+     * draw the overview") — one send per project per run */
+    offered_blank: std::collections::HashSet<String>,
 }
 
 impl App {
@@ -776,7 +784,7 @@ impl App {
                     .and_then(|s| s.projects.get(pi))
                     .map(|p| p.slug.clone());
                 if let Some(slug) = slug {
-                    self.switch_project(&slug);
+                    self.switch_project(&slug, true);
                 }
             }
             SbRow::More => {} /* inert: the overflow marker */
@@ -841,9 +849,15 @@ impl App {
 
     /// Leave any menu view and put project `slug` on screen (its last page).
     /// A tap on the already-current project just closes the panel.
-    fn switch_project(&mut self, slug: &str) {
+    /// `offer`: this switch is the USER opening the project (sidebar tap)
+    /// — a blank page 1 is auto-offered to pi so the overview draws itself.
+    /// pi's own goto passes false: its clone workflow already draws.
+    fn switch_project(&mut self, slug: &str, offer: bool) {
         if self.nb.slug == slug {
             self.jump_to_page(self.nb.current);
+            if offer {
+                self.offer_blank_project();
+            }
             return;
         }
         if slug != project::NOTES_SLUG && !project::exists(slug) {
@@ -869,6 +883,7 @@ impl App {
         self.sidebar = None;
         self.lib_view = None;
         self.agent_page = None;
+        self.blank_header = None; /* the old project's; full render wiped it */
         self.nb = Codebook::open(slug);
         self.last_activity_page = self.nb.current;
         save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser, &self.nb.slug);
@@ -878,6 +893,9 @@ impl App {
         self.draw_toolbar();
         self.show_page_indicator();
         println!("coder: switched to project '{slug}'");
+        if offer {
+            self.offer_blank_project();
+        }
     }
 
     /// The small hamburger mark in the corner (coder pages only — the
@@ -890,6 +908,112 @@ impl App {
             self.fb.fill_rect(18, 22 + i * 10, 30, 4, draw::GRAY);
         }
         self.disp.update(14, 14, 44, 44, Wave::Ink);
+        self.draw_blank_header();
+    }
+
+    /// Is the screen showing an untouched page 1 of a repo project?
+    fn on_blank_project_page(&self) -> bool {
+        self.nb.slug != project::NOTES_SLUG
+            && self.nb.current == 0
+            && self.nb.count == 1
+            && self.nb.page.is_empty()
+            && self.nb.rasters.is_empty()
+            && self.agent_page.is_none()
+            && self.sidebar.is_none()
+            && self.lib_view.is_none()
+    }
+
+    /// The welcome header on a repo's untouched page 1: who this project is
+    /// and what happens next — so an opened project is never mute paper.
+    /// Chrome only: pi's snapshots come from the vector model and never see
+    /// it; the first real ink clears it.
+    fn draw_blank_header(&mut self) {
+        if !self.on_blank_project_page() {
+            return;
+        }
+        let p = project::get(&self.nb.slug);
+        let x = 90;
+        let mut y = 170;
+        text::draw_line(&mut self.fb, x, y, text::Face::Heading, 64.0, &p.name);
+        y += 84;
+        if !p.url.is_empty() {
+            let url = p.url.trim_start_matches("https://").trim_start_matches("http://");
+            text::draw_line(&mut self.fb, x, y, text::Face::Body, 34.0, url);
+            y += 52;
+        }
+        if !p.summary.is_empty() {
+            text::draw_line(&mut self.fb, x, y, text::Face::Body, 34.0, &p.summary);
+            y += 52;
+        }
+        y += 26;
+        let status = if self.streaming {
+            "pi is reading the code - the overview will draw itself here"
+        } else if self.quiet {
+            "pi is QUIET - flip it to AUTO in the sidebar, or write a question"
+        } else if self.offered_blank.contains(&self.nb.slug) {
+            "pi stayed quiet - write a question, or nudge it from the toolbar"
+        } else {
+            "pause a moment and pi will draw the overview here"
+        };
+        text::draw_line(&mut self.fb, x, y, text::Face::Body, 30.0, status);
+        let r = Rect { x0: x - 8, y0: 150, x1: FB_W - 20, y1: y + 60 }.clamp_screen();
+        self.blank_header = Some(r);
+        self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Text);
+    }
+
+    /// Repaint the welcome header so its status line tracks reality.
+    fn refresh_blank_header(&mut self) {
+        if self.blank_header.is_some() {
+            self.clear_blank_header();
+            self.draw_blank_header();
+        }
+    }
+
+    /// Remove the welcome chrome (the page underneath is blank paper).
+    fn clear_blank_header(&mut self) {
+        let Some(r) = self.blank_header.take() else { return };
+        if self.sidebar.is_some() || self.agent_page.is_some() || self.lib_view.is_some() {
+            return; /* another view owns the screen; its close repaints */
+        }
+        let had_gray = self.nb.page.render_region(&mut self.fb, r, &self.nb.rasters);
+        self.disp.update(r.x0, r.y0, r.w(), r.h(), if had_gray { Wave::Text } else { Wave::Ink });
+    }
+
+    /// The open event: the user just landed on a repo's blank page 1 — send
+    /// it to pi so the overview draws itself without a handwritten prompt.
+    /// One offer per project per run; pi's clone workflow covers the rest.
+    fn offer_blank_project(&mut self) {
+        if self.quiet || !self.on_blank_project_page() {
+            return;
+        }
+        if self.streaming || self.offered_blank.contains(&self.nb.slug) {
+            return;
+        }
+        let Some(pi) = self.pi.as_mut() else { return };
+        let (w, h, gray) = ink::snapshot_with_rasters(&self.nb.page, &self.nb.rasters, SNAP_DIV);
+        let context = format!(
+            "{} — the user just OPENED this project and its page 1 is BLANK \
+             paper: they are waiting to see what this codebase is. This is \
+             the open event, not a pen pause — do NOT pass. Read the repo \
+             on the VM (briefly: README, tree, entry points), then draw the \
+             overview here: name as a heading, a few terse facts, and the \
+             architecture diagram. The page is empty — use it all",
+            project_context(&self.nb),
+        );
+        let layout = layout_hints(&self.nb.page, self.text_scale);
+        match pi.send_page(&gray, w as u32, h as u32, &context, "none", &layout, false) {
+            Ok(()) => {
+                self.offered_blank.insert(self.nb.slug.clone());
+                self.page_changed = false;
+                self.streaming = true;
+                self.set_working(true);
+                self.live.status("think");
+                self.pi_alive_at = Some(Instant::now());
+                println!("coder: blank '{}' offered to pi (open event)", self.nb.slug);
+                self.refresh_blank_header(); /* status: "pi is reading..." */
+            }
+            Err(e) => println!("coder: open-event send failed: {e}"),
+        }
     }
 
     /* -- the library browser -- */
@@ -1888,6 +2012,12 @@ impl App {
     }
 
     fn ink_pass(&mut self, phase: PenPhase, x: i32, y: i32, pressure: i32) {
+        /* first ink on a welcome-header page: the header is chrome, not
+         * paper — wipe it before the stroke lands so the page the user
+         * writes on is the page pi will see (one region repaint, once) */
+        if self.blank_header.is_some() && self.cur_stroke.is_none() {
+            self.clear_blank_header();
+        }
         let p = Pt { x: x as f32, y: y as f32, r: brush_r(pressure) };
         let prev = match (&mut self.cur_stroke, phase) {
             (Some(s), PenPhase::Move) => {
@@ -2258,6 +2388,7 @@ impl App {
                 self.set_working(false);
                 self.live.status("idle");
                 self.pi_alive_at = None;
+                self.refresh_blank_header(); /* "reading..." -> quiet outcome */
                 let t: String = self.reply_buf.trim().chars().take(300).collect();
                 if !t.is_empty() {
                     println!("coder: pi said: {t}");
@@ -2282,6 +2413,7 @@ impl App {
                 self.set_working(false);
                 self.live.status("idle");
                 self.pi_alive_at = None;
+                self.refresh_blank_header();
                 self.pi_respawn_at = Some(Instant::now() + PI_RESPAWN_DELAY);
                 println!("coder: pi exited: {reason}; respawning in {}s", PI_RESPAWN_DELAY.as_secs());
             }
@@ -2458,6 +2590,9 @@ impl App {
         let idx = self.req_page(req);
         if idx >= self.nb.count {
             return json!({ "ok": false, "error": format!("no page {} (coder has {})", idx + 1, self.nb.count) });
+        }
+        if idx == self.nb.current {
+            self.clear_blank_header(); /* a raster is about to land */
         }
         let (Some(w), Some(h)) = (req["w"].as_i64(), req["h"].as_i64()) else {
             return json!({ "ok": false, "error": "missing 'w'/'h'" });
@@ -2757,6 +2892,7 @@ impl App {
         }
         let idx = self.req_page(req);
         if idx == self.nb.current {
+            self.clear_blank_header(); /* the page is about to stop being blank */
             self.checkpoint(false);
             let id = self.nb.page.add_patch(strokes, Vec::new());
             let patch = self.nb.page.patches.last().unwrap();
@@ -2892,7 +3028,7 @@ impl App {
                 if !project::exists(slug) {
                     return json!({ "ok": false, "error": format!("no project '{slug}' - create {}/meta.json first (or check coder_projects)", project::dir_of(slug)) });
                 }
-                self.switch_project(slug);
+                self.switch_project(slug, false);
             }
         }
         if let Some(p) = want_page {
@@ -3339,6 +3475,8 @@ fn main() -> std::process::ExitCode {
         wiped_rasters: Vec::new(),
         deghost_at: None,
         live: live::Live::new(),
+        blank_header: None,
+        offered_blank: std::collections::HashSet::new(),
     };
 
     /* first paint */
@@ -3347,6 +3485,9 @@ fn main() -> std::process::ExitCode {
     app.draw_menu_icon();
     app.draw_toolbar();
     app.show_page_indicator();
+    /* launched straight onto a repo's untouched page 1? same deal as
+     * opening it from the sidebar: pi owes the overview */
+    app.offer_blank_project();
 
     while RUNNING.load(Ordering::Relaxed) {
         let mut timeout = next_timeout(&app);

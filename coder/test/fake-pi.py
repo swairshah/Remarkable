@@ -80,6 +80,19 @@ SCRATCH_SVG = """<svg viewBox="0 0 1404 1872">
   <text x="90" y="1400" font-size="30" font-family="sans">scratch patch (will be erased)</text>
 </svg>"""
 
+# what the OPEN EVENT gets: a compact overview drawn on the current page
+OPEN_SVG = """<svg viewBox="0 0 1404 1872">
+  <text x="90" y="150" font-size="60" font-family="serif">emptyrepo</text>
+  <line x1="90" y1="180" x2="540" y2="180" stroke="black"/>
+  <text x="90" y="250" font-size="36">a tiny demo repo - one lib, one cli</text>
+  <rect x="220" y="420" width="360" height="150" fill="none" stroke="black"/>
+  <text x="400" y="505" font-size="38" text-anchor="middle">lib/</text>
+  <rect x="820" y="420" width="360" height="150" fill="none" stroke="black"/>
+  <text x="1000" y="505" font-size="38" text-anchor="middle">cli/</text>
+  <line x1="820" y1="495" x2="600" y2="495" stroke="black"/>
+  <polygon points="588,495 608,485 608,505" fill="black"/>
+</svg>"""
+
 SUMMARY_MD = """# micrograd
 
 A tiny scalar-valued autograd engine and a neural net library on top of it.
@@ -147,6 +160,16 @@ for line in sys.stdin:
     emit({"type": "response", "command": "prompt", "success": True})
     emit({"type": "agent_start"})
     time.sleep(1.0)  # "thinking" window: the harness can catch the dot
+
+    if "OPEN" in json.dumps(cmd):
+        # the open event: user landed on a blank project page — draw the
+        # overview right there (no goto: it is the current page)
+        emit({"type": "tool_execution_start", "toolName": "coder_draw", "args": {}})
+        r = tool_call({"cmd": "draw", "svg": OPEN_SVG})
+        print(f"fake-pi: open-event overview -> ok={r.get('ok')} id={r.get('id')}",
+              file=sys.stderr)
+        emit({"type": "agent_end", "messages": []})
+        continue
 
     if not responded:
         responded = True
