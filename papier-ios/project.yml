@@ -49,8 +49,8 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
         SWIFT_VERSION: "5.9"
-        MARKETING_VERSION: "1.1.8"
-        CURRENT_PROJECT_VERSION: "20"
+        MARKETING_VERSION: "1.1.9"
+        CURRENT_PROJECT_VERSION: "21"
         INFOPLIST_KEY_CFBundleDisplayName: Papier
         SUPPORTS_MACCATALYST: false
         ENABLE_PREVIEWS: true
