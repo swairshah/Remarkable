@@ -9,6 +9,7 @@ struct HomeView: View {
     @State private var showSettings = false
     @State private var newNotebookTitle = ""
     @State private var askNotebookTitle = false
+    @State private var openedDoc: PapierDoc?
 
     private let columns = [GridItem(.adaptive(minimum: 168, maximum: 230), spacing: 22)]
 
@@ -41,8 +42,14 @@ struct HomeView: View {
                     }
                 }
             }
-            .navigationDestination(for: PapierDoc.self) { doc in
-                DocumentView(doc: doc).environmentObject(store)
+            // Full-screen, NOT pushed: a pushed document inherits the
+            // navigation pop gesture, which raced page-back swipes and
+            // closed the document. A cover has no system dismiss gesture.
+            .fullScreenCover(item: $openedDoc) { doc in
+                NavigationStack {
+                    DocumentView(doc: doc)
+                }
+                .environmentObject(store)
             }
             .sheet(isPresented: $showSettings) { SettingsView().environmentObject(store) }
             .alert("New Notebook", isPresented: $askNotebookTitle) {
@@ -64,7 +71,7 @@ struct HomeView: View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 26) {
                 ForEach(store.docs) { doc in
-                    NavigationLink(value: doc) { DocCell(doc: doc) }
+                    Button { openedDoc = doc } label: { DocCell(doc: doc) }
                         .buttonStyle(.plain)
                 }
             }

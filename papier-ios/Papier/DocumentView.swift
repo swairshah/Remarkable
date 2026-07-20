@@ -11,6 +11,7 @@ struct DocumentView: View {
 
     @EnvironmentObject private var store: LibraryStore
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dismiss) private var dismiss
 
     @State private var seq: [SeqEntry]
     @State private var index: Int
@@ -120,13 +121,13 @@ struct DocumentView: View {
             }
             .animation(.spring(duration: 0.35), value: pi.toast)
         }
-        // NavigationStack's edge-pop gesture used to race a reverse page
-        // swipe and dismiss the whole document. Disable it only while this
-        // document is onscreen; the visible Back button still works.
-        .background(InteractivePopBlocker())
         .navigationTitle(doc.meta.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { dismiss() } label: { Image(systemName: "chevron.left") }
+                    .accessibilityLabel("Back to library")
+            }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 syncBadge
                 Text("\(index + 1) / \(seq.count)")
@@ -591,50 +592,3 @@ private struct PageScreen: View {
     }
 }
 
-// MARK: - navigation gesture isolation
-
-/// A horizontal page drag must never become NavigationStack's interactive
-/// back gesture. The normal navigation-bar Back button remains available.
-private struct InteractivePopBlocker: UIViewControllerRepresentable {
-    func makeUIViewController(context: Context) -> PopBlockerController {
-        PopBlockerController()
-    }
-
-    func updateUIViewController(_ controller: PopBlockerController, context: Context) {
-        controller.disablePopGesture()
-    }
-
-    static func dismantleUIViewController(_ controller: PopBlockerController,
-                                           coordinator: Void) {
-        controller.restorePopGesture()
-    }
-}
-
-private final class PopBlockerController: UIViewController {
-    private weak var blockedGesture: UIGestureRecognizer?
-    private var previousEnabled = true
-
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        disablePopGesture()
-    }
-
-    override func didMove(toParent parent: UIViewController?) {
-        super.didMove(toParent: parent)
-        DispatchQueue.main.async { [weak self] in self?.disablePopGesture() }
-    }
-
-    func disablePopGesture() {
-        guard let gesture = navigationController?.interactivePopGestureRecognizer else { return }
-        if blockedGesture !== gesture {
-            blockedGesture = gesture
-            previousEnabled = gesture.isEnabled
-        }
-        gesture.isEnabled = false
-    }
-
-    func restorePopGesture() {
-        blockedGesture?.isEnabled = previousEnabled
-        blockedGesture = nil
-    }
-}
