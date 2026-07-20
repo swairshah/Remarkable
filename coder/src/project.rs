@@ -75,13 +75,23 @@ fn mtime_of(path: &str) -> i64 {
         .unwrap_or(0)
 }
 
-fn count_pages(slug: &str) -> usize {
+pub fn count_pages(slug: &str) -> usize {
     let dir = pages_dir(slug);
     let mut n = 0usize;
     while std::path::Path::new(&format!("{dir}/page-{:04}.json", n + 1)).exists() {
         n += 1;
     }
     n
+}
+
+/// Page/raster file paths for a project that is NOT the one on screen
+/// (headless tool operations follow pi's turn, not the user's eyes).
+pub fn page_path(slug: &str, i: usize) -> String {
+    format!("{}/page-{:04}.json", pages_dir(slug), i + 1)
+}
+
+pub fn render_path(slug: &str, i: usize) -> String {
+    format!("{}/render-{:04}.skr", pages_dir(slug), i + 1)
 }
 
 fn read_meta(slug: &str) -> (String, String, String) {

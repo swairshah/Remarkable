@@ -551,6 +551,14 @@ struct App {
     /* projects auto-offered to pi this run ("user opened it, page 1 blank,
      * draw the overview") — one send per project per run */
     offered_blank: std::collections::HashSet<String>,
+    /* which (project, page) the in-flight pi turn is ABOUT: set when a
+     * message is sent, moved by pi's own goto, cleared at turn end. Tool
+     * calls default HERE, not to the screen — the user may have flipped
+     * to another project while pi was reading code */
+    turn_focus: Option<(String, usize)>,
+    /* a blank-project offer that arrived while pi was mid-turn; sent when
+     * the turn ends if the user is still looking at that project */
+    pending_offer: Option<String>,
 }
 
 impl App {
@@ -884,6 +892,9 @@ impl App {
         self.lib_view = None;
         self.agent_page = None;
         self.blank_header = None; /* the old project's; full render wiped it */
+        self.pending_offer = None; /* the queued open event was for the old screen */
+        /* turn_focus SURVIVES: it belongs to pi's in-flight turn, and its
+         * tool calls must keep landing on the project pi is working on */
         self.nb = Codebook::open(slug);
         self.last_activity_page = self.nb.current;
         save_settings(self.text_scale, self.quiet, self.pi_font, self.eraser, &self.nb.slug);
@@ -946,7 +957,9 @@ impl App {
             y += 52;
         }
         y += 26;
-        let status = if self.streaming {
+        let status = if self.streaming && self.pending_offer.as_deref() == Some(self.nb.slug.as_str()) {
+            "pi is busy on another project - this overview is queued next"
+        } else if self.streaming {
             "pi is reading the code - the overview will draw itself here"
         } else if self.quiet {
             "pi is QUIET - flip it to AUTO in the sidebar, or write a question"
@@ -986,7 +999,14 @@ impl App {
         if self.quiet || !self.on_blank_project_page() {
             return;
         }
-        if self.streaming || self.offered_blank.contains(&self.nb.slug) {
+        if self.offered_blank.contains(&self.nb.slug) {
+            return;
+        }
+        if self.streaming {
+            /* pi is mid-turn (likely reading another repo): queue this open
+             * event; the turn's end sends it if the user is still here */
+            self.pending_offer = Some(self.nb.slug.clone());
+            self.refresh_blank_header();
             return;
         }
         let Some(pi) = self.pi.as_mut() else { return };
@@ -1004,6 +1024,7 @@ impl App {
         match pi.send_page(&gray, w as u32, h as u32, &context, "none", &layout, false) {
             Ok(()) => {
                 self.offered_blank.insert(self.nb.slug.clone());
+                self.turn_focus = Some((self.nb.slug.clone(), 0));
                 self.page_changed = false;
                 self.streaming = true;
                 self.set_working(true);
@@ -2357,6 +2378,13 @@ impl App {
         let context = project_context(&self.nb);
         match pi.send_page(&gray, w as u32, h as u32, &context, &patches, &layout, streaming) {
             Ok(()) => {
+                if !streaming {
+                    /* a turn-starting message sets the turn's focus; a
+                     * FOLLOW-UP (sent mid-turn) must not yank it from under
+                     * the work in flight — pi reads the follow-up later and
+                     * can goto / pass `project` explicitly */
+                    self.turn_focus = Some((self.nb.slug.clone(), self.nb.current));
+                }
                 self.page_changed = false;
                 self.streaming = true;
                 self.set_working(true);
@@ -2388,7 +2416,15 @@ impl App {
                 self.set_working(false);
                 self.live.status("idle");
                 self.pi_alive_at = None;
+                self.turn_focus = None;
                 self.refresh_blank_header(); /* "reading..." -> quiet outcome */
+                /* a project opened mid-turn is still waiting for its
+                 * overview — offer it now if the user is still there */
+                if let Some(slug) = self.pending_offer.take() {
+                    if slug == self.nb.slug {
+                        self.offer_blank_project();
+                    }
+                }
                 let t: String = self.reply_buf.trim().chars().take(300).collect();
                 if !t.is_empty() {
                     println!("coder: pi said: {t}");
@@ -2413,6 +2449,8 @@ impl App {
                 self.set_working(false);
                 self.live.status("idle");
                 self.pi_alive_at = None;
+                self.turn_focus = None;
+                self.pending_offer = None;
                 self.refresh_blank_header();
                 self.pi_respawn_at = Some(Instant::now() + PI_RESPAWN_DELAY);
                 println!("coder: pi exited: {reason}; respawning in {}s", PI_RESPAWN_DELAY.as_secs());
@@ -2480,8 +2518,102 @@ impl App {
         }
     }
 
+    /// Which PROJECT a turn-scoped tool call targets: the explicit param,
+    /// else the project this turn is about (where the message came from /
+    /// where pi last goto'd), else the screen. The screen is the LAST
+    /// resort: the user may have flipped elsewhere while pi worked.
+    fn req_project(&self, req: &Value) -> String {
+        if let Some(p) = req["project"].as_str().filter(|s| !s.is_empty()) {
+            return p.to_string();
+        }
+        if let Some((slug, _)) = &self.turn_focus {
+            return slug.clone();
+        }
+        self.nb.slug.clone()
+    }
+
+    /// Which PAGE of `slug` the call targets: explicit param, else the
+    /// turn's page (when the turn is about `slug`), else the on-screen
+    /// page (when `slug` is on screen), else page 1.
+    fn req_page_for(&self, req: &Value, slug: &str) -> usize {
+        if let Some(p) = req["page"].as_u64().filter(|&p| p >= 1) {
+            return p as usize - 1;
+        }
+        if let Some((ts, tp)) = &self.turn_focus {
+            if ts == slug {
+                return *tp;
+            }
+        }
+        if slug == self.nb.slug {
+            self.nb.current
+        } else {
+            0
+        }
+    }
+
+    /// Draw onto a project that is NOT on screen: pure file mutation — no
+    /// animation, no repaint. `idx == count` appends a fresh page.
+    fn headless_draw(&mut self, slug: &str, idx: usize, strokes: Vec<Stroke>, notes: &[String]) -> Value {
+        if !project::exists(slug) {
+            return json!({ "ok": false, "error": format!("no project '{slug}'") });
+        }
+        let count = project::count_pages(slug);
+        let idx = idx.min(count); /* beyond-the-end clamps to "append" */
+        let path = project::page_path(slug, idx);
+        let mut p = if idx < count {
+            match Page::load(&path) {
+                Some(p) => p,
+                None => return json!({ "ok": false, "error": "page file unreadable" }),
+            }
+        } else {
+            Page::default()
+        };
+        let id = p.add_patch(strokes, Vec::new());
+        let bbox = ink::patch_bbox(p.patches.last().unwrap()).map(|b| b.clamp_screen());
+        if let Err(e) = p.save(&path) {
+            return json!({ "ok": false, "error": format!("save: {e}") });
+        }
+        println!("coder: headless patch #{id} on '{slug}' page {}", idx + 1);
+        json!({
+            "ok": true, "id": id, "project": slug, "page": idx + 1,
+            "page_count": count.max(idx + 1), "appended": idx >= count,
+            "bbox": bbox.map(|b| json!([b.x0, b.y0, b.x1, b.y1])).unwrap_or(json!(null)),
+            "notes": notes,
+            "note": format!(
+                "drawn on project '{slug}' page {} — NOT on screen (the user is viewing '{}'); \
+                 it renders when they open it",
+                idx + 1, self.nb.slug
+            ),
+        })
+    }
+
     fn ipc_view(&mut self, req: &Value) -> Value {
-        let idx = self.req_page(req);
+        let slug = self.req_project(req);
+        let idx = self.req_page_for(req, &slug);
+        if slug != self.nb.slug {
+            if !project::exists(&slug) || idx >= project::count_pages(&slug) {
+                return json!({ "ok": false, "error": format!("no page {} on project '{slug}'", idx + 1) });
+            }
+            let Some(p) = Page::load(&project::page_path(&slug, idx)) else {
+                return json!({ "ok": false, "error": "page file unreadable" });
+            };
+            let rl = ink::load_rasters(&project::render_path(&slug, idx));
+            let (w, h, gray) = ink::snapshot_with_rasters(&p, &rl, SNAP_DIV);
+            let png = png::encode_gray(w as u32, h as u32, &gray);
+            return json!({
+                "ok": true,
+                "project": slug,
+                "page": idx + 1,
+                "page_count": project::count_pages(&slug),
+                "page_width": FB_W,
+                "page_height": FB_H,
+                "image_scale": SNAP_DIV,
+                "png_base64": png::base64(&png),
+                "patches": patch_list(&p),
+                "rasters": raster_list(&rl),
+                "note": format!("this is project '{slug}' — not what is on the user's screen ('{}')", self.nb.slug),
+            });
+        }
         if idx >= self.nb.count {
             return json!({ "ok": false, "error": format!("no page {} (coder has {})", idx + 1, self.nb.count) });
         }
@@ -2520,6 +2652,10 @@ impl App {
     /// instructions inside it, an existing raster with annotation marks).
     /// Composites raster patches under the ink unless ink:false/rasters:false.
     fn ipc_crop(&mut self, req: &Value) -> Value {
+        let slug = self.req_project(req);
+        if slug != self.nb.slug {
+            return json!({ "ok": false, "error": format!("crop is screen-bound and the screen shows '{}', not '{slug}' — coder_goto there first", self.nb.slug) });
+        }
         let idx = self.req_page(req);
         if idx >= self.nb.count {
             return json!({ "ok": false, "error": format!("no page {} (coder has {})", idx + 1, self.nb.count) });
@@ -2587,6 +2723,10 @@ impl App {
     /// Place an agent-generated grayscale raster at an agent-chosen page
     /// rect (aspect-fit inside it, centered). Returns the raster id.
     fn ipc_place(&mut self, req: &Value) -> Value {
+        let slug = self.req_project(req);
+        if slug != self.nb.slug {
+            return json!({ "ok": false, "error": format!("place is screen-bound and the screen shows '{}', not '{slug}' — coder_goto there first", self.nb.slug) });
+        }
         let idx = self.req_page(req);
         if idx >= self.nb.count {
             return json!({ "ok": false, "error": format!("no page {} (coder has {})", idx + 1, self.nb.count) });
@@ -2685,6 +2825,10 @@ impl App {
     /// Hand back one raster patch as PNG — the input for an edit-mode
     /// regeneration ("remove the background", "darker").
     fn ipc_raster_get(&mut self, req: &Value) -> Value {
+        let slug = self.req_project(req);
+        if slug != self.nb.slug {
+            return json!({ "ok": false, "error": format!("raster_get is screen-bound and the screen shows '{}', not '{slug}'", self.nb.slug) });
+        }
         let idx = self.req_page(req);
         if idx >= self.nb.count {
             return json!({ "ok": false, "error": format!("no page {} (coder has {})", idx + 1, self.nb.count) });
@@ -2729,6 +2873,10 @@ impl App {
 
     /// Remove one raster patch (the agent fixing itself, or replacing).
     fn ipc_raster_erase(&mut self, req: &Value) -> Value {
+        let slug = self.req_project(req);
+        if slug != self.nb.slug {
+            return json!({ "ok": false, "error": format!("raster_erase is screen-bound and the screen shows '{}', not '{slug}'", self.nb.slug) });
+        }
         let idx = self.req_page(req);
         if idx >= self.nb.count {
             return json!({ "ok": false, "error": format!("no page {} (coder has {})", idx + 1, self.nb.count) });
@@ -2815,16 +2963,37 @@ impl App {
     /// cleaning up handwritten instructions it has acted on. Fully-inside
     /// keeps a sloppy rect from chopping the user's drawing.
     fn ipc_erase_ink(&mut self, req: &Value) -> Value {
-        let idx = self.req_page(req);
-        if idx >= self.nb.count {
-            return json!({ "ok": false, "error": format!("no page {} (coder has {})", idx + 1, self.nb.count) });
-        }
         let Some(rect) = req_rect(req, "rect") else {
             return json!({ "ok": false, "error": "missing 'rect' [x0,y0,x1,y1]" });
         };
         let r = rect.clamp_screen();
         let inside = |b: &Rect| b.x0 >= r.x0 && b.x1 <= r.x1 && b.y0 >= r.y0 && b.y1 <= r.y1;
 
+        let slug = self.req_project(req);
+        let idx = self.req_page_for(req, &slug);
+        if slug != self.nb.slug {
+            if !project::exists(&slug) || idx >= project::count_pages(&slug) {
+                return json!({ "ok": false, "error": format!("no page {} on project '{slug}'", idx + 1) });
+            }
+            let path = project::page_path(&slug, idx);
+            let Some(mut p) = Page::load(&path) else {
+                return json!({ "ok": false, "error": "page file unreadable" });
+            };
+            let before = p.strokes.len();
+            p.strokes.retain(|s| !ink::stroke_bbox(s).as_ref().is_some_and(inside));
+            let removed = before - p.strokes.len();
+            if removed == 0 {
+                return json!({ "ok": false, "error": "no user strokes lie fully inside that rect" });
+            }
+            p.dirty = true;
+            if let Err(e) = p.save(&path) {
+                return json!({ "ok": false, "error": format!("save: {e}") });
+            }
+            return json!({ "ok": true, "project": slug, "page": idx + 1, "removed": removed });
+        }
+        if idx >= self.nb.count {
+            return json!({ "ok": false, "error": format!("no page {} (coder has {})", idx + 1, self.nb.count) });
+        }
         if idx == self.nb.current {
             let st = self.snapshot_state(false);
             let before = self.nb.page.strokes.len();
@@ -2890,7 +3059,13 @@ impl App {
         for n in &notes {
             println!("coder: draw note: {n}");
         }
-        let idx = self.req_page(req);
+        let slug = self.req_project(req);
+        let idx = self.req_page_for(req, &slug);
+        if slug != self.nb.slug {
+            /* the turn is about another project than the screen shows —
+             * the user flipped away while pi worked. Ink follows the TURN. */
+            return self.headless_draw(&slug, idx, strokes, &notes);
+        }
         if idx == self.nb.current {
             self.clear_blank_header(); /* the page is about to stop being blank */
             self.checkpoint(false);
@@ -2960,7 +3135,26 @@ impl App {
         let Some(id) = req["id"].as_u64() else {
             return json!({ "ok": false, "error": "missing 'id'" });
         };
-        let idx = self.req_page(req);
+        let slug = self.req_project(req);
+        let idx = self.req_page_for(req, &slug);
+        if slug != self.nb.slug {
+            if !project::exists(&slug) || idx >= project::count_pages(&slug) {
+                return json!({ "ok": false, "error": format!("no page {} on project '{slug}'", idx + 1) });
+            }
+            let path = project::page_path(&slug, idx);
+            let Some(mut p) = Page::load(&path) else {
+                return json!({ "ok": false, "error": "page file unreadable" });
+            };
+            return match p.remove_patch(id) {
+                Some(_) => {
+                    if let Err(e) = p.save(&path) {
+                        return json!({ "ok": false, "error": format!("save: {e}") });
+                    }
+                    json!({ "ok": true, "project": slug, "page": idx + 1 })
+                }
+                None => json!({ "ok": false, "error": format!("no patch {id} on '{slug}' page {}", idx + 1) }),
+            };
+        }
         if idx == self.nb.current {
             /* drop any still-animating strokes of this patch */
             let mut region: Option<Rect> = None;
@@ -3040,6 +3234,8 @@ impl App {
                 self.flip(idx as i32 - self.nb.current as i32);
             }
         }
+        /* pi explicitly moved its focus: its later tool calls follow */
+        self.turn_focus = Some((self.nb.slug.clone(), self.nb.current));
         println!("coder: pi turned to '{}' page {}", self.nb.slug, self.nb.current + 1);
         json!({
             "ok": true, "project": self.nb.slug, "page": self.nb.current + 1,
@@ -3477,6 +3673,8 @@ fn main() -> std::process::ExitCode {
         live: live::Live::new(),
         blank_header: None,
         offered_blank: std::collections::HashSet::new(),
+        turn_focus: None,
+        pending_offer: None,
     };
 
     /* first paint */

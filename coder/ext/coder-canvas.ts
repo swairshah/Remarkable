@@ -126,15 +126,18 @@ export default function (pi: ExtensionAPI) {
     name: "coder_draw",
     label: "coder: draw on the page",
     description:
-      "Draw on the current project's page as freeform pen ink (black on the page; shown " +
-      "gray in the images you receive so you can tell your ink from the user's). Takes " +
-      "an SVG whose coordinate space IS the page: 1404 wide x 1872 tall, y down (omit " +
-      'viewBox or use viewBox="0 0 1404 1872"). Supported: rect, line, circle, ellipse, ' +
-      "polyline, polygon, path (M L H V C S Q T Z), and <text> (one line each; x,y = " +
-      'baseline; font-family "script" | "serif" | "sans"). Use fill="none" except tiny ' +
-      "solid bits (arrowheads). `page` beyond the last one APPENDS a fresh page — build " +
-      "multi-page documents that way. Returns a patch id — keep it if you may erase or " +
-      "replace this later.",
+      "Draw on a project page as freeform pen ink (black on the page; shown gray in the " +
+      "images you receive so you can tell your ink from the user's). Targets THIS TURN'S " +
+      "project and page by default (the one your latest page message was about, or " +
+      "wherever you last coder_goto'd) — even if the user has flipped the screen to " +
+      "another project meanwhile, your ink lands where your work belongs; the result " +
+      "says where. Takes an SVG whose coordinate space IS the page: 1404 wide x 1872 " +
+      'tall, y down (omit viewBox or use viewBox="0 0 1404 1872"). Supported: rect, ' +
+      "line, circle, ellipse, polyline, polygon, path (M L H V C S Q T Z), and <text> " +
+      '(one line each; x,y = baseline; font-family "script" | "serif" | "sans"). Use ' +
+      'fill="none" except tiny solid bits (arrowheads). `page` beyond the last one ' +
+      "APPENDS a fresh page — build multi-page documents that way. Returns a patch id — " +
+      "keep it if you may erase or replace this later.",
     parameters: {
       type: "object",
       properties: {
@@ -142,20 +145,25 @@ export default function (pi: ExtensionAPI) {
         page: {
           type: "number",
           description:
-            "1-based page number; omit for the page on screen; count+1 appends a new page",
+            "1-based page number; omit for this turn's page; count+1 appends a new page",
+        },
+        project: {
+          type: "string",
+          description: "Project slug; omit for this turn's project",
         },
       },
       required: ["svg"],
     },
     async execute(_id: string, params: any) {
       try {
-        const r = await call({ cmd: "draw", svg: params.svg, page: params.page });
+        const r = await call({ cmd: "draw", svg: params.svg, page: params.page, project: params.project });
         if (!r.ok) return textResult(`draw failed: ${r.error}`, true);
         const bbox = r.bbox ? ` bbox (${r.bbox[0]},${r.bbox[1]})-(${r.bbox[2]},${r.bbox[3]})` : "";
         const notes = r.notes?.length ? ` NOTE: ${r.notes.join("; ")}.` : "";
         const appended = r.appended ? ` (new page appended — the project now has ${r.page_count})` : "";
+        const where = r.note ? ` ${r.note}.` : "";
         return textResult(
-          `Drawn on page ${r.page} as patch #${r.id}${bbox}${appended}. ` +
+          `Drawn on ${r.project ? `project '${r.project}' ` : ""}page ${r.page} as patch #${r.id}${bbox}${appended}.${where} ` +
             `Use coder_erase with id ${r.id} to remove it.${notes}`,
         );
       } catch (e: any) {
@@ -177,14 +185,18 @@ export default function (pi: ExtensionAPI) {
         id: { type: "number", description: "The patch id coder_draw returned" },
         page: {
           type: "number",
-          description: "1-based page number; omit for the page currently on screen",
+          description: "1-based page number; omit for this turn's page",
+        },
+        project: {
+          type: "string",
+          description: "Project slug; omit for this turn's project",
         },
       },
       required: ["id"],
     },
     async execute(_id: string, params: any) {
       try {
-        const r = await call({ cmd: "erase", id: params.id, page: params.page });
+        const r = await call({ cmd: "erase", id: params.id, page: params.page, project: params.project });
         return r.ok
           ? textResult(`Patch ${params.id} erased.`)
           : textResult(`erase failed: ${r.error}`, true);
@@ -214,14 +226,18 @@ export default function (pi: ExtensionAPI) {
         },
         page: {
           type: "number",
-          description: "1-based page number; omit for the page currently on screen",
+          description: "1-based page number; omit for this turn's page",
+        },
+        project: {
+          type: "string",
+          description: "Project slug; omit for this turn's project",
         },
       },
       required: ["rect"],
     },
     async execute(_id: string, params: any) {
       try {
-        const r = await call({ cmd: "erase_ink", rect: params.rect, page: params.page });
+        const r = await call({ cmd: "erase_ink", rect: params.rect, page: params.page, project: params.project });
         return r.ok
           ? textResult(`Removed ${r.removed} handwritten strokes on page ${r.page}.`)
           : textResult(`erase_ink failed: ${r.error}`, true);
@@ -235,22 +251,27 @@ export default function (pi: ExtensionAPI) {
     name: "coder_view",
     label: "coder: look at a page",
     description:
-      "Returns a fresh image of a page of the CURRENT project (half scale: multiply " +
-      "image coordinates by 2 to get page coordinates) plus the list of your ink " +
-      "patches on it. Use it to check the page before drawing, after drawing, or to " +
-      "re-read what the user wrote. For another project's pages, coder_goto there first.",
+      "Returns a fresh image of a project page (half scale: multiply image coordinates " +
+      "by 2 to get page coordinates) plus the list of your ink patches on it. Targets " +
+      "this turn's project/page by default; pass `project`/`page` to read any other. " +
+      "Use it to check the page before drawing, after drawing, or to re-read what the " +
+      "user wrote.",
     parameters: {
       type: "object",
       properties: {
         page: {
           type: "number",
-          description: "1-based page number; omit for the page currently on screen",
+          description: "1-based page number; omit for this turn's page",
+        },
+        project: {
+          type: "string",
+          description: "Project slug; omit for this turn's project",
         },
       },
     },
     async execute(_id: string, params: any) {
       try {
-        const r = await call({ cmd: "view", page: params.page }, 30000);
+        const r = await call({ cmd: "view", page: params.page, project: params.project }, 30000);
         if (!r.ok) return textResult(`view failed: ${r.error}`, true);
         const patches =
           (r.patches ?? [])

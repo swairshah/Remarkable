@@ -162,12 +162,15 @@ for line in sys.stdin:
     time.sleep(1.0)  # "thinking" window: the harness can catch the dot
 
     if "OPEN" in json.dumps(cmd):
-        # the open event: user landed on a blank project page — draw the
-        # overview right there (no goto: it is the current page)
+        # the open event: "read the repo" for a while FIRST — long enough
+        # for the scenario to flip the screen to another project — then
+        # draw with no project param: the app must route the ink to the
+        # TURN's project (the race that once painted pi's diagram on tau)
+        time.sleep(4.0)
         emit({"type": "tool_execution_start", "toolName": "coder_draw", "args": {}})
         r = tool_call({"cmd": "draw", "svg": OPEN_SVG})
-        print(f"fake-pi: open-event overview -> ok={r.get('ok')} id={r.get('id')}",
-              file=sys.stderr)
+        print(f"fake-pi: open-event overview -> ok={r.get('ok')} id={r.get('id')} "
+              f"project={r.get('project')} note={r.get('note')}", file=sys.stderr)
         emit({"type": "agent_end", "messages": []})
         continue
 

@@ -104,13 +104,27 @@ def main():
         s.drain(6.0)
         # ... and open the never-touched EMPTYREPO from the sidebar: the
         # welcome header paints AND the blank page auto-offers to pi (the
-        # open event) -> fake pi draws a compact overview onto it
+        # open event)
         s.pen_tap(40, 40)
         s.drain(1.5)
         s.pen_tap(180, 130 + 2 * 68 + 30)  # EMPTYREPO row
         s.drain(0.8)
         write_png(out_png.replace(".png", "-blank-open.png"))  # header + "pi is reading"
-        s.drain(14.0)
+
+        # THE RACE: flip to NOTES while pi is still "reading the repo" —
+        # its draw must follow ITS TURN (emptyrepo), never the screen
+        s.pen_tap(40, 40)
+        s.drain(1.0)
+        s.pen_tap(180, 160)  # NOTES row
+        s.drain(8.0)         # fake pi draws mid-race (headless, off screen)
+        write_png(out_png.replace(".png", "-race-notes.png"))  # notes: squiggles only
+
+        # back to emptyrepo: the overview is there, rendered from disk.
+        # (row 1 now: the headless draw made it the most recent project)
+        s.pen_tap(40, 40)
+        s.drain(1.5)
+        s.pen_tap(180, 130 + 1 * 68 + 30)
+        s.drain(4.0)
         write_png(out_png.replace(".png", "-blank-drawn.png"))  # the drawn overview
     finally:
         h.cleanup()

@@ -189,15 +189,24 @@ coder_erase(id) removes that patch cleanly (their ink underneath \
 survives). Erase your own patch when replacing a stale diagram — say \
 after a merged PR changes the architecture — not just to add more.
 
+YOUR TOOLS FOLLOW YOUR TURN, NOT THE USER'S EYES. Each page message is \
+about one project+page, and coder_draw / coder_view / coder_erase / \
+coder_erase_ink target THAT project+page by default — even when the \
+user flips the screen to another project while you are reading code, \
+your ink still lands where your work belongs (the result says where it \
+landed, and whether it was on screen). coder_goto moves your focus \
+explicitly; pass `project`/`page` on any tool when in doubt. Never \
+assume the screen: between your reading a repo and drawing, the user \
+may be three projects away.
+
 YOUR CONTEXT IS COMPRESSED. Only the newest page image travels with \
 you; older pauses appear as compact inventories or one-line pointers. \
 When you need to actually SEE a page — exact ink, layout, before \
 drawing on it — call coder_view for a fresh image (always the live \
-truth). coder_view and coder_draw take a page number of the CURRENT \
-project; switch projects with coder_goto first. coder_projects lists \
-every project with its page counts. The user can also restart your \
-session from the toolbar: you wake fresh — re-read the page with \
-coder_view and the registry with your file tools before acting.
+truth). coder_projects lists every project with its page counts. The \
+user can also restart your session from the toolbar: you wake fresh — \
+re-read the page with coder_view and the registry with your file tools \
+before acting.
 
 The page image you receive is HALF scale: multiply image coordinates \
 by 2 to get page coordinates.
