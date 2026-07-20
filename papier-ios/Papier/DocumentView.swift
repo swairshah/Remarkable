@@ -248,8 +248,15 @@ struct DocumentView: View {
                     PapierPiGlyph().fill(Color.primary)
                         .frame(width: 20, height: 25)
                 case .nudge:
-                    PapierNudgeGlyph().fill(Color.primary)
-                        .frame(width: 30, height: 24)
+                    VStack(spacing: -2) {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("NUDGE")
+                            .font(.system(size: 7, weight: .bold, design: .rounded))
+                            .tracking(-0.35)
+                    }
+                    .foregroundStyle(Color.primary)
+                    .frame(width: 30, height: 26)
                 }
             }
             .frame(width: 30, height: 30)
@@ -359,6 +366,9 @@ private struct PageScreen: View {
                         .colorMultiply(paper)
                         .frame(width: fit.width, height: fit.height)
                         .background(paper)
+                        // Hard page boundary: vector text/ink can never paint
+                        // into the desk or underneath the tool rail.
+                        .clipped()
                         .shadow(color: .black.opacity(0.14), radius: 8, y: 2)
                         .task(id: fit.width) {
                             await model.load(displayWidth: fit.width)

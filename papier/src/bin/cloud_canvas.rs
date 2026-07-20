@@ -18,8 +18,9 @@
 
 use libreink_core::fb::{SCREEN_H, SCREEN_W};
 use libreink_core::{png, png_dec};
-use libreink_page::{patch_bbox, Page, Pt, Stroke, AI_GRAY};
+use libreink_page::{patch_bbox, Page, Pt, Stroke, TextRun, AI_GRAY};
 use libreink_svg::{self as svg_ink, PiFont};
+use libreink_text::{self, Face};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::sync::OnceLock;
@@ -343,9 +344,13 @@ fn layout_hints(d: &DocView, entry: Entry, ink: &Page) -> String {
                 let (left, right) = (tx0, SCREEN_W - tx1);
                 let (top, bottom) = (ty0, SCREEN_H - ty1);
                 let fs = ((lh * 9) / 10).clamp(24, 42);
-                let best = if right >= left && right >= 100 {
-                    format!("the RIGHT margin (x{}-{}) is your writing zone", tx1 + 12, SCREEN_W - 10)
-                } else if left > right && left >= 100 {
+                // Both devices keep their tool rail over the right edge. Do
+                // not call that covered strip writable margin.
+                let right_edge = SCREEN_W - 82;
+                let right_usable = (right_edge - tx1).max(0);
+                let best = if right_usable >= left && right_usable >= 100 {
+                    format!("the RIGHT margin (x{}-{}) is your writing zone", tx1 + 12, right_edge)
+                } else if left >= 100 {
                     format!("the LEFT margin (x10-{}) is your writing zone", tx0 - 12)
                 } else if bottom >= 140 {
                     format!("margins are narrow — use the BOTTOM strip (y{}-{})", ty1 + 20, SCREEN_H - 16)
@@ -408,7 +413,25 @@ fn default_font() -> PiFont {
         .unwrap_or(PiFont::Serif)
 }
 
-fn add_patch(d: &DocView, e: Entry, strokes: Vec<Stroke>, texts: Vec<libreink_page::TextRun>) -> Result<(u64, Option<[i32; 4]>), String> {
+/// Enforce the physical page boundary with real Garamond metrics. The model
+/// reasons in approximate character widths; the renderer knows exact glyph
+/// advances and clamps/shrinks before persisting a patch.
+fn clamp_text_runs(texts: &mut [TextRun]) {
+    const PAD: f32 = 18.0;
+    let max_width = SCREEN_W as f32 - PAD * 2.0;
+    for text in texts {
+        let mut width = libreink_text::width(Face::Body, text.size, &text.text) as f32;
+        if width > max_width {
+            text.size = (text.size * max_width / width).max(12.0);
+            width = libreink_text::width(Face::Body, text.size, &text.text) as f32;
+        }
+        text.x = text.x.clamp(PAD, (SCREEN_W as f32 - PAD - width).max(PAD));
+        let ascent = libreink_text::ascent(Face::Body, text.size);
+        text.y = text.y.clamp(PAD + ascent, SCREEN_H as f32 - PAD);
+    }
+}
+
+fn add_patch(d: &DocView, e: Entry, strokes: Vec<Stroke>, texts: Vec<TextRun>) -> Result<(u64, Option<[i32; 4]>), String> {
     let mut page = d.load_ink(e);
     let id = page.add_patch(strokes, texts);
     let bbox = patch_bbox(page.patches.last().unwrap()).map(|b| [b.x0, b.y0, b.x1, b.y1]);
@@ -458,10 +481,11 @@ fn handle(d: &DocView, req: &Value) -> Value {
                 return json!({ "ok": false, "error": "missing 'svg'" });
             };
             let idx = match req_page(req, count) { Ok(i) => i, Err(e) => return e };
-            let (strokes, texts, notes) = match svg_ink::parse(svg, 1.0, default_font()) {
+            let (strokes, mut texts, notes) = match svg_ink::parse(svg, 1.0, default_font()) {
                 Ok(v) => v,
                 Err(e) => return json!({ "ok": false, "error": e }),
             };
+            clamp_text_runs(&mut texts);
             match add_patch(d, seq[idx], strokes, texts) {
                 Ok((id, bbox)) => json!({
                     "ok": true, "id": id, "page": idx + 1,

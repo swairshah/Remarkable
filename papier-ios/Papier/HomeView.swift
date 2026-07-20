@@ -1,5 +1,6 @@
-// HomeView.swift — papier's xochitl-like home grid: covers, titles, and a
-// "syncing" tag on web/iPad-added docs the tablet hasn't pulled yet.
+// HomeView.swift — papier's xochitl-like home grid: covers and titles.
+// Inbound-only documents are already usable cloud documents; they are not
+// presented as perpetually "syncing" while the tablet happens to be asleep.
 
 import SwiftUI
 
@@ -124,16 +125,6 @@ private struct DocCell: View {
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(.black.opacity(0.1)))
             .shadow(color: .black.opacity(0.10), radius: 5, y: 2)
-            .overlay(alignment: .topTrailing) {
-                if doc.pending {
-                    Text("syncing")
-                        .font(.caption2.weight(.medium))
-                        .padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(.orange.opacity(0.92), in: Capsule())
-                        .foregroundStyle(.white)
-                        .padding(6)
-                }
-            }
 
             Text(doc.meta.title)
                 .font(.callout.weight(.medium))
