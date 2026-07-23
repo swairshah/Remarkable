@@ -13,7 +13,9 @@ struct PatchLayer: View {
     let animateIds: Set<UInt64>
     let animateStart: Date
 
-    private static let piBlue = Color(red: 0x24 / 255.0, green: 0x57 / 255.0, blue: 0xC5 / 255.0)
+    // Slightly darker than the original #2457C5 — pi's writing should sit
+    // into the paper like real ink, not float on top of it.
+    private static let piBlue = Color(red: 0x1D / 255.0, green: 0x48 / 255.0, blue: 0xA8 / 255.0)
     private static let drawInSeconds: Double = 1.4
 
     var body: some View {
