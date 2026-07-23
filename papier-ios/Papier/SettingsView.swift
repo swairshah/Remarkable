@@ -11,6 +11,7 @@ struct SettingsView: View {
     @State private var testResult: String?
     @State private var testing = false
     @AppStorage("paperTone") private var paperToneRaw = PaperTone.paper.rawValue
+    @AppStorage("pageTurnStyle") private var pageTurnStyleRaw = PageTurnStyle.curl.rawValue
 
     var body: some View {
         NavigationStack {
@@ -33,10 +34,15 @@ struct SettingsView: View {
                             Text(tone.label).tag(tone.rawValue)
                         }
                     }
+                    Picker("Page turn", selection: $pageTurnStyleRaw) {
+                        ForEach(PageTurnStyle.allCases) { style in
+                            Text(style.label).tag(style.rawValue)
+                        }
+                    }
                 } header: {
                     Text("Appearance")
                 } footer: {
-                    Text("Every tone dims further in dark mode. Ink stays true black.")
+                    Text("Every tone dims further in dark mode. Ink stays true black. Curl bends the paper like a book; Slide turns pages flat.")
                 }
 
                 Section {
