@@ -31,7 +31,7 @@ final class PiSession: ObservableObject {
     var serverRoot: String
 
     @Published var busy = false
-    @Published var mode: String = "auto"     // auto | quiet
+    @Published var mode: String = "quiet"    // auto | quiet — pi is OFF by default
     @Published var font: String = "serif"
     @Published var toast: String?
 
@@ -40,6 +40,13 @@ final class PiSession: ObservableObject {
     var onGoto: ((Int) -> Void)?     // pi turned to page (1-based)
     var onSeqChanged: (() -> Void)?  // pi inserted a note page
     var onTurnEnd: (() -> Void)?     // final guaranteed refresh
+
+    /// The user's chosen mode for this doc, remembered across sessions.
+    /// Quiet until the user explicitly turns pi on — pi never runs by default.
+    private var preferredMode: String {
+        get { UserDefaults.standard.string(forKey: "pimode-\(docId)") ?? "quiet" }
+        set { UserDefaults.standard.set(newValue, forKey: "pimode-\(docId)") }
+    }
 
     private var since = 0
     private var epoch: Double = 0
@@ -115,7 +122,16 @@ final class PiSession: ObservableObject {
         #if DEBUG
         if ProcessInfo.processInfo.environment["PAPIER_UI_TEST_FORCE_BUSY"] == "1" { return }
         #endif
-        Task { apply(await call("open?id=\(docId)")) }
+        Task {
+            apply(await call("open?id=\(docId)"))
+            // The service may remember (or default to) auto; the doc's stored
+            // preference wins — quiet unless the user chose otherwise.
+            if mode != preferredMode {
+                let want = preferredMode
+                mode = want
+                apply(await call("mode?id=\(docId)&mode=\(want)"))
+            }
+        }
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -154,6 +170,7 @@ final class PiSession: ObservableObject {
     func toggleMode() {
         let next = mode == "auto" ? "quiet" : "auto"
         mode = next
+        preferredMode = next
         Task { apply(await call("mode?id=\(docId)&mode=\(next)")) }
     }
 
