@@ -164,7 +164,10 @@ struct CanvasView: UIViewRepresentable {
     private func apply(to canvas: PKCanvasView, coordinator: Coordinator) {
         canvas.drawingPolicy = fingerDraws ? .anyInput : .pencilOnly
         canvas.isUserInteractionEnabled = interactionEnabled
-        coordinator.pager?.isEnabled = isActive && interactionEnabled && !fingerDraws
+        // No onPageDrag handler means an outer deck (CurlPager) owns page
+        // turning; this legacy pan must stay out of its arbitration.
+        coordinator.pager?.isEnabled = onPageDrag != nil
+            && isActive && interactionEnabled && !fingerDraws
         switch tool {
         case .pencil:
             canvas.tool = PencilBridge.pencilTool()
@@ -203,13 +206,17 @@ struct CanvasView: UIViewRepresentable {
         // MARK: finger-only pager
 
         @objc func paged(_ gesture: UIPanGestureRecognizer) {
+            // The page itself can be under a 3D turn transform. Measure in the
+            // stable window coordinate space so the moving sheet cannot make a
+            // long swipe look shorter (or reverse direction) at release.
+            let coordinateView = gesture.view?.window ?? gesture.view
             switch gesture.state {
             case .began, .changed:
-                parent.onPageDrag?(.changed(gesture.translation(in: gesture.view).x))
+                parent.onPageDrag?(.changed(gesture.translation(in: coordinateView).x))
             case .ended:
                 parent.onPageDrag?(.ended(
-                    translation: gesture.translation(in: gesture.view).x,
-                    velocity: gesture.velocity(in: gesture.view).x))
+                    translation: gesture.translation(in: coordinateView).x,
+                    velocity: gesture.velocity(in: coordinateView).x))
             case .cancelled, .failed:
                 parent.onPageDrag?(.cancelled)
             default:
@@ -286,7 +293,7 @@ struct CanvasView: UIViewRepresentable {
         func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
             guard gesture === pager, let pan = gesture as? UIPanGestureRecognizer else { return true }
             guard parent.isActive, parent.interactionEnabled, !parent.fingerDraws else { return false }
-            let velocity = pan.velocity(in: pan.view)
+            let velocity = pan.velocity(in: pan.view?.window ?? pan.view)
             return abs(velocity.x) > abs(velocity.y) * 1.4
         }
     }
