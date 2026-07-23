@@ -13,9 +13,9 @@
 		<key>CFBundleIdentifier</key>
 		<string>com.swair.papier</string>
 		<key>CFBundleShortVersionString</key>
-		<string>1.1.3</string>
+		<string>1.1.20</string>
 		<key>CFBundleVersion</key>
-		<string>15</string>
+		<string>32</string>
 		<key>SigningIdentity</key>
 		<string>Apple Development: Swair Rajesh Shah (9RX2K249UA)</string>
 		<key>Team</key>
@@ -24,7 +24,7 @@
 	<key>ArchiveVersion</key>
 	<integer>2</integer>
 	<key>CreationDate</key>
-	<date>2026-07-19T18:56:38Z</date>
+	<date>2026-07-23T06:08:43Z</date>
 	<key>Name</key>
 	<string>Papier</string>
 	<key>SchemeName</key>
