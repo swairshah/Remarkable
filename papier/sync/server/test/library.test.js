@@ -70,6 +70,49 @@ test('serializedLibrary is stable until the filesystem changes', (t) => {
   assert.deepEqual(a.body, b.body);
 });
 
+test('the inbound overlay wins for meta and flags its own ink pages', (t) => {
+  const f = fixture();
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  // a web rename + a web-drawn page, both living only in the overlay
+  writeJson(path.join(f.inbound, 'docs', 'notes', 'meta.json'),
+    { title: 'Renamed on the web', kind: 'notebook', folder: 'Research' });
+  writeJson(path.join(f.inbound, 'docs', 'notes', 'ink', 'note-0002.json'), { strokes: [{ i: 1, g: 0, p: [] }] });
+  const library = buildLibrary({ mirror: f.mirror, inbound: f.inbound });
+  const notes = library.docs.find((doc) => doc.id === 'notes');
+
+  assert.equal(notes.pending, false);                 // still the mirrored doc
+  assert.equal(notes.meta.title, 'Renamed on the web');
+  assert.equal(notes.meta.folder, 'Research');
+  assert.deepEqual(notes.ink, ['note-0001', 'note-0002']);
+  assert.deepEqual(notes.inkPending, ['note-0002']);  // read this one through /api/ink
+  assert.deepEqual(library.docs.find((doc) => doc.id === 'book').inkPending, []);
+});
+
+test('tombstoned docs disappear from the library while the mirror still has them', (t) => {
+  const f = fixture();
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const tombstones = path.join(f.root, 'tombstones');
+  fs.mkdirSync(tombstones, { recursive: true });
+  fs.writeFileSync(path.join(tombstones, 'book.json'), JSON.stringify({ id: 'book', deleted: 1 }));
+  fs.writeFileSync(path.join(tombstones, 'pending.json'), JSON.stringify({ id: 'pending', deleted: 1 }));
+
+  const library = buildLibrary({ mirror: f.mirror, inbound: f.inbound, tombstones });
+  assert.deepEqual(library.docs.map((doc) => doc.id), ['notes']);
+  // the mirror is the tablet's to prune — the manifest only hides the doc
+  assert.ok(fs.existsSync(path.join(f.mirror, 'docs', 'book', 'meta.json')));
+});
+
+test('an ink write bumps the doc version so the browser refetches', (t) => {
+  const f = fixture();
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const before = buildLibrary({ mirror: f.mirror, inbound: f.inbound }).docs.find((d) => d.id === 'notes').version;
+  const overlayInk = path.join(f.inbound, 'docs', 'notes', 'ink', 'note-0001.json');
+  writeJson(overlayInk, { strokes: [{ i: 1, g: 0, p: [] }] });
+  fs.utimesSync(overlayInk, new Date(Date.now() + 60000), new Date(Date.now() + 60000));
+  const after = buildLibrary({ mirror: f.mirror, inbound: f.inbound }).docs.find((d) => d.id === 'notes').version;
+  assert.notEqual(before, after);
+});
+
 test('inkKey follows Papier page naming', () => {
   assert.equal(inkKey({ p: 0 }), 'pdf-0001');
   assert.equal(inkKey({ n: 7 }), 'note-0007');

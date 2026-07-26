@@ -8,6 +8,7 @@
 #   usage: papier-sync.sh [pull|push|both]     (default: both)
 #
 #   PULL: VM inbound docs  -> tablet docs/   (add-only; consumes inbound)
+#         + tombstones     -> rm docs/<id>   (documents deleted from the web)
 #   PUSH: tablet data       -> VM mirror     (--delete: the tablet is truth)
 #
 # The web viewer reads the mirror + the inbound area. A web-dropped doc
@@ -45,6 +46,23 @@ do_pull() {
     fi
 }
 
+do_tombstones() {
+    # Documents deleted from the web. The mirror can't carry a deletion (the
+    # push below is --delete, so the tablet would just restore it): the VM
+    # leaves a tombstone per deleted id, we remove the doc here, and the
+    # push that follows clears it from the mirror too.
+    # one id per line, never word-split: a doc id is a slug, and anything
+    # else in that directory is not ours to delete
+    $SSH "$VM" "ls $INBOUND/tombstones 2>/dev/null" | sed 's/\.json$//' | while read -r id; do
+        case "$id" in
+            ''|*[!a-zA-Z0-9_-]*) continue ;;
+        esac
+        rm -rf "$LOCAL/docs/$id"
+        $SSH "$VM" "rm -f $INBOUND/tombstones/$id.json" >> "$LOG" 2>&1
+        log "deleted $id (web tombstone)"
+    done
+}
+
 do_push() {
     # mirror the tablet's papier data to the web (true mirror)
     if rsync -az --delete --omit-dir-times --no-perms --no-owner --no-group \
@@ -57,8 +75,8 @@ do_push() {
 }
 
 case "$MODE" in
-    pull) do_pull ;;
+    pull) do_pull; do_tombstones ;;
     push) do_push ;;
-    both) do_pull; do_push ;;
+    both) do_pull; do_tombstones; do_push ;;
     *)    echo "usage: $0 [pull|push|both]" >&2; exit 2 ;;
 esac

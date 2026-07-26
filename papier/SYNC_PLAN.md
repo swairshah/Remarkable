@@ -40,6 +40,34 @@ Second revision (2026-07-13), three additions to the web viewer:
   the same cached `source-pdf` URL. Ink annotations stay in the inline
   reader; the app shows the clean PDF.
 
+Third revision (2026-07-26): the **web is editable**, taking the
+"editable later" hook below off the shelf — the same cloud write path the
+iPad app already used.
+
+- **Editing in the browser**: the device tool rail (pen / eraser with
+  object+pixel modes / lasso / touch-draw / undo-redo / page nav / add
+  page) over the existing lazy page renderer. Strokes go into the live
+  libreink page-ink model and POST whole to `/papier/api/ink`; pi's
+  patches stay server-authoritative (`/patch-replace`, `/patch-erase`,
+  `/patch-move`). Autosave fires 2.5s after the pen stops, with an
+  explicit save, a failure retry, a flush on tab-hide/close and a
+  `sendBeacon` on unload.
+- **Document mutations**: `POST /papier/api/doc-meta` (rename / move),
+  `/page-add` (insert a blank note page), `/doc-delete`, plus the existing
+  `/notebook` for a fresh notebook from the header.
+- **Deleting against a `--delete` push**: the mirror belongs to the
+  tablet, so a web delete writes a tombstone
+  (`papier-inbound/tombstones/<id>.json`). The library manifest hides
+  tombstoned ids at once; `papier-sync.sh`'s pull leg removes the doc from
+  the tablet and consumes the tombstone, and the push that follows clears
+  the mirror.
+- **Reading the freshest ink**: the manifest gained `inkPending` (pages
+  whose newest copy is the inbound overlay). Those are read through the
+  merging `/papier/api/ink` endpoint instead of the immutable static URL —
+  without it a page saved from the web reopens showing the stale mirror
+  copy. `meta.json` in the overlay now also wins over the mirror's, so a
+  rename shows before the tablet round trip.
+
 ## Model: mirror out, drop-to-add in
 
 Sync is asymmetric, which is what makes it conflict-free:
@@ -51,7 +79,9 @@ Sync is asymmetric, which is what makes it conflict-free:
   document (fresh id), so it never collides with anything being edited on
   the tablet. ("Drag-drop on the web → appears in papier.")
 
-Editing happens on the tablet; the web is a viewer + a drop target.
+Editing happens on the tablet — and, since the third revision above, in the
+browser and on the iPad too, through the inbound write path (per-file
+last-writer-wins) rather than by touching the mirror.
 
 Decisions (from review): dropped PDFs render into books **on the VM**;
 the web viewer is **read + drop-to-add now**, architected so **browser

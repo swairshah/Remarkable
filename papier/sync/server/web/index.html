@@ -1,8 +1,12 @@
 <!doctype html>
-<!-- papier web viewer — served at the root of remarkable.exe.xyz.
-     Read-view of the tablet's ~/.local/share/papier/ mirror + a drop-zone
-     to add documents. A fork of the notebook viewer, generalized for the
-     papier document model (folders, notebooks + raster books). -->
+<!-- papier web editor — served at /papier/ on remarkable.exe.xyz.
+     A read/WRITE view of the tablet's ~/.local/share/papier/ mirror plus the
+     pending web/iPad uploads: draw with the pen, rub out with the eraser,
+     add pages, rename, delete — every write lands in the VM's inbound tree
+     (POST /papier/api/ink|state|page-add|doc-meta|doc-delete) exactly like
+     the iPad app, and the tablet's next pull folds it in. Also a drop-zone
+     to add documents. Generalized for the papier document model (folders,
+     notebooks + raster books). -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -58,9 +62,21 @@
   .card .meta .t { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card .meta .s { color: var(--muted); font-size: 12px; margin-top: 3px; }
 
+  .card .actions { position: absolute; top: 8px; right: 8px; opacity: 0; transition: opacity .1s; }
+  .card { position: relative; }
+  .card:hover .actions, .card .actions:focus-within { opacity: 1; }
+  /* no hover on touch: the per-card actions have to be visible to be tappable */
+  @media (hover: none) { .card .actions { opacity: 1; } }
+  .card .actions button { border: 1px solid var(--line); background: var(--card); color: var(--accent); border-radius: 7px; width: 26px; height: 26px; font-size: 13px; line-height: 1; cursor: pointer; }
+
   /* doc reader */
   .pages { display: flex; flex-direction: column; align-items: center; gap: 22px; }
-  .page { position: relative; width: 100%; max-width: 900px; aspect-ratio: 1404 / 1872; background: var(--papier); box-shadow: 0 2px 14px rgba(0,0,0,.12); border-radius: 4px; overflow: hidden; }
+  .page { position: relative; width: 100%; max-width: 900px; aspect-ratio: 1404 / 1872; background: var(--papier); box-shadow: 0 2px 14px rgba(0,0,0,.12); border-radius: 4px; overflow: hidden; touch-action: pan-y; }
+  /* Finger-draw on: touch must reach the canvas as ink, not as a scroll. */
+  body.finger .page { touch-action: none; }
+  body.reading.tool-pen .page { cursor: crosshair; }
+  body.reading.tool-eraser .page { cursor: cell; }
+  body.reading.tool-lasso .page { cursor: crosshair; }
   .page canvas, .page img { display: block; width: 100%; height: auto; }
   .page .plabel { position: absolute; top: 8px; right: 12px; font-size: 11px; color: var(--muted); background: rgba(255,255,255,.7); padding: 1px 7px; border-radius: 9px; }
   .empty { color: var(--muted); text-align: center; padding: 80px 20px; }
@@ -85,7 +101,47 @@
     body.reading.sidebar .docside { display:flex; }       /* Cmd+B toggles the .sidebar class */
     body.reading.sidebar main { margin-left:230px; }
   }
+  @media (min-width:1000px) { body.reading main { margin-right: 66px; } }   /* clear of the tool rail */
   .docside .sect { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.07em; margin:14px 6px 3px; }
+  .docside .sbtn.danger { color:#b4382e; }
+  .docside .sbtn.danger:hover { border-color:#b4382e; }
+  .docside .save { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); padding:4px 8px; }
+  .docside .save .sdot { width:8px; height:8px; border-radius:50%; background:#3aa76d; flex:none; }
+  .docside .save.dirty .sdot { background:#e0a324; }
+  .docside .save.busy .sdot { background:#2457c5; animation:pulse 1s ease-in-out infinite; }
+  .docside .save.err .sdot { background:#b4382e; }
+  @keyframes pulse { 50% { opacity:.35; } }
+
+  /* ---- tool rail: the tablet/iPad toolbar, on the web ---- */
+  /* Right-edge, floating over the desk exactly like the device toolbar.
+     Same control order as the iOS rail: tools | history | pages | add. */
+  #rail { position: fixed; right: 14px; top: 50%; transform: translateY(-50%); z-index: 8;
+          display: none; flex-direction: column; align-items: center; gap: 2px; padding: 6px 4px;
+          background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+          box-shadow: 0 6px 26px rgba(0,0,0,.16); }
+  body.reading #rail { display: flex; }
+  #rail button { width: 40px; height: 40px; display: grid; place-items: center; border: 0; border-radius: 9px;
+                 background: transparent; color: var(--accent); cursor: pointer; font: inherit; font-size: 13px; padding: 0; }
+  #rail button:hover { background: rgba(128,128,128,.14); }
+  #rail button.active { background: var(--accent); color: var(--card); }
+  #rail button:disabled { opacity: .3; cursor: default; }
+  #rail button svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  #rail .sep { width: 22px; height: 1px; background: var(--line); margin: 4px 0; }
+  #rail .pgno { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #rail .emode { position: absolute; right: 2px; bottom: 2px; font-size: 8px; letter-spacing: .04em; }
+  #rail button.tool { position: relative; }
+  @media (max-width: 620px) { #rail { right: 8px; padding: 4px 2px; } #rail button { width: 34px; height: 34px; } }
+
+  /* ---- generic dialog (rename / move / delete confirm / new notebook) ---- */
+  #dlg { position: fixed; inset: 0; z-index: 46; background: rgba(15,15,17,.6); display: none; place-items: center; }
+  #dlg.show { display: grid; }
+  #dlg .box { background: var(--card); border: 1px solid var(--line); border-radius: 12px; width: min(460px, calc(100vw - 40px)); padding: 20px; box-shadow: 0 12px 48px rgba(0,0,0,.3); }
+  #dlg h3 { margin: 0 0 6px; font-size: 16px; }
+  #dlg .sub { color: var(--muted); font-size: 13px; margin-bottom: 14px; line-height: 1.45; }
+  #dlg label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  #dlg input[type=text] { width: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--accent); font: inherit; font-size: 14px; padding: 9px 11px; }
+  #dlg .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+  #dlg .row .danger { background: #b4382e; border-color: #b4382e; color: #fff; }
   .docside .sbtn { display:flex; align-items:center; gap:10px; padding:9px 12px; border:1px solid var(--line); background:var(--card); color:var(--accent); border-radius:9px; cursor:pointer; font:inherit; font-size:13px; text-align:left; width:100%; }
   .docside .sbtn:hover { border-color:var(--muted); }
   .docside .sbtn.active { background:var(--accent); color:var(--card); border-color:var(--accent); }
@@ -151,11 +207,14 @@
   <span class="spacer"></span>
   <span class="badge" id="badge"><span class="dot"></span>synced view</span>
   <button class="addbtn" id="compose-btn">✦ Compose</button>
+  <button class="addbtn" id="new-nb">+ New notebook</button>
   <button class="addbtn" id="add">+ Add document</button>
 </header>
 <main id="view"><div class="empty">Loading…</div></main>
+<div id="rail"></div>
 <input type="file" id="file" multiple hidden>
 <div id="drop"><div class="box">Drop files to add them to Papier</div></div>
+<div id="dlg"></div>
 <div id="med"></div>
 <div id="pv"><div class="pvbar"><span class="pvtitle" id="pv-title"></span><span class="spacer"></span><button class="addbtn" id="pv-close">✕ Close</button></div><iframe id="pv-frame" title="PDF viewer"></iframe></div>
 <div id="cmp"><div class="box">
@@ -195,6 +254,25 @@ const state = {
   open: null,          // {id, meta, seq, pages:[...]}
   aiBlue: true,
   sig: '',             // doc-set signature for change detection
+};
+
+/* ---------- editing state ----------
+ * One open document at a time. `models` holds the live ink page files (the
+ * same libreink-page JSON the tablet writes); `status` tracks per-page save
+ * state and the undo/redo stacks. Everything resets on open/close. */
+const AUTOSAVE_MS = 2500;    // matches the tablet's "you paused writing" beat
+const RETRY_MS = 6000;
+const UNDO_DEPTH = 60;
+const ERASE_R = 14;          // eraser nib, page units
+const edit = {
+  tool: 'pen',               // pen | eraser | lasso | read
+  erase: 'object',           // object | pixel  (tap the eraser again to cycle)
+  fingerDraws: false,        // touch draws instead of scrolling
+  models: new Map(),         // inkKey -> live page file
+  loading: new Map(),        // inkKey -> Promise<page file>
+  status: new Map(),         // inkKey -> {dirty, saving, error, timer, undo, redo, patch}
+  current: 0,                // page index nearest the viewport centre
+  sel: null,                 // lasso selection: {key, index, poly, strokes:Set, patches:Set}
 };
 
 /* ---------- fetch helpers ---------- */
@@ -389,6 +467,8 @@ function folderGlyph() {
   return '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h6l2 2h10v12H3z"/></svg>';
 }
 async function renderHome() {
+  if (state.open) flushAll();
+  resetEditing();
   state.open = null;
   if (openDoc._io) { openDoc._io.disconnect(); openDoc._io = null; }
   $('docside') && $('docside').remove();
@@ -422,8 +502,12 @@ async function renderHome() {
       : (d.meta.kind === 'book' ? `${n} page${n===1?'':'s'}` : 'notebook') + ' · ' + relDate(d.mtime);
     const cover = d.cover ? (d.cover.startsWith('/') ? d.cover : withVersion(d.base + d.cover, d.coverVersion || d.version)) : '';
     card.innerHTML = `<div class="thumb" data-id="${esc(d.id)}">${cover ? `<img src="${esc(cover)}" alt="" loading="lazy" decoding="async">` : ''}</div>
-      <div class="meta"><div class="t">${esc(d.meta.title || d.id)}</div><div class="s">${esc(sub)}</div></div>`;
+      <div class="meta"><div class="t">${esc(d.meta.title || d.id)}</div><div class="s">${esc(sub)}</div></div>
+      <div class="actions"><button title="Rename / move" aria-label="Rename or move">✎</button><button title="Delete" aria-label="Delete">🗑</button></div>`;
     card.onclick = () => openDoc(d);
+    const [renameBtn, deleteBtn] = card.querySelectorAll('.actions button');
+    renameBtn.onclick = (ev) => { ev.stopPropagation(); docDetails(d); };
+    deleteBtn.onclick = (ev) => { ev.stopPropagation(); deleteDoc(d); };
     grid.appendChild(card);
     if (!cover) thumbCanvas(d).then(c => { const t = card.querySelector('.thumb'); if (t) { t.innerHTML = ''; t.appendChild(c); } });
   }
@@ -435,14 +519,18 @@ async function renderHome() {
     $view.appendChild(back);
   }
   $view.appendChild(grid);
+  updateSaveChip();     // back on the grid: the badge reads "synced view" again
   perfMark('grid');
 }
 
 /* ---------- doc reader ---------- */
-// Esc from a book -> back to My files
+// Esc from a book -> back to My files. Unsaved ink goes first: leaving the
+// document must never be the thing that loses a stroke.
 function goFiles() {
+  flushAll();
   if (state.open) state.folder = state.open.meta.folder || null;
   state.open = null;
+  resetEditing();
   $('docside') && $('docside').remove();
   document.body.classList.remove('reading', 'sidebar');
   renderHome();
@@ -485,13 +573,124 @@ function buildSidebar(d) {
     b.onclick = on; return b;
   };
   side.appendChild(mk('‹', 'My files', 'esc', goFiles));
-  if (d.meta.kind === 'book') side.appendChild(mk('▦', 'Adjust margins', '', openEditor));
-  if (d.meta.kind === 'book') side.appendChild(mk('⤡', 'PDF viewer', '', () => openPdfViewer(d)));
+  const save = document.createElement('div'); save.className = 'save'; save.id = 'savechip';
+  save.innerHTML = '<span class="sdot"></span><span class="stxt">Saved</span>';
+  side.appendChild(save);
+  side.appendChild(mk('✓', 'Save now', '⌘S', () => flushAll(true)));
+  side.appendChild(mk('＋', 'Add page', '', addPage));
   const ai = mk('✦', 'AI ink', '', null, state.aiBlue);
   ai.onclick = () => { state.aiBlue = !state.aiBlue; ai.classList.toggle('active', state.aiBlue); redrawOpenPages(); };
   side.appendChild(ai);
+  if (d.meta.kind === 'book') side.appendChild(mk('▦', 'Adjust margins', '', openEditor));
+  if (d.meta.kind === 'book') side.appendChild(mk('⤡', 'PDF viewer', '', () => openPdfViewer(d)));
+  const sect = document.createElement('div'); sect.className = 'sect'; sect.textContent = 'Document';
+  side.appendChild(sect);
+  side.appendChild(mk('✎', 'Rename / move', '', () => docDetails(d)));
+  const del = mk('🗑', 'Delete', '', () => deleteDoc(d)); del.classList.add('danger');
+  side.appendChild(del);
   document.body.appendChild(side);
   document.body.classList.add('reading', 'sidebar');   // sidebar on by default (CSS makes room)
+  buildRail();
+  updateSaveChip();
+}
+
+/* ---------- tool rail ---------- */
+/* The device toolbar, on the web: same tools and the same order as the
+ * reMarkable's right-edge rail and the iPad's floating one — pen, eraser
+ * (tap again to cycle object/pixel), touch-draw, undo/redo, page nav, add
+ * page. It stays visible at every width; the left sidebar is the one that
+ * folds away on narrow screens. */
+const RAIL_ICONS = {
+  pen: '<svg viewBox="0 0 24 24"><path d="M4.5 19.5l4.2-1.1 9.6-9.6a2.1 2.1 0 0 0-3-3L5.6 15.3z"/><path d="M14.3 5.9l3.8 3.8"/></svg>',
+  eraser: '<svg viewBox="0 0 24 24"><path d="M8.5 20h10.5"/><path d="M5.6 16.2l7-7a2 2 0 0 1 2.8 0l2.9 2.9a2 2 0 0 1 0 2.8L14.2 20H9.1l-3.5-3.5a1.4 1.4 0 0 1 0-.3z"/><path d="M10.2 11.6l4.9 4.9"/></svg>',
+  finger: '<svg viewBox="0 0 24 24"><path d="M9 12.5V5.6a1.5 1.5 0 0 1 3 0v5.3m0-1.1a1.5 1.5 0 0 1 3 0v1.6m0-1a1.5 1.5 0 0 1 3 0V16a5 5 0 0 1-5 5h-1.4a5 5 0 0 1-4.1-2.2l-2.2-3.3a1.6 1.6 0 0 1 2.5-2l1.2 1.4"/></svg>',
+  undo: '<svg viewBox="0 0 24 24"><path d="M8.5 8L4.5 12l4 4"/><path d="M4.5 12h10a4.5 4.5 0 0 1 0 9H10"/></svg>',
+  redo: '<svg viewBox="0 0 24 24"><path d="M15.5 8l4 4-4 4"/><path d="M19.5 12h-10a4.5 4.5 0 0 0 0 9H14"/></svg>',
+  up: '<svg viewBox="0 0 24 24"><path d="M6 14.5l6-6 6 6"/></svg>',
+  down: '<svg viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6"/></svg>',
+  plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
+  lasso: '<svg viewBox="0 0 24 24"><ellipse cx="12" cy="10" rx="7.5" ry="5.5" stroke-dasharray="3 2.4"/><path d="M8.6 15.1c-1 1.6-.4 3 1 3.4 1.4.3 2-.8 1.2-1.5"/></svg>',
+  read: '<svg viewBox="0 0 24 24"><path d="M4 6.5c3-1.4 5.3-1.4 8 0 2.7-1.4 5-1.4 8 0v11c-3-1.4-5.3-1.4-8 0-2.7-1.4-5-1.4-8 0z"/><path d="M12 6.5v11"/></svg>',
+};
+function buildRail() {
+  const rail = $('rail'); rail.innerHTML = '';
+  const mk = (html, title, on, cls) => {
+    const b = document.createElement('button');
+    b.innerHTML = html; b.title = title; b.setAttribute('aria-label', title);
+    if (cls) b.className = cls;
+    b.onclick = on; rail.appendChild(b); return b;
+  };
+  const sep = () => { const s = document.createElement('div'); s.className = 'sep'; rail.appendChild(s); };
+  rail._pen = mk(RAIL_ICONS.pen, 'Pen (p)', () => setTool('pen'), 'tool');
+  rail._eraser = mk(RAIL_ICONS.eraser, 'Eraser (e) — tap again for object/pixel', () => {
+    if (edit.tool === 'eraser') edit.erase = edit.erase === 'object' ? 'pixel' : 'object';
+    setTool('eraser');
+  }, 'tool');
+  rail._lasso = mk(RAIL_ICONS.lasso, 'Lasso (l) — circle ink, then drag it or press ⌫', () => setTool('lasso'), 'tool');
+  rail._read = mk(RAIL_ICONS.read, 'Read — pointer draws nothing (r)', () => setTool('read'), 'tool');
+  rail._finger = mk(RAIL_ICONS.finger, 'Draw with touch (off = touch scrolls)', () => {
+    edit.fingerDraws = !edit.fingerDraws;
+    document.body.classList.toggle('finger', edit.fingerDraws);
+    refreshRail();
+  });
+  sep();
+  rail._undo = mk(RAIL_ICONS.undo, 'Undo (⌘Z)', () => undo());
+  rail._redo = mk(RAIL_ICONS.redo, 'Redo (⇧⌘Z)', () => redo());
+  sep();
+  mk(RAIL_ICONS.up, 'Previous page', () => scrollToPage(edit.current - 1));
+  rail._pg = mk('<span class="pgno">1</span>', 'Go to page', gotoPagePrompt);
+  mk(RAIL_ICONS.down, 'Next page', () => scrollToPage(edit.current + 1));
+  sep();
+  mk(RAIL_ICONS.plus, 'Add a blank page after this one', addPage);
+  refreshRail();
+}
+function setTool(tool) {
+  if (tool !== 'lasso') clearSelection();
+  edit.tool = tool;
+  refreshRail();
+}
+function refreshRail() {
+  const rail = $('rail'); if (!rail || !rail._pen) return;
+  rail._pen.classList.toggle('active', edit.tool === 'pen');
+  rail._lasso.classList.toggle('active', edit.tool === 'lasso');
+  rail._read.classList.toggle('active', edit.tool === 'read');
+  rail._eraser.classList.toggle('active', edit.tool === 'eraser');
+  rail._eraser.innerHTML = RAIL_ICONS.eraser +
+    (edit.tool === 'eraser' ? '<span class="emode">' + (edit.erase === 'pixel' ? 'PX' : 'OBJ') + '</span>' : '');
+  rail._finger.classList.toggle('active', edit.fingerDraws);
+  const key = currentKey();
+  const st = key ? pageStatus(key) : null;
+  rail._undo.disabled = !st || !st.undo.length;
+  rail._redo.disabled = !st || !st.redo.length;
+  const total = state.open ? state.open.seq.length : 0;
+  rail._pg.innerHTML = '<span class="pgno">' + (edit.current + 1) + (total ? '<br>/' + total : '') + '</span>';
+  document.body.classList.toggle('tool-pen', edit.tool === 'pen');
+  document.body.classList.toggle('tool-eraser', edit.tool === 'eraser');
+  document.body.classList.toggle('tool-lasso', edit.tool === 'lasso');
+}
+function gotoPagePrompt() {
+  if (!state.open) return;
+  const n = window.prompt('Go to page (1–' + state.open.seq.length + ')', String(edit.current + 1));
+  const i = parseInt(n, 10);
+  if (Number.isFinite(i)) scrollToPage(i - 1);
+}
+function scrollToPage(i) {
+  if (!state.open) return;
+  const pages = document.querySelectorAll('.page');
+  const target = pages[clamp(i, 0, pages.length - 1)];
+  if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+// Which page the rail's controls act on: the one covering the viewport centre.
+function trackCurrentPage() {
+  if (!state.open) return;
+  const mid = window.innerHeight / 2;
+  let best = edit.current, bestD = Infinity;
+  document.querySelectorAll('.page').forEach((p, i) => {
+    const r = p.getBoundingClientRect();
+    const d = Math.abs((r.top + r.bottom) / 2 - mid);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  if (best !== edit.current) { edit.current = best; refreshRail(); }
 }
 
 async function openDoc(d) {
@@ -500,10 +699,16 @@ async function openDoc(d) {
     const st = await jfileB(d.base, 'docs/' + d.id + '/state.json');
     seq = (st && st.seq) || [];
   }
-  state.open = { ...d, seq, pdfPromise: startSourcePdf(d) };
+  if (state.open) flushAll();   // switching documents must not drop ink
+  resetEditing();
+  state.open = { ...d, seq, pdfPromise: startSourcePdf(d),
+                 /* pages whose freshest ink is the inbound overlay (a web or
+                  * iPad write the tablet hasn't folded in yet): those must be
+                  * read through the merging API, not the stale static URL */
+                 pendingInk: new Set(Array.isArray(d.inkPending) ? d.inkPending : []) };
   buildSidebar(d);
   $('crumb').innerHTML = '  ›  <span class="crumb" id="home-crumb">My files</span>  ›  ' + esc(d.meta.title || d.id);
-  const hc = $('home-crumb'); if (hc) hc.onclick = () => { state.folder = d.meta.folder || null; renderHome(); };
+  const hc = $('home-crumb'); if (hc) hc.onclick = goFiles;
 
   $view.innerHTML = '';
   if (d.meta.kind === 'book') {
@@ -518,17 +723,33 @@ async function openDoc(d) {
     bar.appendChild(pvb);
     $view.appendChild(bar);
   }
+  renderPages();
+  /* warm the ink cache: the library lists exactly which ink files exist, and
+   * they are tiny — prefetching them removes one round trip per page later */
+  const version = bust[d.id] || d.version;
+  (Array.isArray(d.ink) ? d.ink : []).slice(0, 80).forEach((key) => {
+    if (!state.open.pendingInk.has(key)) cachedJson(withVersion(d.base + 'docs/' + d.id + '/ink/' + key + '.json', version));
+  });
+}
+
+/* Build (or rebuild, after a page insert) the page list for the open doc.
+ * Lazy render: a big book has hundreds of pages — allocating a full-size
+ * canvas for each up front (~10 MB each) freezes the browser. Instead each
+ * page is just a sized div; a canvas is created + drawn only when the page
+ * nears the viewport, and freed again when it scrolls far away. */
+function renderPages() {
+  const d = state.open; if (!d) return;
+  const seq = d.seq;
+  edit.sel = null;             // page indices are about to change
+  const old = $view.querySelector('.pages');
+  if (old) old.remove();
   const wrap = document.createElement('div'); wrap.className = 'pages';
   $view.appendChild(wrap);
-  /* Lazy render: a big book has hundreds of pages — allocating a full-size
-   * canvas for each up front (~10 MB each) freezes the browser. Instead each
-   * page is just a sized div; a canvas is created + drawn only when the page
-   * nears the viewport, and freed again when it scrolls far away. */
   if (openDoc._io) openDoc._io.disconnect();
   /* PDF.js pages render locally from the already-downloaded PDF, so a much
    * larger lookahead costs nothing over the network; raster pages get a
    * bigger margin too so scrolling stalls on fewer cold fetches. */
-  const lookahead = state.open.pdfPromise ? '3600px 0px' : '2400px 0px';
+  const lookahead = d.pdfPromise ? '3600px 0px' : '2400px 0px';
   const io = new IntersectionObserver((entries) => {
     for (const en of entries) {
       const p = en.target;
@@ -548,6 +769,8 @@ async function openDoc(d) {
       } else if (p._cv) {
         p._cv._renderToken = (p._cv._renderToken || 0) + 1;
         if (p._cv._renderTask) { try { p._cv._renderTask.cancel(); } catch (_) {} p._cv._renderTask = null; }
+        dropSnapshot(p._cv);
+        p._cv._img = null;
         p._cv.remove(); p._cv = null;
       }
     }
@@ -555,18 +778,16 @@ async function openDoc(d) {
   openDoc._io = io;
   for (let i = 0; i < seq.length; i++) {
     const e = seq[i];
-    const page = document.createElement('div'); page.className = 'page'; page._entry = e;
+    const page = document.createElement('div'); page.className = 'page'; page._entry = e; page._index = i;
     const lbl = document.createElement('div'); lbl.className = 'plabel';
     lbl.textContent = (i + 1) + ' / ' + seq.length + (e.p != null ? '  ·  p.' + (e.p + 1) : '');
     page.appendChild(lbl);
+    page.addEventListener('pointerdown', (ev) => onPagePointerDown(ev, page));
     wrap.appendChild(page);
     io.observe(page);
   }
-  /* warm the ink cache: the library lists exactly which ink files exist, and
-   * they are tiny — prefetching them removes one round trip per page later */
-  const version = bust[d.id] || d.version;
-  (Array.isArray(d.ink) ? d.ink : []).slice(0, 80).forEach((key) =>
-    cachedJson(withVersion(d.base + 'docs/' + d.id + '/ink/' + key + '.json', version)));
+  edit.current = clamp(edit.current, 0, Math.max(0, seq.length - 1));
+  refreshRail();
 }
 
 async function renderPage(cv, d, e) {
@@ -577,9 +798,7 @@ async function renderPage(cv, d, e) {
   ctx.fillStyle = '#fbfbf9'; ctx.fillRect(0, 0, cv.width, cv.height);
   const version = bust[d.id] || d.version;
   const key = inkKey(e);
-  const inkPromise = key && hasInk(d, key)
-    ? cachedJson(withVersion(d.base + 'docs/' + d.id + '/ink/' + key + '.json', version))
-    : Promise.resolve(null);
+  const inkPromise = key ? pageInk(d, key) : Promise.resolve(null);
   if (e.p != null) {
     let drawn = false;
     if (d.pdfPromise) {
@@ -612,17 +831,713 @@ async function renderPage(cv, d, e) {
     if (!drawn) {
       const img = await loadImage(withVersion(d.base + 'docs/' + d.id + '/pages/' + pad4(e.p + 1) + '.png', version)).catch(() => null);
       if (cv._renderToken !== token) return;
-      if (img) ctx.drawImage(img, 0, 0, cv.width, cv.height);
+      /* keep the (already cached) PNG on the canvas: erasing has to repaint
+       * what was under the stroke */
+      if (img) { ctx.drawImage(img, 0, 0, cv.width, cv.height); cv._img = img; }
+    } else {
+      /* A PDF.js page has no such handle and re-running the renderer per rub
+       * is far too slow, so hold one bitmap of the printed page (bounded —
+       * see snapshotBackground). Notebook pages need neither: their
+       * background is a flat fill. */
+      await snapshotBackground(cv, token);
     }
     const ink = await inkPromise;
     if (cv._renderToken !== token) return;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     drawInk(ctx, ink, S);
+    drawSelectionFor(ctx, S, e);
   } else if (e.n != null) {
     const ink = await inkPromise;
     if (cv._renderToken !== token) return;
     drawInk(ctx, ink, S);
+    drawSelectionFor(ctx, S, e);
   }
+}
+
+/* ================= editing =================
+ * The web writes the same files the tablet does. A page's ink JSON is
+ * loaded once into a live model, edited in place by the pen/eraser, and
+ * POSTed back whole to /papier/api/ink — which lands in the VM's inbound
+ * overlay, never the mirror, so the tablet's next pull folds it in
+ * (per-file last-writer-wins, exactly like the iPad app).
+ *
+ * Ownership split, mirrored from the service: the browser owns the user's
+ * strokes; pi's patches are the server's, so rubbing pi ink out goes
+ * through /patch-replace and /patch-erase instead of the whole-page write.
+ */
+
+function normalizeInk(raw) {
+  const p = (raw && typeof raw === 'object') ? raw : {};
+  const strokes = Array.isArray(p.strokes) ? p.strokes.filter((s) => s && Array.isArray(s.p)) : [];
+  const patches = Array.isArray(p.patches) ? p.patches : [];
+  const maxId = (list) => (list || []).reduce((m, s) => Math.max(m, s.i || 0), 0);
+  const maxPatchStroke = patches.reduce((m, q) => Math.max(m, maxId(q.strokes)), 0);
+  return {
+    v: 1,
+    next_patch: Math.max(p.next_patch || 1, patches.reduce((m, q) => Math.max(m, (q.id || 0) + 1), 1)),
+    next_stroke: Math.max(p.next_stroke || 1, maxId(strokes) + 1, maxPatchStroke + 1),
+    strokes,
+    patches,
+  };
+}
+
+/* The live model for one page. Pages the overlay already holds are read
+ * through /papier/api/ink (merged truth); the rest come from the immutable
+ * static URL — and are copied, because that cache entry is shared. */
+function pageInk(d, key) {
+  if (edit.models.has(key)) return Promise.resolve(edit.models.get(key));
+  if (edit.loading.has(key)) return edit.loading.get(key);
+  const load = (async () => {
+    let raw = null;
+    const overlay = state.open && state.open.pendingInk && state.open.pendingInk.has(key);
+    if (overlay) {
+      raw = await fetch(API + 'ink?id=' + encodeURIComponent(d.id) + '&file=' + key + '.json', { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    } else if (hasInk(d, key)) {
+      const shared = await cachedJson(withVersion(d.base + 'docs/' + d.id + '/ink/' + key + '.json', bust[d.id] || d.version));
+      raw = shared ? JSON.parse(JSON.stringify(shared)) : null;
+    }
+    const model = normalizeInk(raw);
+    edit.models.set(key, model);
+    edit.loading.delete(key);
+    return model;
+  })();
+  edit.loading.set(key, load);
+  return load;
+}
+
+function pageStatus(key) {
+  if (!edit.status.has(key)) {
+    edit.status.set(key, { dirty: false, saving: false, error: null, timer: null, undo: [], redo: [], patch: new Map() });
+  }
+  return edit.status.get(key);
+}
+
+function resetEditing() {
+  edit.status.forEach((st) => clearTimeout(st.timer));
+  edit.models.clear(); edit.loading.clear(); edit.status.clear();
+  edit.current = 0; edit.sel = null;
+}
+
+/* One bitmap of a PDF.js-rendered page, so an erase can repaint what the
+ * stroke covered. A full-size page bitmap is as big as the canvas itself,
+ * so only the few most recently drawn ones are kept; the rest fall back to
+ * a full re-render, which is correct, just slower. */
+const BG_SNAPSHOTS = 3;
+const bgHeld = [];
+async function snapshotBackground(cv, token) {
+  if (!window.createImageBitmap) return;
+  try {
+    const bmp = await createImageBitmap(cv);
+    if (cv._renderToken !== token) { if (bmp.close) bmp.close(); return; }
+    dropSnapshot(cv);
+    cv._bg = bmp;
+    bgHeld.push(cv);
+    while (bgHeld.length > BG_SNAPSHOTS) dropSnapshot(bgHeld[0]);
+  } catch (_) { /* the snapshot is an optimisation; renderPage is the fallback */ }
+}
+function dropSnapshot(cv) {
+  if (!cv) return;
+  const at = bgHeld.indexOf(cv);
+  if (at >= 0) bgHeld.splice(at, 1);
+  if (cv._bg && cv._bg.close) cv._bg.close();
+  cv._bg = null;
+}
+
+function drawSelectionFor(ctx, S, entry) {
+  if (edit.sel && state.open && state.open.seq[edit.sel.index] === entry) drawSelection(ctx, S, edit.sel.poly);
+}
+
+function repaintPage(page) {
+  const d = state.open, cv = page && page._cv;
+  if (!d || !cv) return;
+  const e = page._entry, key = inkKey(e);
+  if (e.p != null && !cv._bg && !cv._img) { renderPage(cv, d, e); return; }
+  const ctx = cv.getContext('2d'), S = cv.width / PAGE_W;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#fbfbf9'; ctx.fillRect(0, 0, cv.width, cv.height);
+  if (cv._img) ctx.drawImage(cv._img, 0, 0, cv.width, cv.height);
+  else if (cv._bg) ctx.drawImage(cv._bg, 0, 0, cv.width, cv.height);
+  drawInk(ctx, key ? edit.models.get(key) : null, S);
+  if (edit.sel && edit.sel.index === page._index) drawSelection(ctx, S, edit.sel.poly);
+}
+
+/* ---------- lasso: select, drag, delete ---------- */
+/* Tablet parity: the loop takes whatever falls entirely inside it — the
+ * user's strokes and pi's patches alike. User ink moves point by point in
+ * the page file; a pi patch moves (or goes) through its own endpoint,
+ * because pi's ink is the server's. */
+function drawSelection(ctx, S, poly, dash) {
+  if (!poly || poly.length < 2) return;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.scale(S, S);
+  ctx.setLineDash([12, 9]); ctx.lineWidth = 2.2; ctx.strokeStyle = '#2457c5';
+  ctx.beginPath();
+  ctx.moveTo(poly[0].x, poly[0].y);
+  for (const p of poly.slice(1)) ctx.lineTo(p.x, p.y);
+  if (!dash) ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+}
+function insidePoly(poly, x, y) {
+  let hit = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if (((a.y > y) !== (b.y > y)) && (x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x)) hit = !hit;
+  }
+  return hit;
+}
+const strokeInside = (s, poly) => {
+  const f = s.p; if (!f || f.length < 3) return false;
+  for (let i = 0; i + 2 < f.length; i += 3) if (!insidePoly(poly, f[i] / 10, f[i + 1] / 10)) return false;
+  return true;
+};
+function translatePoly(poly, dx, dy) { return poly.map((p) => ({ x: p.x + dx, y: p.y + dy })); }
+function clearSelection() {
+  if (!edit.sel) return;
+  const page = document.querySelectorAll('.page')[edit.sel.index];
+  edit.sel = null;
+  if (page) repaintPage(page);
+}
+function selectionAt(pt) {
+  const sel = edit.sel;
+  return !!(sel && sel.poly.length > 2 && insidePoly(sel.poly, pt.x, pt.y));
+}
+function buildSelection(key, index, poly, model) {
+  const strokes = new Set();
+  model.strokes.forEach((s) => { if (strokeInside(s, poly)) strokes.add(s.i); });
+  const patches = new Set();
+  for (const patch of model.patches) {
+    const strokesIn = (patch.strokes || []).every((s) => strokeInside(s, poly));
+    const textsIn = (patch.texts || []).every((t) => insidePoly(poly, t.x / 10, t.y / 10));
+    if ((patch.strokes || []).length + (patch.texts || []).length && strokesIn && textsIn) patches.add(patch.id);
+  }
+  return (strokes.size || patches.size) ? { key, index, poly, strokes, patches } : null;
+}
+function moveSelection(page, key, model, dx, dy) {
+  const sel = edit.sel; if (!sel) return;
+  const dxi = Math.round(dx * 10), dyi = Math.round(dy * 10);
+  if (!dxi && !dyi) return;
+  model.strokes = model.strokes.map((s) => {
+    if (!sel.strokes.has(s.i)) return s;
+    // clone: the undo snapshot holds the original stroke objects
+    const p = s.p.slice();
+    for (let i = 0; i + 2 < p.length; i += 3) { p[i] += dxi; p[i + 1] += dyi; }
+    return { ...s, p };
+  });
+  for (const patch of model.patches) {
+    if (!sel.patches.has(patch.id)) continue;
+    for (const s of patch.strokes || []) for (let i = 0; i + 2 < s.p.length; i += 3) { s.p[i] += dxi; s.p[i + 1] += dyi; }
+    for (const t of patch.texts || []) { t.x += dxi; t.y += dyi; }
+  }
+  sel.poly = translatePoly(sel.poly, dxi / 10, dyi / 10);
+  repaintPage(page);
+}
+function pushPatchMove(key, ids, dx, dy) {
+  const d = state.open; if (!d) return;
+  ids.forEach((id) => {
+    const q = 'id=' + encodeURIComponent(d.id) + '&file=' + key + '.json&patch=' + id + '&dx=' + dx + '&dy=' + dy;
+    fetch(API + 'patch-move?' + q, { method: 'POST' })
+      .then((r) => { if (r.ok) d.pendingInk.add(key); else throw new Error('HTTP ' + r.status); })
+      .catch((err) => toast('Could not move pi ink: ' + err.message, 4000));
+  });
+}
+function deleteSelection() {
+  const sel = edit.sel; if (!sel) return;
+  const model = edit.models.get(sel.key); if (!model) return;
+  const page = document.querySelectorAll('.page')[sel.index];
+  const before = model.strokes.slice();
+  if (sel.strokes.size) {
+    model.strokes = model.strokes.filter((s) => !sel.strokes.has(s.i));
+    pushUndo(sel.key, before, model.strokes.slice());
+    markDirty(sel.key);
+  }
+  if (sel.patches.size) {
+    model.patches = model.patches.filter((p) => !sel.patches.has(p.id));
+    sel.patches.forEach((id) => schedulePatchSync(sel.key, id));
+  }
+  edit.sel = null;
+  if (page) repaintPage(page);
+  refreshRail();
+}
+
+/* ---------- pointer -> ink ---------- */
+function toPage(ev, page) {
+  const r = page.getBoundingClientRect();
+  return { x: (ev.clientX - r.left) * PAGE_W / r.width, y: (ev.clientY - r.top) * PAGE_H / r.height };
+}
+// Same calibration as the iPad's pencil bridge: 1.7…3.1 page units, so a
+// stroke drawn here has the weight of one drawn on the tablet.
+function radiusFor(ev) {
+  const raw = (ev.pointerType === 'pen' || ev.pointerType === 'touch') && ev.pressure > 0 ? ev.pressure : 0.5;
+  return 2.4 * (0.55 + 0.75 * clamp(raw, 0.15, 1));
+}
+const coalesced = (ev) => (ev.getCoalescedEvents ? ev.getCoalescedEvents() : [ev]);
+
+function drawSegment(page, from, to, r) {
+  const cv = page._cv; if (!cv) return;
+  const ctx = cv.getContext('2d'), S = cv.width / PAGE_W;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.scale(S, S);
+  ctx.lineCap = ctx.lineJoin = 'round';
+  ctx.strokeStyle = ctx.fillStyle = '#1c1c1c';
+  if (!from) { ctx.beginPath(); ctx.arc(to.x, to.y, Math.max(r, 1), 0, 7); ctx.fill(); }
+  else { ctx.beginPath(); ctx.lineWidth = Math.max(r * 2, 1.4); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke(); }
+  ctx.restore();
+}
+
+function onPagePointerDown(ev, page) {
+  if (!state.open || edit.tool === 'read') return;
+  if (ev.pointerType === 'touch' && !edit.fingerDraws) return;   // touch scrolls unless asked
+  if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+  const key = inkKey(page._entry); if (!key) return;
+  const model = edit.models.get(key);
+  if (!model) { pageInk(state.open, key); return; }   // still loading — the next stroke lands
+  ev.preventDefault();
+  try { page.setPointerCapture(ev.pointerId); } catch (_) {}
+  if (page._index !== edit.current) { edit.current = page._index; }
+  const before = model.strokes.slice();
+  let move, end;
+
+  if (edit.tool === 'pen') {
+    const stroke = { i: model.next_stroke++, g: 0, p: [] };
+    let last = null;
+    const add = (e2) => {
+      const pt = toPage(e2, page), r = radiusFor(e2);
+      if (last && Math.hypot(pt.x - last.x, pt.y - last.y) < 2.5) return;
+      stroke.p.push(Math.round(pt.x * 10), Math.round(pt.y * 10), Math.round(r * 10));
+      drawSegment(page, last, pt, r);
+      last = pt;
+    };
+    add(ev);
+    move = (e2) => { for (const c of coalesced(e2)) add(c); };
+    end = () => {
+      if (stroke.p.length >= 3) {
+        model.strokes.push(stroke);
+        pushUndo(key, before, model.strokes.slice());
+        markDirty(key);
+      } else { model.next_stroke--; }
+    };
+  } else if (edit.tool === 'eraser') {
+    let touchedUser = false;
+    const rub = (e2) => { for (const c of coalesced(e2)) if (eraseAt(page, key, model, toPage(c, page))) touchedUser = true; };
+    rub(ev);
+    move = rub;
+    end = () => {
+      if (!touchedUser) return;
+      pushUndo(key, before, model.strokes.slice());
+      markDirty(key);
+    };
+  } else {
+    /* lasso: inside an existing selection the drag MOVES it, otherwise the
+     * drag draws the loop that makes one */
+    const start = toPage(ev, page);
+    if (edit.sel && edit.sel.key === key && selectionAt(start)) {
+      let last = start, total = { x: 0, y: 0 };
+      move = (e2) => {
+        const pt = toPage(e2, page);
+        moveSelection(page, key, model, pt.x - last.x, pt.y - last.y);
+        total.x += pt.x - last.x; total.y += pt.y - last.y;
+        last = pt;
+      };
+      end = () => {
+        if (Math.abs(total.x) < 0.5 && Math.abs(total.y) < 0.5) return;
+        pushUndo(key, before, model.strokes.slice());
+        if (edit.sel && edit.sel.patches.size) pushPatchMove(key, [...edit.sel.patches], total.x, total.y);
+        markDirty(key);
+      };
+    } else {
+      clearSelection();
+      const poly = [start];
+      move = (e2) => {
+        for (const c of coalesced(e2)) {
+          const pt = toPage(c, page);
+          if (Math.hypot(pt.x - poly[poly.length - 1].x, pt.y - poly[poly.length - 1].y) < 4) continue;
+          poly.push(pt);
+        }
+        repaintPage(page);
+        const cv = page._cv;
+        if (cv) drawSelection(cv.getContext('2d'), cv.width / PAGE_W, poly, true);
+      };
+      end = () => {
+        if (poly.length < 3) { repaintPage(page); return; }
+        edit.sel = buildSelection(key, page._index, poly, model);
+        repaintPage(page);
+        if (!edit.sel) toast('Nothing fully inside the loop.', 2000);
+      };
+    }
+  }
+
+  const finish = (e2) => {
+    page.removeEventListener('pointermove', move);
+    page.removeEventListener('pointerup', finish);
+    page.removeEventListener('pointercancel', finish);
+    try { page.releasePointerCapture(e2.pointerId); } catch (_) {}
+    end();
+    refreshRail();
+  };
+  page.addEventListener('pointermove', move);
+  page.addEventListener('pointerup', finish);
+  page.addEventListener('pointercancel', finish);
+}
+
+/* ---------- erasing ---------- */
+/* Object mode drops a whole touched stroke; pixel mode splits it around the
+ * nib. Both apply to the user's ink AND to pi's — tablet parity: the user
+ * may rub out anything on the page. */
+function eraseAt(page, key, model, pt) {
+  let user = false;
+  const kept = [];
+  for (const s of model.strokes) {
+    if (!strokeHit(s, pt, ERASE_R)) { kept.push(s); continue; }
+    if (edit.erase === 'pixel') {
+      const pieces = splitStroke(s, pt, ERASE_R, model);
+      if (pieces.length === 1 && pieces[0] === s) { kept.push(s); continue; }
+      user = true; kept.push(...pieces);
+    } else { user = true; }
+  }
+  if (user) model.strokes = kept;
+  const touched = erasePiInk(model, pt, ERASE_R);
+  if (user || touched.size) repaintPage(page);
+  touched.forEach((id) => schedulePatchSync(key, id));
+  return user;
+}
+
+function strokeHit(s, pt, R) {
+  const f = s.p; if (!f || f.length < 3) return false;
+  if (f.length === 3) return Math.hypot(f[0] / 10 - pt.x, f[1] / 10 - pt.y) <= R + f[2] / 10;
+  for (let i = 0; i + 5 < f.length; i += 3) {
+    const ax = f[i] / 10, ay = f[i + 1] / 10, bx = f[i + 3] / 10, by = f[i + 4] / 10;
+    const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+    const t = len2 ? clamp(((pt.x - ax) * dx + (pt.y - ay) * dy) / len2, 0, 1) : 0;
+    const w = Math.max(f[i + 2], f[i + 5]) / 10;
+    if (Math.hypot(pt.x - (ax + t * dx), pt.y - (ay + t * dy)) <= R + w) return true;
+  }
+  return false;
+}
+
+// Pixel mode: keep the parts of the stroke the nib missed, as fresh strokes.
+function splitStroke(s, pt, R, model) {
+  const f = s.p, groups = [];
+  let run = [];
+  for (let i = 0; i + 2 < f.length; i += 3) {
+    if (Math.hypot(f[i] / 10 - pt.x, f[i + 1] / 10 - pt.y) <= R + f[i + 2] / 10) {
+      if (run.length) { groups.push(run); run = []; }
+    } else { run.push(f[i], f[i + 1], f[i + 2]); }
+  }
+  if (run.length) groups.push(run);
+  if (groups.length === 1 && groups[0].length === f.length) return [s];
+  return groups.map((pts, gi) => ({ i: gi === 0 ? s.i : model.next_stroke++, g: s.g || 0, p: pts }));
+}
+
+function erasePiInk(model, pt, R) {
+  const touched = new Set();
+  for (const patch of model.patches) {
+    let changed = false;
+    const kept = [];
+    for (const s of patch.strokes || []) {
+      if (!strokeHit(s, pt, R)) { kept.push(s); continue; }
+      if (edit.erase === 'pixel') {
+        const pieces = splitStroke(s, pt, R, model);
+        if (pieces.length === 1 && pieces[0] === s) { kept.push(s); continue; }
+        changed = true; kept.push(...pieces);
+      } else { changed = true; }
+    }
+    const texts = [];
+    for (const t of patch.texts || []) {
+      const pieces = eraseGlyphs(t, pt, R);
+      if (!pieces) { texts.push(t); continue; }
+      changed = true; texts.push(...pieces);
+    }
+    if (changed) { patch.strokes = kept; patch.texts = texts; touched.add(patch.id); }
+  }
+  if (touched.size) model.patches = model.patches.filter((p) => (p.strokes || []).length || (p.texts || []).length);
+  return touched;
+}
+
+/* Typeset (Garamond) pi runs erase a grapheme at a time and the run splits
+ * around the gap — rubbing one word must not delete the sentence. Prefix
+ * widths come from the same font the page renders with. */
+const measureCtx = document.createElement('canvas').getContext('2d');
+function eraseGlyphs(run, pt, R) {
+  const text = String(run.t == null ? '' : run.t); if (!text) return null;
+  const x = run.x / 10, y = run.y / 10, size = (run.s || 400) / 10;
+  if (pt.y < y - size - R || pt.y > y + size * 0.35 + R) return null;
+  measureCtx.font = size + "px 'EB Garamond', Garamond, Georgia, serif";
+  const chars = Array.from(text);
+  const offs = [0];
+  let prefix = '';
+  for (const ch of chars) { prefix += ch; offs.push(measureCtx.measureText(prefix).width); }
+  if (pt.x < x - R || pt.x > x + offs[offs.length - 1] + R) return null;
+  const keep = chars.map((_, i) => !(pt.x + R >= x + offs[i] && pt.x - R <= x + offs[i + 1]));
+  if (keep.every(Boolean)) return null;
+  const out = [];
+  let i = 0;
+  while (i < chars.length) {
+    if (!keep[i]) { i++; continue; }
+    const start = i;
+    while (i < chars.length && keep[i]) i++;
+    const value = chars.slice(start, i).join('');
+    if (value.trim()) out.push({ x: Math.round((x + offs[start]) * 10), y: run.y, s: run.s, g: run.g, t: value });
+  }
+  return out;
+}
+
+// pi's ink is the server's: push the rubbed patch back through the partial
+// replacement route so concurrent pi writes and other patches survive.
+function schedulePatchSync(key, id) {
+  const st = pageStatus(key);
+  const gen = (st.patch.get(id) || 0) + 1;
+  st.patch.set(id, gen);
+  setTimeout(async () => {
+    const d = state.open;
+    if (!d || st.patch.get(id) !== gen) return;
+    const model = edit.models.get(key); if (!model) return;
+    const patch = model.patches.find((p) => p.id === id);
+    const q = 'id=' + encodeURIComponent(d.id) + '&file=' + key + '.json&patch=' + id;
+    try {
+      const r = patch
+        ? await fetch(API + 'patch-replace?' + q, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                   body: JSON.stringify({ patch, next_stroke: model.next_stroke }) })
+        : await fetch(API + 'patch-erase?' + q, { method: 'POST' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      d.pendingInk.add(key);
+    } catch (err) { toast('Could not sync the erased pi ink: ' + err.message, 4000); }
+  }, 400);
+}
+
+/* ---------- undo / redo ---------- */
+/* Snapshots of the user-stroke list, per page: one entry per gesture. pi
+ * patch edits stay out of it — they are already synced to the server. */
+function pushUndo(key, before, after) {
+  const st = pageStatus(key);
+  st.undo.push({ before, after });
+  if (st.undo.length > UNDO_DEPTH) st.undo.shift();
+  st.redo.length = 0;
+  refreshRail();
+}
+function currentKey() {
+  return state.open && state.open.seq[edit.current] ? inkKey(state.open.seq[edit.current]) : null;
+}
+function applyHistory(dir) {
+  const key = currentKey(); if (!key) return;
+  const model = edit.models.get(key); if (!model) return;
+  const st = pageStatus(key);
+  const entry = dir === 'undo' ? st.undo.pop() : st.redo.pop();
+  if (!entry) return;
+  model.strokes = (dir === 'undo' ? entry.before : entry.after).slice();
+  (dir === 'undo' ? st.redo : st.undo).push(entry);
+  const page = document.querySelectorAll('.page')[edit.current];
+  if (page) repaintPage(page);
+  markDirty(key);
+  refreshRail();
+}
+const undo = () => applyHistory('undo');
+const redo = () => applyHistory('redo');
+
+/* ---------- saving ---------- */
+function markDirty(key) {
+  const st = pageStatus(key);
+  st.dirty = true; st.error = null;
+  clearTimeout(st.timer);
+  st.timer = setTimeout(() => flushPage(key), AUTOSAVE_MS);
+  updateSaveChip();
+}
+
+/* Writes to one page are serialised: a second POST overlapping the first
+ * could otherwise land out of order and persist the older stroke list.
+ * The document, page model and status are captured when the flush is
+ * QUEUED — closing the document tears the editing state down on the very
+ * next tick, and a queued write must still complete. (The model object is
+ * mutated in place, so later strokes still ride along.) */
+function flushPage(key, doc) {
+  const st = pageStatus(key);
+  const d = doc || state.open;
+  const model = edit.models.get(key);
+  st.queue = (st.queue || Promise.resolve()).then(() => writePage(key, d, model, st)).catch(() => {});
+  return st.queue;
+}
+
+async function writePage(key, d, model, st) {
+  if (!st.dirty || !model || !d) return;
+  clearTimeout(st.timer); st.timer = null;
+  st.dirty = false; st.saving = true;
+  updateSaveChip();
+  try {
+    const r = await fetch(API + 'ink?id=' + encodeURIComponent(d.id) + '&file=' + key + '.json',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(model) });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+    st.saving = false; st.error = null;
+    if (d.pendingInk) d.pendingInk.add(key);   // the overlay is the freshest copy now
+    state.sig = '';          // the library moved on; let the next poll rebuild home
+  } catch (err) {
+    st.saving = false; st.dirty = true; st.error = String(err.message || err);
+    clearTimeout(st.timer);
+    st.timer = setTimeout(() => flushPage(key, d), RETRY_MS);
+  }
+  updateSaveChip();
+}
+
+async function flushAll(explicit) {
+  const doc = state.open;
+  const keys = [...edit.status.keys()].filter((k) => edit.status.get(k).dirty);
+  await Promise.all(keys.map((k) => flushPage(k, doc)));
+  if (explicit) toast(keys.length ? 'Saved — reaches your tablet on its next sync.' : 'Everything is already saved.', 3000);
+}
+
+/* Save state lives in two places: the sidebar chip (wide screens) and the
+ * header badge, which is the only one a phone sees. */
+function updateSaveChip() {
+  let saving = false, dirty = false, error = null;
+  edit.status.forEach((st) => {
+    if (st.saving) saving = true;
+    if (st.dirty) dirty = true;
+    if (st.error) error = st.error;
+  });
+  const mood = error ? 'err' : saving ? 'busy' : dirty ? 'dirty' : 'ok';
+  const text = error ? 'Save failed — retrying' : saving ? 'Saving…' : dirty ? 'Unsaved changes' : 'All changes saved';
+  const chip = $('savechip');
+  if (chip) {
+    chip.className = 'save' + (mood === 'ok' ? '' : ' ' + mood);
+    chip.querySelector('.stxt').textContent = text;
+    chip.title = error || '';
+  }
+  const badge = $('badge');
+  if (badge) {
+    const colour = { err: '#b4382e', busy: '#2457c5', dirty: '#e0a324', ok: '#3aa76d' }[mood];
+    badge.innerHTML = state.open
+      ? '<span class="dot" style="background:' + colour + '"></span>' + esc(text)
+      : '<span class="dot"></span>synced view';
+    badge.title = state.open ? (error || '') : '';
+  }
+}
+
+/* ---------- document mutations ---------- */
+async function addPage() {
+  const d = state.open; if (!d) return;
+  await flushAll();
+  try {
+    const r = await fetch(API + 'page-add?id=' + encodeURIComponent(d.id),
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ after: edit.current }) });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+    d.seq = j.state.seq;
+    d.pendingInk.add(j.key);
+    edit.models.set(j.key, normalizeInk(null));
+    renderPages();
+    edit.current = j.index; refreshRail();
+    scrollToPage(j.index);
+    state.sig = '';
+  } catch (err) { toast('Could not add a page: ' + err.message, 5000); }
+}
+
+async function docDetails(d) {
+  const res = await dialog({
+    title: 'Rename / move',
+    sub: 'The new title and folder reach the tablet on its next sync.',
+    fields: [{ label: 'Title', value: d.meta.title || d.id },
+             { label: 'Folder (blank = My files)', value: d.meta.folder || '', list: state.folders }],
+    confirm: 'Save',
+  });
+  if (!res) return;
+  const [title, folder] = res;
+  if (!title) { toast('A title is required.'); return; }
+  try {
+    const r = await fetch(API + 'doc-meta?id=' + encodeURIComponent(d.id),
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, folder }) });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+    d.meta = { ...d.meta, ...j.meta };
+    const listed = state.docs.find((x) => x.id === d.id);
+    if (listed) listed.meta = { ...listed.meta, ...j.meta };
+    state.sig = '';
+    if (state.open && state.open.id === d.id) {
+      state.open.meta = d.meta;
+      $('crumb').innerHTML = '  ›  <span class="crumb" id="home-crumb">My files</span>  ›  ' + esc(d.meta.title || d.id);
+      const hc = $('home-crumb'); if (hc) hc.onclick = goFiles;
+    } else { renderHome(); }
+    toast('Renamed.', 2500);
+  } catch (err) { toast('Rename failed: ' + err.message, 5000); }
+}
+
+async function deleteDoc(d) {
+  const ok = await dialog({
+    title: 'Delete “' + (d.meta.title || d.id) + '”?',
+    sub: 'It disappears from the web now and is deleted from the tablet on its next sync. This cannot be undone.',
+    confirm: 'Delete', danger: true,
+  });
+  if (!ok) return;
+  try {
+    const r = await fetch(API + 'doc-delete?id=' + encodeURIComponent(d.id), { method: 'POST' });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+    if (state.open && state.open.id === d.id) {
+      resetEditing();            // drop pending writes: they would recreate the doc
+      state.open = null;
+      $('docside') && $('docside').remove();
+      document.body.classList.remove('reading', 'sidebar');
+    }
+    state.docs = state.docs.filter((x) => x.id !== d.id);
+    state.sig = '';
+    renderHome();
+    toast('Deleted — the tablet drops it on its next sync.', 5000);
+  } catch (err) { toast('Delete failed: ' + err.message, 5000); }
+}
+
+async function newNotebook() {
+  const res = await dialog({ title: 'New notebook', fields: [{ label: 'Title', value: 'Notebook' }], confirm: 'Create' });
+  if (!res) return;
+  const title = res[0] || 'Notebook';
+  try {
+    const r = await fetch(API + 'notebook', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }) });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+    if (state.folder) {
+      await fetch(API + 'doc-meta?id=' + encodeURIComponent(j.id),
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder: state.folder }) }).catch(() => {});
+    }
+    state.sig = '';
+    await loadDocs();
+    const doc = state.docs.find((x) => x.id === j.id);
+    if (doc) openDoc(doc); else renderHome();
+  } catch (err) { toast('Could not create the notebook: ' + err.message, 5000); }
+}
+
+/* ---------- small modal dialog ---------- */
+/* Resolves to the trimmed field values (an empty array when there are no
+ * fields), or null when cancelled. */
+function dialog({ title, sub, fields = [], confirm = 'OK', danger = false }) {
+  return new Promise((resolve) => {
+    const el = $('dlg');
+    el.innerHTML = '<div class="box"><h3>' + esc(title) + '</h3>' +
+      (sub ? '<div class="sub">' + esc(sub) + '</div>' : '') +
+      fields.map((f, i) =>
+        '<label for="dlgf' + i + '">' + esc(f.label) + '</label>' +
+        '<input type="text" id="dlgf' + i + '" value="' + esc(f.value || '') + '"' + (f.list ? ' list="dlgl' + i + '"' : '') + '>' +
+        (f.list ? '<datalist id="dlgl' + i + '">' + f.list.map((v) => '<option value="' + esc(v) + '">').join('') + '</datalist>' : '')
+      ).join('') +
+      '<div class="row"><button class="addbtn" id="dlg-cancel">Cancel</button>' +
+      '<button class="addbtn' + (danger ? ' danger' : '') + '" id="dlg-ok"' +
+      (danger ? '' : ' style="background:var(--accent);color:var(--card)"') + '>' + esc(confirm) + '</button></div></div>';
+    el.classList.add('show');
+    const values = () => fields.map((f, i) => $('dlgf' + i).value.trim());
+    const close = (value) => {
+      el.classList.remove('show'); el.innerHTML = ''; el.onclick = null;
+      document.removeEventListener('keydown', onKey, true);
+      resolve(value);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); close(null); }
+      else if (e.key === 'Enter') { e.stopPropagation(); close(values()); }
+    };
+    $('dlg-cancel').onclick = () => close(null);
+    $('dlg-ok').onclick = () => close(values());
+    el.onclick = (e) => { if (e.target === el) close(null); };
+    document.addEventListener('keydown', onKey, true);
+    const first = $('dlgf0');
+    if (first) { first.focus(); first.select(); }
+  });
 }
 
 /* ---------- uploads ---------- */
@@ -895,13 +1810,62 @@ window.addEventListener('keydown', (e) => {
     if ($('pv').classList.contains('show')) closePdfViewer();       // PDF viewer overlay first
     else if ($('cmp').classList.contains('show')) composeModal(false);
     else if ($('med').classList.contains('show')) closeEditor();    // then the crop editor
+    else if (edit.sel) clearSelection();                             // then a lasso selection
     else if (state.open) goFiles();                                  // then: back to My files
     return;
   }
   if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B')) {   // Cmd/Ctrl+B: toggle the sidebar
     if (state.open) { e.preventDefault(); toggleSidebar(); }
+    return;
   }
+  if (!state.open) return;
+  if (/^(?:INPUT|TEXTAREA)$/.test((e.target && e.target.tagName) || '')) return;
+  if (e.metaKey || e.ctrlKey) {
+    const k = e.key.toLowerCase();
+    if (k === 's') { e.preventDefault(); flushAll(true); }
+    else if (k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+    else if (k === 'y') { e.preventDefault(); redo(); }
+    return;
+  }
+  if (e.altKey) return;
+  if (e.key === 'Backspace' || e.key === 'Delete') {
+    if (edit.sel) { e.preventDefault(); deleteSelection(); }
+    return;
+  }
+  if (e.key === 'p') setTool('pen');
+  else if (e.key === 'e') { if (edit.tool === 'eraser') edit.erase = edit.erase === 'object' ? 'pixel' : 'object'; setTool('eraser'); }
+  else if (e.key === 'l') setTool('lasso');
+  else if (e.key === 'r') setTool('read');
+  else if (e.key === 'PageDown' || e.key === 'ArrowRight') { e.preventDefault(); scrollToPage(edit.current + 1); }
+  else if (e.key === 'PageUp' || e.key === 'ArrowLeft') { e.preventDefault(); scrollToPage(edit.current - 1); }
 });
+
+/* Never lose ink to a tab close: the beacon survives unload, and only when
+ * the browser refuses it do we hold the page open with a warning. */
+window.addEventListener('beforeunload', (e) => {
+  const d = state.open; if (!d) return;
+  let stuck = false;
+  edit.status.forEach((st, key) => {
+    if (!st.dirty) return;
+    const model = edit.models.get(key);
+    let sent = false;
+    try {
+      sent = !!(model && navigator.sendBeacon &&
+        navigator.sendBeacon(API + 'ink?id=' + encodeURIComponent(d.id) + '&file=' + key + '.json',
+          new Blob([JSON.stringify(model)], { type: 'application/json' })));
+    } catch (_) { sent = false; }
+    if (sent) st.dirty = false; else stuck = true;
+  });
+  if (stuck) { e.preventDefault(); e.returnValue = ''; }
+});
+
+// Which page the rail acts on follows the scroll.
+let scrollTick = false;
+window.addEventListener('scroll', () => {
+  if (scrollTick || !state.open) return;
+  scrollTick = true;
+  requestAnimationFrame(() => { scrollTick = false; trackCurrentPage(); });
+}, { passive: true });
 
 /* ---------- poll / boot ---------- */
 let refreshBusy = false;
@@ -915,8 +1879,9 @@ async function refresh() {
 }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
-$('brand').onclick = () => { state.folder = null; renderHome(); };
+$('brand').onclick = () => { if (state.open) goFiles(); else { state.folder = null; renderHome(); } };
 $('add').onclick = () => $('file').click();
+$('new-nb').onclick = newNotebook;
 $('compose-btn').onclick = () => composeModal(true);
 $('cmp-cancel').onclick = () => composeModal(false);
 $('cmp-go').onclick = submitCompose;
@@ -928,7 +1893,10 @@ window.addEventListener('dragenter', (e) => { e.preventDefault(); if (dragN++ ==
 window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('dragleave', () => { if (--dragN <= 0) { dragN = 0; $('drop').classList.remove('show'); } });
 window.addEventListener('drop', (e) => { e.preventDefault(); dragN = 0; $('drop').classList.remove('show'); if (e.dataTransfer.files.length) upload(e.dataTransfer.files); });
-document.addEventListener('visibilitychange', () => { if (!document.hidden && !state.open) refresh(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { flushAll(); return; }   // leaving the tab saves what's pending
+  if (!state.open) refresh();
+});
 
 (async function boot() {
   const pendingCompose = localStorage.getItem(COMPOSE_KEY);

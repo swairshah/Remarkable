@@ -63,13 +63,45 @@ On-disk under `~/.local/share/papier/`: `docs/<id>/` per document (byte-
 compatible with reader bundles), `folders.json`, `settings.json`. Folders
 are a `meta.json` field, not subdirectories.
 
-## Web viewer
+## Web editor
 
 `https://remarkable.exe.xyz/papier/` reads the tablet mirror and pending web
 uploads through one server-local `/papier/api/library` manifest. The manifest
 includes document metadata, sequence state, content versions, cover URLs and
 the existing ink-file set, so the high-latency browser path does not fan out
 into per-document metadata/state requests or missing-ink 404s.
+
+The web is **writable**, not just a read view — the same cloud write path the
+iPad app uses:
+
+- **Tool rail** (right edge, the device toolbar's controls in the device's
+  order): pen, eraser (tap again to cycle object/pixel), lasso, read-only
+  pointer, touch-draw toggle, undo/redo, page nav + go-to, add page.
+  Shortcuts: `p` `e` `l` `r`, `⌘Z`/`⇧⌘Z`, `⌘S`, `⌘B` (sidebar), `⌫`
+  (delete the lasso selection), `Esc`.
+- **Drawing** writes the libreink page-ink JSON the tablet writes, with the
+  iPad's pressure calibration (1.7–3.1 page units), so a mark made in the
+  browser has the weight of one made on the device. The eraser rubs out the
+  user's ink *and* pi's — patch strokes by stroke, typeset Garamond runs
+  glyph by glyph — and the lasso moves or deletes whatever falls entirely
+  inside the loop.
+- **Autosave** 2.5s after the pen stops (the tablet's own pause beat), plus
+  an explicit *Save now*, a retry loop on failure, a flush when the tab is
+  hidden or the document is closed, and a `sendBeacon` on unload.
+- **Document actions** in the left sidebar and on each home card: rename /
+  move to a folder, add a page, delete, and *New notebook* in the header.
+- **Ownership split** (identical to the iPad's): the browser owns the user's
+  strokes and POSTs the whole page to `/papier/api/ink`; pi's patches belong
+  to the server, so erasing or moving them goes through `/patch-replace`,
+  `/patch-erase` and `/patch-move`.
+
+Every write lands in the VM's *inbound* tree, never the mirror — the tablet's
+push runs `--delete`, so the mirror is its to own. The tablet's next pull
+folds the writes in per-file (last-writer-wins). A **delete** can't be a
+mirror deletion for the same reason: `/papier/api/doc-delete` drops a
+tombstone under `papier-inbound/tombstones/<id>.json`, which hides the
+document from the library immediately and makes `papier-sync.sh` remove it
+from the tablet on its next pull.
 
 Home covers are cached 280×373 WebP derivatives of each document's existing
 `thumb.png` (or first raster page before the tablet has generated a thumb).

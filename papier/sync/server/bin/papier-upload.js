@@ -23,6 +23,13 @@
 //                           notes-md2pdf.sh, and the result enters the normal
 //                           upload path (book bundle -> inbound -> tablet).
 //   GET  /compose-status?job=  phase/progress of a compose job.
+//   POST /doc-meta?id=     {title?,folder?}  rename / re-file a document.
+//   POST /doc-delete?id=   tombstone a document: gone from the library now,
+//                          deleted on the tablet at its next pull.
+//   POST /page-add?id=     {after?}  insert a blank note page.
+//
+// (Plus the write-back routes the iPad and the web editor share: GET/POST
+// /ink, POST /state, /notebook, /patch-erase, /patch-replace, /patch-move.)
 //
 // Inbound is a SEPARATE dir from the mirror on purpose: the tablet's outbound
 // rsync uses --delete, so writing straight into the mirror would be wiped on
@@ -48,13 +55,14 @@ const PREVIEWS = path.join(BACKUP, 'papier-previews'); // cached raw pages: <id>
 const COVERS = path.join(BACKUP, 'papier-covers');     // small web covers, keyed by source+doc version
 const COMPOSE = path.join(BACKUP, 'papier-compose');   // compose job workdirs
 const DERIVED = path.join(BACKUP, 'papier-derived-pdf'); // PDFs built from bundles (no retained source)
+const TOMBS = path.join(INBOX, 'tombstones');          // <id>.json: delete this doc on the tablet
 const RENDER = process.env.PAPIER_RENDER || '/home/exedev/bin/papier-render.sh';
 const MAKE_PDF_PY = '/home/exedev/bin/papier-make-pdf.py';
 const COMPOSE_SH = process.env.PAPIER_COMPOSE || '/home/exedev/bin/papier-compose.sh';
 const PREVIEW_PY = '/home/exedev/bin/papier-preview-page.py';
 const PY = '/home/exedev/papier-venv/bin/python3';
 const PORT = Number(process.env.PAPIER_PORT || 8093);
-[INCOMING, DOCS, SOURCES, PREVIEWS, COVERS, COMPOSE, DERIVED].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+[INCOMING, DOCS, SOURCES, PREVIEWS, COVERS, COMPOSE, DERIVED, TOMBS].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
 const piSessions = createPiSessions({ mirrorDocs: MIRROR, inboundDocs: DOCS });
 
@@ -82,6 +90,7 @@ function handleLibrary(req, res) {
     mirror: path.join(BACKUP, 'papier'),
     inbound: path.join(BACKUP, 'papier-inbound'),
     sources: SOURCES,
+    tombstones: TOMBS,
   });
   const durationMs = Number(process.hrtime.bigint() - started) / 1e6;
   const headers = {
@@ -173,6 +182,12 @@ function docExists(id) {
       || fs.existsSync(path.join(DOCS, id, 'meta.json'));
 }
 
+// Deleted (tombstoned) docs take no more writes: an autosave already in
+// flight when the delete landed would otherwise recreate its inbound dir,
+// and the tablet would pull that half-document back.
+function tombstoned(id) { return fs.existsSync(path.join(TOMBS, id + '.json')); }
+function writableDoc(id) { return docExists(id) && !tombstoned(id); }
+
 function writeAtomically(dst, data) {
   const tmp = dst + '.tmp';
   fs.writeFileSync(tmp, data);
@@ -209,7 +224,7 @@ function handleInkWrite(req, res, id, file) {
   id = safeId(id);
   if (!id) return json(res, 400, { ok: false, error: 'bad id' });
   if (!/^(?:pdf|note)-\d{4}\.json$/.test(file || '')) return json(res, 400, { ok: false, error: 'bad ink filename' });
-  if (!docExists(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
+  if (!writableDoc(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
   readBody(req, res, (buf) => {
     let page;
     try { page = JSON.parse(buf.toString('utf8')); } catch (_) { return json(res, 400, { ok: false, error: 'not JSON' }); }
@@ -237,7 +252,7 @@ function handleInkWrite(req, res, id, file) {
 function handleStateWrite(req, res, id) {
   id = safeId(id);
   if (!id) return json(res, 400, { ok: false, error: 'bad id' });
-  if (!docExists(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
+  if (!writableDoc(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
   readBody(req, res, (buf) => {
     let state;
     try { state = JSON.parse(buf.toString('utf8')); } catch (_) { return json(res, 400, { ok: false, error: 'not JSON' }); }
@@ -285,7 +300,7 @@ function handlePatchReplace(req, res, id, file, patchId) {
   const pid = Number(patchId);
   if (!id || !/^(?:pdf|note)-\d{4}\.json$/.test(file || '') || !Number.isInteger(pid))
     return json(res, 400, { ok: false, error: 'bad request' });
-  if (!docExists(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
+  if (!writableDoc(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
   readBody(req, res, (buf) => {
     let body;
     try { body = JSON.parse(buf.toString('utf8')); }
@@ -362,6 +377,109 @@ function handleNotebookCreate(req, res) {
     } catch (e) { return json(res, 500, { ok: false, error: String(e) }); }
     console.log('created notebook', id, `"${title}"`);
     json(res, 200, { ok: true, id });
+  });
+}
+
+// The freshest state.json: the inbound overlay (web/iPad page-adds) when
+// present, else the tablet mirror.
+function effectiveState(id) {
+  for (const base of [path.join(DOCS, id), path.join(MIRROR, id)]) {
+    try { return JSON.parse(fs.readFileSync(path.join(base, 'state.json'), 'utf8')); } catch (_) {}
+  }
+  return null;
+}
+
+// POST /doc-meta?id=<doc> — body {title?, folder?}. Renames / re-files a
+// document from the web. The merged meta.json goes to the overlay, so the
+// tablet's next pull adopts it (per-file last-writer-wins) and the library
+// manifest shows the new title immediately.
+function handleDocMeta(req, res, id) {
+  id = safeId(id);
+  if (!id) return json(res, 400, { ok: false, error: 'bad id' });
+  const meta = tombstoned(id) ? null : readMeta(id);
+  if (!meta) return json(res, 404, { ok: false, error: 'unknown doc' });
+  readBody(req, res, (buf) => {
+    let body;
+    try { body = JSON.parse(buf.toString('utf8') || '{}'); } catch (_) { return json(res, 400, { ok: false, error: 'not JSON' }); }
+    const next = { ...meta };
+    if (body.title !== undefined) {
+      const title = String(body.title == null ? '' : body.title).trim();
+      if (!title) return json(res, 400, { ok: false, error: 'title cannot be empty' });
+      next.title = title.slice(0, 120);
+    }
+    if (body.folder !== undefined) {
+      const folder = String(body.folder == null ? '' : body.folder).trim().slice(0, 120);
+      // folders are a meta field, not directories — a slash would read as a path
+      if (/[\/\\]/.test(folder)) return json(res, 400, { ok: false, error: 'folder cannot contain slashes' });
+      next.folder = folder;
+    }
+    try {
+      fs.mkdirSync(path.join(DOCS, id), { recursive: true });
+      writeAtomically(path.join(DOCS, id, 'meta.json'), JSON.stringify(next));
+    } catch (e) { return json(res, 500, { ok: false, error: String(e) }); }
+    console.log('doc meta', id, JSON.stringify({ title: next.title, folder: next.folder || '' }));
+    json(res, 200, { ok: true, meta: next });
+  });
+}
+
+// POST /doc-delete?id=<doc> — the web's delete. The mirror is the tablet's
+// to own (its push runs --delete), so deleting there would just be undone
+// on the next push: instead this drops a TOMBSTONE the tablet consumes on
+// its next pull, and the manifest hides the doc from every viewer at once.
+// The inbound copy and the server-side derivatives go immediately.
+function handleDocDelete(res, id) {
+  id = safeId(id);
+  if (!id) return json(res, 400, { ok: false, error: 'bad id' });
+  // docExists, not writableDoc: deleting an already-tombstoned doc is a
+  // no-op success, not an error a second tab should be scolded for
+  if (!docExists(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
+  try {
+    fs.mkdirSync(TOMBS, { recursive: true });
+    writeAtomically(path.join(TOMBS, id + '.json'), JSON.stringify({ id, deleted: Date.now() }));
+    fs.rmSync(path.join(DOCS, id), { recursive: true, force: true });
+    fs.rmSync(sourcePdf(id), { force: true });
+    fs.rmSync(path.join(PREVIEWS, id), { recursive: true, force: true });
+    for (const f of fs.readdirSync(DERIVED)) {
+      if (f.startsWith(id + '-') && f.endsWith('.pdf')) fs.rmSync(path.join(DERIVED, f), { force: true });
+    }
+    for (const f of fs.readdirSync(COVERS)) {
+      if (f.startsWith('data-' + id + '-') || f.startsWith('inbound-' + id + '-')) fs.rmSync(path.join(COVERS, f), { force: true });
+    }
+  } catch (e) { return json(res, 500, { ok: false, error: String(e) }); }
+  console.log('doc delete', id, '(tombstoned for the tablet)');
+  json(res, 200, { ok: true });
+}
+
+// POST /page-add?id=<doc> — body {after?: index}. Inserts a blank note page
+// after `after` (end of the document when omitted) and writes the new
+// state.json + empty ink file to the overlay. Books take note pages too:
+// the sequence interleaves pdf pages and notes.
+function handlePageAdd(req, res, id) {
+  id = safeId(id);
+  if (!id) return json(res, 400, { ok: false, error: 'bad id' });
+  if (!writableDoc(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
+  readBody(req, res, (buf) => {
+    let body;
+    try { body = JSON.parse(buf.toString('utf8') || '{}'); } catch (_) { return json(res, 400, { ok: false, error: 'not JSON' }); }
+    const state = effectiveState(id) || {};
+    const seq = (Array.isArray(state.seq) ? state.seq : [])
+      .filter((e) => e && (Number.isInteger(e.p) || Number.isInteger(e.n)));
+    const notes = seq.filter((e) => Number.isInteger(e.n)).map((e) => e.n + 1);
+    const note = Math.max(Number.isInteger(state.next_note) ? state.next_note : 1, 1, ...notes);
+    const at = Number.isInteger(body.after) ? Math.max(0, Math.min(seq.length, body.after + 1)) : seq.length;
+    seq.splice(at, 0, { n: note });
+    const next = { next_note: note + 1, pos: at, seq };
+    const file = 'note-' + String(note).padStart(4, '0') + '.json';
+    try {
+      fs.mkdirSync(path.join(DOCS, id, 'ink'), { recursive: true });
+      writeAtomically(path.join(DOCS, id, 'state.json'), JSON.stringify(next));
+      if (!fs.existsSync(effectiveInkPath(id, file))) {
+        writeAtomically(path.join(DOCS, id, 'ink', file),
+          JSON.stringify({ v: 1, next_patch: 1, next_stroke: 1, strokes: [], patches: [] }));
+      }
+    } catch (e) { return json(res, 500, { ok: false, error: String(e) }); }
+    console.log('page add', id, file, 'at', at);
+    json(res, 200, { ok: true, index: at, key: file.slice(0, -5), state: next });
   });
 }
 
@@ -768,6 +886,9 @@ http.createServer((req, res) => {
   if (req.method === 'POST' && p === '/ink') return handleInkWrite(req, res, u.searchParams.get('id'), u.searchParams.get('file'));
   if (req.method === 'POST' && p === '/state') return handleStateWrite(req, res, u.searchParams.get('id'));
   if (req.method === 'POST' && p === '/notebook') return handleNotebookCreate(req, res);
+  if (req.method === 'POST' && p === '/doc-meta') return handleDocMeta(req, res, u.searchParams.get('id'));
+  if (req.method === 'POST' && p === '/doc-delete') return handleDocDelete(res, u.searchParams.get('id'));
+  if (req.method === 'POST' && p === '/page-add') return handlePageAdd(req, res, u.searchParams.get('id'));
   if (req.method === 'POST' && p === '/patch-erase') return handlePatchErase(res, u.searchParams.get('id'), u.searchParams.get('file'), u.searchParams.get('patch'));
   if (req.method === 'POST' && p === '/patch-replace') return handlePatchReplace(req, res, u.searchParams.get('id'), u.searchParams.get('file'), u.searchParams.get('patch'));
   if (req.method === 'POST' && p === '/patch-move') return handlePatchMove(res, u.searchParams.get('id'), u.searchParams.get('file'), u.searchParams.get('patch'), u.searchParams.get('dx'), u.searchParams.get('dy'));
