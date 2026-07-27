@@ -713,6 +713,7 @@ private struct PageScreen: View {
                 }
             }
             PatchLayer(patches: model.patches,
+                       userTexts: model.texts,
                        scale: model.scale,
                        animateIds: model.animateIds,
                        animateStart: model.animateStart)

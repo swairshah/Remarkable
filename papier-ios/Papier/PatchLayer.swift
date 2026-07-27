@@ -2,12 +2,18 @@
 // Canvas (no pre-rasterized bitmap), real Core Text EB Garamond for the
 // typeset runs, and a draw-in animation when a fresh patch arrives from
 // cloud pi — the tablet's "ghost hand", but at 120Hz.
+//
+// It also draws the USER's typeset runs (the page's top-level `texts`,
+// typed on the web) — same font, ink black, no animation: they are the
+// user's layer, not pi's.
 
 import SwiftUI
 import UIKit
 
 struct PatchLayer: View {
     let patches: [InkPatch]
+    /// The user's typed runs — rendered in ink black, never animated.
+    var userTexts: [InkTextRun] = []
     let scale: CGFloat
     /// Patch ids that should animate in (fresh from pi), with their start.
     let animateIds: Set<UInt64>
@@ -16,6 +22,7 @@ struct PatchLayer: View {
     // Slightly darker than the original #2457C5 — pi's writing should sit
     // into the paper like real ink, not float on top of it.
     private static let piBlue = Color(red: 0x1D / 255.0, green: 0x48 / 255.0, blue: 0xA8 / 255.0)
+    private static let inkBlack = Color(white: 0.11)
     private static let drawInSeconds: Double = 1.4
 
     var body: some View {
@@ -33,11 +40,12 @@ struct PatchLayer: View {
         // of treating a successful HTTP request as success.
         .accessibilityElement(children: .ignore)
         .accessibilityIdentifier("pi-patch-layer")
-        .accessibilityValue("\(patches.count) patches, \(patches.reduce(0) { $0 + $1.strokes.count }) strokes")
+        .accessibilityValue("\(patches.count) patches, \(patches.reduce(0) { $0 + $1.strokes.count }) strokes, \(userTexts.count) typed runs")
     }
 
     private func canvas(progress: Double) -> some View {
         Canvas { ctx, _ in
+            draw(userTexts, into: &ctx, colour: Self.inkBlack, opacity: 1)
             for patch in patches {
                 let animated = animateIds.contains(patch.id)
                 drawStrokes(patch, into: &ctx, reveal: animated ? progress : 1)
@@ -83,15 +91,20 @@ struct PatchLayer: View {
     }
 
     private func drawTexts(_ patch: InkPatch, into ctx: inout GraphicsContext, opacity: Double) {
+        draw(patch.texts, into: &ctx, colour: Self.piBlue, opacity: opacity)
+    }
+
+    private func draw(_ runs: [InkTextRun], into ctx: inout GraphicsContext,
+                      colour: Color, opacity: Double) {
         guard opacity > 0 else { return }
-        for t in patch.texts {
+        for t in runs {
             let size = t.size * scale
             let uiFont = UIFont(name: "EBGaramond-Regular", size: size)
                 ?? UIFont(name: "Georgia", size: size)
                 ?? UIFont.systemFont(ofSize: size)
             let text = Text(t.text)
                 .font(Font(uiFont as CTFont))
-                .foregroundColor(Self.piBlue.opacity(opacity))
+                .foregroundColor(colour.opacity(opacity))
             // papier's TextRun y is the BASELINE; anchor at the top-left
             // using the font's real ascender.
             let top = CGPoint(x: t.x * scale, y: t.y * scale - uiFont.ascender)

@@ -212,14 +212,35 @@ function handleInkRead(res, id, file) {
   fs.createReadStream(p).pipe(res);
 }
 
+/* The user's typed text: top-level `texts` on the page file, the same run
+ * encoding pi's patches use (tenths of a page unit; g 0 = black). It is the
+ * poster's layer, like `strokes` — pi's runs stay inside its patches. */
+const MAX_TEXT_RUNS = 2000;
+function sanitizeTexts(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const run of value.slice(0, MAX_TEXT_RUNS)) {
+    if (!run || typeof run.t !== 'string' || !run.t.length) continue;
+    const num = (v, fallback) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : fallback);
+    out.push({
+      x: num(run.x, 0), y: num(run.y, 0),
+      s: Math.max(40, Math.min(4000, num(run.s, 400))),   // 4…400 page units
+      g: Math.max(0, Math.min(255, num(run.g, 0))),
+      t: run.t.slice(0, 2000),
+    });
+  }
+  return out;
+}
+
 // POST /ink?id=<doc>&file=note-0001.json — body is the FULL page ink file
-// (v/next_patch/next_stroke/strokes/patches, libreink-page schema). Papier
-// heals foreign stroke ids on load, so the iPad may number strokes freely.
+// (v/next_patch/next_stroke/strokes/texts/patches, libreink-page schema).
+// Papier heals foreign stroke ids on load, so a client may number strokes
+// freely.
 //
-// Ownership split: the poster (iPad) is the authority on USER strokes; the
-// SERVER is the authority on pi's patches (cloud pi may have drawn/erased
-// since the client loaded the page), so the current file's patches replace
-// the posted ones.
+// Ownership split: the poster (web/iPad) is the authority on the USER layer
+// — strokes and typed text — while the SERVER is the authority on pi's
+// patches (cloud pi may have drawn/erased since the client loaded the
+// page), so the current file's patches replace the posted ones.
 function handleInkWrite(req, res, id, file) {
   id = safeId(id);
   if (!id) return json(res, 400, { ok: false, error: 'bad id' });
@@ -230,6 +251,10 @@ function handleInkWrite(req, res, id, file) {
     try { page = JSON.parse(buf.toString('utf8')); } catch (_) { return json(res, 400, { ok: false, error: 'not JSON' }); }
     if (!page || page.v !== 1 || !Array.isArray(page.strokes) || !Array.isArray(page.patches))
       return json(res, 400, { ok: false, error: 'not a page ink file' });
+    if (page.texts !== undefined && !Array.isArray(page.texts))
+      return json(res, 400, { ok: false, error: 'texts must be an array' });
+    const texts = sanitizeTexts(page.texts);
+    if (texts.length) page.texts = texts; else delete page.texts;
     try {
       const current = JSON.parse(fs.readFileSync(effectiveInkPath(id, file), 'utf8'));
       if (current && Array.isArray(current.patches)) {
@@ -242,7 +267,7 @@ function handleInkWrite(req, res, id, file) {
       fs.mkdirSync(dir, { recursive: true });
       writeAtomically(path.join(dir, file), JSON.stringify(page));
     } catch (e) { return json(res, 500, { ok: false, error: String(e) }); }
-    console.log('ink write', id, file, `${page.strokes.length} strokes`);
+    console.log('ink write', id, file, `${page.strokes.length} strokes/${texts.length} texts`);
     json(res, 200, { ok: true });
   });
 }

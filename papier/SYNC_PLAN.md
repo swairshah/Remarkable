@@ -68,6 +68,29 @@ iPad app already used.
   copy. `meta.json` in the overlay now also wins over the mirror's, so a
   rename shows before the tablet round trip.
 
+Fourth revision (2026-07-26): a **typed-text layer**, so the web (which
+has a keyboard the tablet doesn't) can type on a page, not only draw.
+
+- **Schema**: the page ink file gains a top-level `texts` array — the
+  USER's typeset runs, same `{x,y,s,g,t}` tenths encoding pi already uses
+  inside its patches, `g: 0` (black). Omitted when empty, so pages without
+  typed text keep the exact bytes older readers expect. Ownership follows
+  the existing split: the poster owns `strokes` + `texts`, the server owns
+  `patches`.
+- **Web**: a text tool in the rail places a caret (an input styled as the
+  run it will become), `Enter` commits, `Esc` discards, clicking a run
+  reopens it. Typed runs erase glyph-by-glyph, lasso-move, lasso-delete
+  and undo exactly like ink.
+- **iPad**: renders the user's runs in ink black next to pi's blue, erases
+  them with the same glyph splitting, and round-trips the field on every
+  save (a client that dropped it would silently delete your typing).
+- **Tablet**: pending — `libreink-page` (its own repo) has to learn the
+  field before the device renders it or stops dropping it on re-save. See
+  the README section "The typed-text layer needs one change in libreink".
+  Cloud pi is already protected: `papier-pi-sessions.js` restores the runs
+  around each canvas call, because `papier-cloud-canvas` re-saves whole
+  pages through that same model.
+
 ## Model: mirror out, drop-to-add in
 
 Sync is asymmetric, which is what makes it conflict-free:

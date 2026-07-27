@@ -24,6 +24,10 @@ files round-trip libreink-page's exact ink JSON.
 - Existing tablet ink is loaded INTO the PencilKit canvas as pencil
   strokes (papier heals foreign stroke ids), pi's patches render read-only
   in pi blue, exactly like the web viewer.
+- The user's **typed runs** (the page file's top-level `texts`, composed on
+  the web) render in ink black, erase glyph-by-glyph like pi's runs, and
+  round-trip on every save. This app doesn't compose them — it must never
+  drop them.
 
 ## Build
 

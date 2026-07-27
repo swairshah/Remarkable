@@ -17,6 +17,9 @@ final class PageModel: ObservableObject {
     private let store: LibraryStore
 
     @Published var patches: [InkPatch] = []
+    /// The user's typed runs (top-level `texts`, typed on the web). This app
+    /// doesn't compose them, but it renders them and must never drop them.
+    @Published var texts: [InkTextRun] = []
     @Published var animateIds: Set<UInt64> = []
     @Published var animateStart = Date.distantPast
     @Published var initialDrawing: PKDrawing?
@@ -65,6 +68,7 @@ final class PageModel: ObservableObject {
         initialDrawing = PencilBridge.drawing(from: base, scale: scale)
         latestDrawing = initialDrawing ?? PKDrawing()
         patches = base.patches
+        texts = base.texts
         drawingEpoch += 1
         sync = .clean
     }
@@ -79,6 +83,12 @@ final class PageModel: ObservableObject {
         base.nextPatch = max(base.nextPatch, remote.nextPatch)
         let fresh = Set(remote.patches.map(\.id)).subtracting(known)
         patches = base.patches
+        // typed runs are the user layer: only adopt the server's when this
+        // page has none locally (another device typed since we loaded)
+        if base.texts.isEmpty && !remote.texts.isEmpty {
+            base.texts = remote.texts
+            texts = base.texts
+        }
         if !fresh.isEmpty {
             animateIds = fresh
             animateStart = Date()
@@ -96,6 +106,7 @@ final class PageModel: ObservableObject {
         initialDrawing = PencilBridge.drawing(from: current, scale: scale)
         latestDrawing = initialDrawing ?? PKDrawing()
         patches = base.patches
+        texts = base.texts
         drawingEpoch += 1
     }
 
@@ -104,6 +115,12 @@ final class PageModel: ObservableObject {
     func drawingChanged(_ drawing: PKDrawing) {
         guard loaded, sync != .loading else { return }
         latestDrawing = drawing
+        scheduleSave()
+    }
+
+    /// Mark the page dirty and save once the pen has genuinely stopped.
+    private func scheduleSave() {
+        guard loaded, sync != .loading else { return }
         sync = .dirty
         saveGeneration += 1
         let gen = saveGeneration
@@ -208,6 +225,24 @@ final class PageModel: ObservableObject {
         let point = CGPoint(x: displayPoint.x / scale, y: displayPoint.y / scale)
         let radius = 26 / scale
         var changedIds: Set<UInt64> = []
+
+        // The user's own typed runs erase glyph by glyph like pi's, but they
+        // are the user layer: the ordinary page save carries the result.
+        var userSurvivors: [InkTextRun] = []
+        var userChanged = false
+        for text in base.texts {
+            if let pieces = eraseGlyphs(from: text, at: point, radius: radius) {
+                userSurvivors.append(contentsOf: pieces)
+                userChanged = true
+            } else {
+                userSurvivors.append(text)
+            }
+        }
+        if userChanged {
+            base.texts = userSurvivors
+            texts = base.texts
+            scheduleSave()
+        }
 
         for index in base.patches.indices {
             var patch = base.patches[index]

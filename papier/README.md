@@ -75,10 +75,16 @@ The web is **writable**, not just a read view — the same cloud write path the
 iPad app uses:
 
 - **Tool rail** (right edge, the device toolbar's controls in the device's
-  order): pen, eraser (tap again to cycle object/pixel), lasso, read-only
-  pointer, touch-draw toggle, undo/redo, page nav + go-to, add page.
-  Shortcuts: `p` `e` `l` `r`, `⌘Z`/`⇧⌘Z`, `⌘S`, `⌘B` (sidebar), `⌫`
-  (delete the lasso selection), `Esc`.
+  order): pen, type, eraser (tap again to cycle object/pixel), lasso,
+  read-only pointer, touch-draw toggle, undo/redo, page nav + go-to, add
+  page. Shortcuts: `p` `t` `e` `l` `r`, `[`/`]` (text size), `⌘Z`/`⇧⌘Z`,
+  `⌘S`, `⌘B` (sidebar), `⌫` (delete the lasso selection), `Esc`.
+- **Typing** (the keyboard the tablet doesn't have): the text tool puts a
+  caret on the page — click, type, `Enter` commits, `Esc` discards, and
+  clicking an existing run reopens it. Runs land in the page file's
+  top-level `texts` (the USER's typeset layer, black; pi's runs stay inside
+  its patches) and behave like any other ink: the eraser rubs them glyph by
+  glyph, the lasso moves and deletes them, undo covers them.
 - **Drawing** writes the libreink page-ink JSON the tablet writes, with the
   iPad's pressure calibration (1.7–3.1 page units), so a mark made in the
   browser has the weight of one made on the device. The eraser rubs out the
@@ -102,6 +108,29 @@ mirror deletion for the same reason: `/papier/api/doc-delete` drops a
 tombstone under `papier-inbound/tombstones/<id>.json`, which hides the
 document from the library immediately and makes `papier-sync.sh` remove it
 from the tablet on its next pull.
+
+### The typed-text layer needs one change in `libreink`
+
+`texts` is newer than **`libreink-page`**, the crate that owns the `Page`
+model — which lives in the `libreink` repo, not here. Until it carries the
+field:
+
+- the **tablet** renders strokes and pi's patches on such a page but not
+  the typed runs, and a page it re-saves (you edit it on the device) loses
+  them;
+- **cloud pi** would lose them the same way, since `papier-cloud-canvas`
+  loads and re-saves the whole file through that model — so
+  `papier-pi-sessions.js` snapshots the runs around every mutating canvas
+  call and puts them back (`typed-text-safety.test.js` pins that, with a
+  fake canvas that drops the field exactly as the Rust does today). The
+  restore becomes a no-op once the crate knows the field.
+
+What `libreink-page` needs: a `texts: Vec<TextRun>` on `Page` beside
+`strokes`, parsed from and serialised to the top-level `texts` key (omit
+when empty, so existing files are byte-identical), drawn in the page render
+in `USER_GRAY` rather than `AI_GRAY`, and included in the eraser's and
+lasso's hit-testing the way patch runs already are. Web and iPad round-trip
+the field today, so the tablet is the only surface still blind to it.
 
 Home covers are cached 280×373 WebP derivatives of each document's existing
 `thumb.png` (or first raster page before the tablet has generated a thumb).

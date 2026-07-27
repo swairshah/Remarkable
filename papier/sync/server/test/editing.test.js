@@ -160,6 +160,51 @@ test('doc-delete tombstones for the tablet and clears the overlay + derivatives'
   assert.equal(fs.existsSync(path.join(f.inbound, 'docs', 'nb')), false);
 });
 
+test('the user text layer round-trips and is sanitised', async (t) => {
+  const f = fixture(t);
+  const base = await startService(t, f.backup);
+  const file = path.join(f.inbound, 'docs', 'nb', 'ink', 'note-0001.json');
+
+  const page = {
+    v: 1, next_patch: 1, next_stroke: 1, strokes: [], patches: [],
+    texts: [
+      { x: 1200, y: 8000, s: 400, g: 0, t: 'typed on the web' },
+      { x: '900.4', y: 9000.6, s: 5, g: 999, t: 'clamped' },   // coerced + bounded
+      { x: 10, y: 10, s: 400, g: 0, t: '' },                    // empty runs are dropped
+      { x: 10, y: 10, s: 400, g: 0 },                           // no text at all
+    ],
+  };
+  let r = await post(base, '/ink?id=nb&file=note-0001.json', page);
+  assert.equal(r.status, 200);
+  let written = JSON.parse(fs.readFileSync(file));
+  assert.equal(written.texts.length, 2);
+  assert.deepEqual(written.texts[0], { x: 1200, y: 8000, s: 400, g: 0, t: 'typed on the web' });
+  assert.deepEqual(written.texts[1], { x: 900, y: 9001, s: 40, g: 255, t: 'clamped' });
+
+  // the merged read the clients use serves it back
+  const merged = await (await fetch(base + '/ink?id=nb&file=note-0001.json')).json();
+  assert.equal(merged.texts.length, 2);
+
+  // pi's patch routes leave the user's text layer alone
+  await post(base, '/ink?id=nb&file=note-0002.json',
+    { v: 1, next_patch: 2, next_stroke: 3, strokes: [], texts: [{ x: 10, y: 20, s: 400, g: 0, t: 'mine' }],
+      patches: [{ id: 1, strokes: [{ i: 2, g: 110, p: [10, 10, 20, 20, 20, 20] }], texts: [] }] });
+  // (the write above keeps the server's patches — seed one by writing the file directly)
+  const second = path.join(f.inbound, 'docs', 'nb', 'ink', 'note-0002.json');
+  const seeded = JSON.parse(fs.readFileSync(second));
+  seeded.patches = [{ id: 1, strokes: [{ i: 2, g: 110, p: [10, 10, 20, 20, 20, 20] }], texts: [] }];
+  fs.writeFileSync(second, JSON.stringify(seeded));
+  r = await post(base, '/patch-replace?id=nb&file=note-0002.json&patch=1',
+    { patch: { id: 1, strokes: [{ i: 2, g: 110, p: [10, 10, 20] }], texts: [] }, next_stroke: 5 });
+  assert.equal(r.status, 200);
+  assert.deepEqual(JSON.parse(fs.readFileSync(second)).texts, [{ x: 10, y: 20, s: 400, g: 0, t: 'mine' }]);
+
+  // a non-array texts field is a bad request, not a silent drop
+  r = await post(base, '/ink?id=nb&file=note-0001.json', { ...page, texts: 'nope' });
+  assert.equal(r.status, 400);
+  assert.equal(JSON.parse(fs.readFileSync(file)).texts.length, 2);   // unchanged
+});
+
 test('a web ink write to a fresh page keeps the tablet mirror untouched', async (t) => {
   const f = fixture(t);
   const base = await startService(t, f.backup);

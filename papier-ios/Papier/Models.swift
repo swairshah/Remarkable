@@ -139,6 +139,10 @@ struct InkPage {
     var nextPatch: UInt64 = 1
     var nextStroke: UInt64 = 1
     var strokes: [InkStroke] = []
+    /// The user's own typeset runs (top-level `texts`), typed on the web.
+    /// pi's runs live inside its patches; these are the user's layer, black,
+    /// and must survive every round trip through this app.
+    var texts: [InkTextRun] = []
     var patches: [InkPatch] = []
 
     // -- JSON (hand-rolled: the schema is tiny and exact) ------------------
@@ -150,6 +154,7 @@ struct InkPage {
         page.nextPatch = (v["next_patch"] as? UInt64) ?? UInt64((v["next_patch"] as? Int) ?? 1)
         page.nextStroke = (v["next_stroke"] as? UInt64) ?? UInt64((v["next_stroke"] as? Int) ?? 1)
         page.strokes = (v["strokes"] as? [[String: Any]])?.compactMap(Self.stroke(from:)) ?? []
+        page.texts = (v["texts"] as? [[String: Any]])?.compactMap(Self.text(from:)) ?? []
         page.patches = (v["patches"] as? [[String: Any]])?.compactMap { p in
             guard let id = Self.uint(p["id"]) else { return nil }
             return InkPatch(
@@ -200,7 +205,11 @@ struct InkPage {
             }
             return ["i": s.id, "g": s.gray, "p": flat]
         }
-        let doc: [String: Any] = [
+        func textJson(_ t: InkTextRun) -> [String: Any] {
+            ["x": Int((t.x * 10).rounded()), "y": Int((t.y * 10).rounded()),
+             "s": Int((t.size * 10).rounded()), "g": t.gray, "t": t.text]
+        }
+        var doc: [String: Any] = [
             "v": 1,
             "next_patch": nextPatch,
             "next_stroke": nextStroke,
@@ -214,6 +223,9 @@ struct InkPage {
                  }] as [String: Any]
             },
         ]
+        // omitted entirely when empty, so pages without typed text keep the
+        // exact bytes older readers expect
+        if !texts.isEmpty { doc["texts"] = texts.map(textJson) }
         return (try? JSONSerialization.data(withJSONObject: doc)) ?? Data("{}".utf8)
     }
 }

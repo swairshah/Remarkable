@@ -76,6 +76,44 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     return fs.existsSync(path.join(mirrorDocs, id, 'meta.json'))
         || fs.existsSync(path.join(inboundDocs, id, 'meta.json'));
   }
+  /* ---- protecting the user's typed text from the canvas round trip ----
+   * papier-cloud-canvas renders through libreink-page, whose Page model
+   * carries strokes and patches; the user's typed runs (top-level `texts`)
+   * are newer than it, so its load -> save cycle would silently drop them
+   * when pi draws on a page you typed on. Snapshot them around every
+   * mutating canvas call and put them back. Once libreink-page knows the
+   * field this becomes a no-op (the file it writes already has them). */
+  const MUTATES_PAGE = new Set(['draw', 'underline', 'erase']);
+  function inkKeyOf(entry) {
+    if (entry && entry.p != null) return `pdf-${String(entry.p + 1).padStart(4, '0')}`;
+    if (entry && entry.n != null) return `note-${String(entry.n).padStart(4, '0')}`;
+    return null;
+  }
+  function pageInkKey(id, pageNo) {
+    const { seq } = docState(id);
+    return Number.isInteger(pageNo) ? inkKeyOf(seq[pageNo - 1]) : null;
+  }
+  function userTextsOf(id, pageNo) {
+    const key = pageInkKey(id, pageNo);
+    if (!key) return null;
+    const page = readJson(docFile(id, path.join('ink', `${key}.json`)));
+    return Array.isArray(page && page.texts) && page.texts.length ? page.texts : null;
+  }
+  function restoreUserTexts(id, pageNo, texts) {
+    const key = pageInkKey(id, pageNo);
+    if (!key) return;
+    const file = path.join(inboundDocs, id, 'ink', `${key}.json`);
+    const page = readJson(file);
+    if (!page || (Array.isArray(page.texts) && page.texts.length)) return;   // nothing lost
+    page.texts = texts;
+    try {
+      const tmp = `${file}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(page));
+      fs.renameSync(tmp, file);
+      console.log('restored', texts.length, 'typed run(s) on', id, key, 'after a canvas write');
+    } catch (err) { console.error('typed-text restore failed for', id, key, err.message); }
+  }
+
   function docState(id) {
     const meta = readJson(docFile(id, 'meta.json')) || {};
     const st = readJson(docFile(id, 'state.json')) || {};
@@ -254,7 +292,9 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
       injected.page = s.page;
     }
     if (cmd.cmd === 'insert_note' && injected.after_page == null) injected.after_page = s.page;
+    const typed = MUTATES_PAGE.has(cmd.cmd) ? userTextsOf(s.id, Number(injected.page)) : null;
     const r = await canvasCall(s, injected);
+    if (typed && r && r.ok) restoreUserTexts(s.id, Number(r.page || injected.page), typed);
     if (r && r.ok) {
       s.turnActivity = true;
       if (cmd.cmd === 'draw' || cmd.cmd === 'underline' || cmd.cmd === 'erase') {

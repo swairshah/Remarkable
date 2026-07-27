@@ -77,6 +77,12 @@
   body.reading.tool-pen .page { cursor: crosshair; }
   body.reading.tool-eraser .page { cursor: cell; }
   body.reading.tool-lasso .page { cursor: crosshair; }
+  body.reading.tool-text .page { cursor: text; }
+  /* the live text box: a caret on the page, in the page's own font+size */
+  .tbox { position: absolute; z-index: 3; border: 0; outline: 0; padding: 0; margin: 0;
+          background: rgba(255,255,255,.55); color: #1c1c1c; white-space: pre;
+          font-family: 'EB Garamond', Garamond, Georgia, serif; line-height: 1;
+          box-shadow: 0 0 0 1px rgba(36,87,197,.55); caret-color: #2457c5; }
   .page canvas, .page img { display: block; width: 100%; height: auto; }
   .page .plabel { position: absolute; top: 8px; right: 12px; font-size: 11px; color: var(--muted); background: rgba(255,255,255,.7); padding: 1px 7px; border-radius: 9px; }
   .empty { color: var(--muted); text-align: center; padding: 80px 20px; }
@@ -264,8 +270,10 @@ const AUTOSAVE_MS = 2500;    // matches the tablet's "you paused writing" beat
 const RETRY_MS = 6000;
 const UNDO_DEPTH = 60;
 const ERASE_R = 14;          // eraser nib, page units
+const TEXT_SIZE_MIN = 16, TEXT_SIZE_MAX = 120, TEXT_SIZE_STEP = 4;
 const edit = {
-  tool: 'pen',               // pen | eraser | lasso | read
+  tool: 'pen',               // pen | text | eraser | lasso | read
+  textSize: 40,              // page units; pi's own runs are 40 too
   erase: 'object',           // object | pixel  (tap the eraser again to cycle)
   fingerDraws: false,        // touch draws instead of scrolling
   models: new Map(),         // inkKey -> live page file
@@ -400,14 +408,18 @@ function drawInk(ctx, doc, scale) {
     ctx.stroke();
   }
   /* typeset (Garamond) runs: rendered in the real font, the browser's own
-   * high-quality glyphs — pi ink blue, user black */
+   * high-quality glyphs — pi ink blue, user black. The user's own typed
+   * runs are the page's top-level `texts`; pi's live inside its patches. */
   ctx.textBaseline = 'alphabetic';
-  (doc.patches || []).forEach(p => (p.texts || []).forEach(t => {
-    const ai = t.g > 0;
+  const runs = [];
+  (doc.texts || []).forEach(t => runs.push([t, false]));
+  (doc.patches || []).forEach(p => (p.texts || []).forEach(t => runs.push([t, true])));
+  for (const [t, fromPatch] of runs) {
+    const ai = fromPatch && t.g > 0;
     ctx.fillStyle = (ai && state.aiBlue) ? '#2457c5' : '#1c1c1c';
     ctx.font = (t.s / 10) + "px 'EB Garamond', Garamond, Georgia, serif";
     ctx.fillText(t.t, t.x / 10, t.y / 10);
-  }));
+  }
   ctx.restore();
 }
 
@@ -611,6 +623,7 @@ const RAIL_ICONS = {
   plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
   lasso: '<svg viewBox="0 0 24 24"><ellipse cx="12" cy="10" rx="7.5" ry="5.5" stroke-dasharray="3 2.4"/><path d="M8.6 15.1c-1 1.6-.4 3 1 3.4 1.4.3 2-.8 1.2-1.5"/></svg>',
   read: '<svg viewBox="0 0 24 24"><path d="M4 6.5c3-1.4 5.3-1.4 8 0 2.7-1.4 5-1.4 8 0v11c-3-1.4-5.3-1.4-8 0-2.7-1.4-5-1.4-8 0z"/><path d="M12 6.5v11"/></svg>',
+  text: '<svg viewBox="0 0 24 24"><path d="M5 6.5V5h14v1.5"/><path d="M12 5v14"/><path d="M8.8 19h6.4"/></svg>',
 };
 function buildRail() {
   const rail = $('rail'); rail.innerHTML = '';
@@ -622,6 +635,7 @@ function buildRail() {
   };
   const sep = () => { const s = document.createElement('div'); s.className = 'sep'; rail.appendChild(s); };
   rail._pen = mk(RAIL_ICONS.pen, 'Pen (p)', () => setTool('pen'), 'tool');
+  rail._text = mk(RAIL_ICONS.text, 'Type (t) — click the page and type; [ and ] size it', () => setTool('text'), 'tool');
   rail._eraser = mk(RAIL_ICONS.eraser, 'Eraser (e) — tap again for object/pixel', () => {
     if (edit.tool === 'eraser') edit.erase = edit.erase === 'object' ? 'pixel' : 'object';
     setTool('eraser');
@@ -645,6 +659,7 @@ function buildRail() {
   refreshRail();
 }
 function setTool(tool) {
+  commitTextBox();
   if (tool !== 'lasso') clearSelection();
   edit.tool = tool;
   refreshRail();
@@ -652,6 +667,9 @@ function setTool(tool) {
 function refreshRail() {
   const rail = $('rail'); if (!rail || !rail._pen) return;
   rail._pen.classList.toggle('active', edit.tool === 'pen');
+  rail._text.classList.toggle('active', edit.tool === 'text');
+  rail._text.innerHTML = RAIL_ICONS.text +
+    (edit.tool === 'text' ? '<span class="emode">' + edit.textSize + '</span>' : '');
   rail._lasso.classList.toggle('active', edit.tool === 'lasso');
   rail._read.classList.toggle('active', edit.tool === 'read');
   rail._eraser.classList.toggle('active', edit.tool === 'eraser');
@@ -667,6 +685,7 @@ function refreshRail() {
   document.body.classList.toggle('tool-pen', edit.tool === 'pen');
   document.body.classList.toggle('tool-eraser', edit.tool === 'eraser');
   document.body.classList.toggle('tool-lasso', edit.tool === 'lasso');
+  document.body.classList.toggle('tool-text', edit.tool === 'text');
 }
 function gotoPagePrompt() {
   if (!state.open) return;
@@ -739,6 +758,7 @@ async function openDoc(d) {
  * nears the viewport, and freed again when it scrolls far away. */
 function renderPages() {
   const d = state.open; if (!d) return;
+  commitTextBox();
   const seq = d.seq;
   edit.sel = null;             // page indices are about to change
   const old = $view.querySelector('.pages');
@@ -877,6 +897,8 @@ function normalizeInk(raw) {
     next_patch: Math.max(p.next_patch || 1, patches.reduce((m, q) => Math.max(m, (q.id || 0) + 1), 1)),
     next_stroke: Math.max(p.next_stroke || 1, maxId(strokes) + 1, maxPatchStroke + 1),
     strokes,
+    // the user's typed runs — the same encoding as pi's, black by default
+    texts: Array.isArray(p.texts) ? p.texts.filter((t) => t && typeof t.t === 'string') : [],
     patches,
   };
 }
@@ -914,6 +936,7 @@ function pageStatus(key) {
 }
 
 function resetEditing() {
+  if (liveBox) { liveBox.el.remove(); liveBox = null; }
   edit.status.forEach((st) => clearTimeout(st.timer));
   edit.models.clear(); edit.loading.clear(); edit.status.clear();
   edit.current = 0; edit.sel = null;
@@ -1006,13 +1029,21 @@ function selectionAt(pt) {
 function buildSelection(key, index, poly, model) {
   const strokes = new Set();
   model.strokes.forEach((s) => { if (strokeInside(s, poly)) strokes.add(s.i); });
+  // typed runs are taken by index — the selection is cleared whenever the
+  // text layer changes under it, so those indices stay valid
+  const texts = new Set();
+  model.texts.forEach((run, i) => {
+    const b = textRunBox(run);
+    if (insidePoly(poly, b.x0, b.y0) && insidePoly(poly, b.x1, b.y0)
+        && insidePoly(poly, b.x1, b.y1) && insidePoly(poly, b.x0, b.y1)) texts.add(i);
+  });
   const patches = new Set();
   for (const patch of model.patches) {
     const strokesIn = (patch.strokes || []).every((s) => strokeInside(s, poly));
     const textsIn = (patch.texts || []).every((t) => insidePoly(poly, t.x / 10, t.y / 10));
     if ((patch.strokes || []).length + (patch.texts || []).length && strokesIn && textsIn) patches.add(patch.id);
   }
-  return (strokes.size || patches.size) ? { key, index, poly, strokes, patches } : null;
+  return (strokes.size || texts.size || patches.size) ? { key, index, poly, strokes, texts, patches } : null;
 }
 function moveSelection(page, key, model, dx, dy) {
   const sel = edit.sel; if (!sel) return;
@@ -1025,6 +1056,8 @@ function moveSelection(page, key, model, dx, dy) {
     for (let i = 0; i + 2 < p.length; i += 3) { p[i] += dxi; p[i + 1] += dyi; }
     return { ...s, p };
   });
+  model.texts = model.texts.map((run, i) =>
+    sel.texts.has(i) ? { ...run, x: run.x + dxi, y: run.y + dyi } : run);
   for (const patch of model.patches) {
     if (!sel.patches.has(patch.id)) continue;
     for (const s of patch.strokes || []) for (let i = 0; i + 2 < s.p.length; i += 3) { s.p[i] += dxi; s.p[i + 1] += dyi; }
@@ -1046,10 +1079,11 @@ function deleteSelection() {
   const sel = edit.sel; if (!sel) return;
   const model = edit.models.get(sel.key); if (!model) return;
   const page = document.querySelectorAll('.page')[sel.index];
-  const before = model.strokes.slice();
-  if (sel.strokes.size) {
+  const before = snapshot(model);
+  if (sel.strokes.size || sel.texts.size) {
     model.strokes = model.strokes.filter((s) => !sel.strokes.has(s.i));
-    pushUndo(sel.key, before, model.strokes.slice());
+    model.texts = model.texts.filter((_, i) => !sel.texts.has(i));
+    pushUndo(sel.key, before, snapshot(model));
     markDirty(sel.key);
   }
   if (sel.patches.size) {
@@ -1088,15 +1122,42 @@ function drawSegment(page, from, to, r) {
 
 function onPagePointerDown(ev, page) {
   if (!state.open || edit.tool === 'read') return;
-  if (ev.pointerType === 'touch' && !edit.fingerDraws) return;   // touch scrolls unless asked
   if (ev.pointerType === 'mouse' && ev.button !== 0) return;
   const key = inkKey(page._entry); if (!key) return;
   const model = edit.models.get(key);
   if (!model) { pageInk(state.open, key); return; }   // still loading — the next stroke lands
+
+  /* Typing is not drawing: a tap places the caret whether or not
+   * finger-draw is on. On touch it waits for the release and bails if the
+   * finger travelled, so a scroll that began on the page doesn't leave a
+   * caret behind. */
+  if (edit.tool === 'text') {
+    const place = (e2) => {
+      if (page._index !== edit.current) { edit.current = page._index; refreshRail(); }
+      const pt = toPage(e2, page);
+      openTextBox(page, key, model, pt, hitTextRun(model, pt));
+    };
+    if (ev.pointerType !== 'touch') { ev.preventDefault(); place(ev); return; }
+    const from = { x: ev.clientX, y: ev.clientY };
+    let travelled = false;
+    const watch = (e2) => { if (Math.hypot(e2.clientX - from.x, e2.clientY - from.y) > 8) travelled = true; };
+    const settle = (e2) => {
+      page.removeEventListener('pointermove', watch);
+      page.removeEventListener('pointerup', settle);
+      page.removeEventListener('pointercancel', settle);
+      if (!travelled && e2.type === 'pointerup') place(e2);
+    };
+    page.addEventListener('pointermove', watch);
+    page.addEventListener('pointerup', settle);
+    page.addEventListener('pointercancel', settle);
+    return;
+  }
+
+  if (ev.pointerType === 'touch' && !edit.fingerDraws) return;   // touch scrolls unless asked
   ev.preventDefault();
   try { page.setPointerCapture(ev.pointerId); } catch (_) {}
   if (page._index !== edit.current) { edit.current = page._index; }
-  const before = model.strokes.slice();
+  const before = snapshot(model);
   let move, end;
 
   if (edit.tool === 'pen') {
@@ -1114,7 +1175,7 @@ function onPagePointerDown(ev, page) {
     end = () => {
       if (stroke.p.length >= 3) {
         model.strokes.push(stroke);
-        pushUndo(key, before, model.strokes.slice());
+        pushUndo(key, before, snapshot(model));
         markDirty(key);
       } else { model.next_stroke--; }
     };
@@ -1125,7 +1186,7 @@ function onPagePointerDown(ev, page) {
     move = rub;
     end = () => {
       if (!touchedUser) return;
-      pushUndo(key, before, model.strokes.slice());
+      pushUndo(key, before, snapshot(model));
       markDirty(key);
     };
   } else {
@@ -1142,7 +1203,7 @@ function onPagePointerDown(ev, page) {
       };
       end = () => {
         if (Math.abs(total.x) < 0.5 && Math.abs(total.y) < 0.5) return;
-        pushUndo(key, before, model.strokes.slice());
+        pushUndo(key, before, snapshot(model));
         if (edit.sel && edit.sel.patches.size) pushPatchMove(key, [...edit.sel.patches], total.x, total.y);
         markDirty(key);
       };
@@ -1181,6 +1242,98 @@ function onPagePointerDown(ev, page) {
   page.addEventListener('pointercancel', finish);
 }
 
+/* ---------- typing ----------
+ * A click with the text tool puts a caret on the page: an input positioned
+ * and styled exactly like the run it is about to become, so what you type
+ * is what the page keeps. Enter (or clicking away) commits it as a
+ * top-level `texts` run — the user's own typeset layer, black, the same
+ * encoding pi uses inside its patches. Clicking an existing run reopens it.
+ */
+function runFont(sizePx) { return sizePx + "px 'EB Garamond', Garamond, Georgia, serif"; }
+function runWidth(run) {
+  measureCtx.font = runFont((run.s || 400) / 10);
+  return measureCtx.measureText(String(run.t || '')).width;   // page units
+}
+function runAscent(sizePage) {
+  measureCtx.font = runFont(sizePage);
+  const m = measureCtx.measureText('Hg');
+  return m.actualBoundingBoxAscent || sizePage * 0.72;
+}
+// page-unit box of a run: x/y is its baseline start
+function textRunBox(run) {
+  const size = (run.s || 400) / 10, x = run.x / 10, y = run.y / 10;
+  return { x0: x, y0: y - runAscent(size), x1: x + runWidth(run), y1: y + size * 0.28 };
+}
+function hitTextRun(model, pt) {
+  for (let i = model.texts.length - 1; i >= 0; i--) {
+    const b = textRunBox(model.texts[i]);
+    if (pt.x >= b.x0 - 4 && pt.x <= b.x1 + 4 && pt.y >= b.y0 - 4 && pt.y <= b.y1 + 4) return i;
+  }
+  return -1;
+}
+
+let liveBox = null;   // {el, page, key, model, index, before, x, y, size}
+function openTextBox(page, key, model, pt, index) {
+  commitTextBox();
+  clearSelection();          // the text layer is about to shift under it
+  const existing = index >= 0 ? model.texts[index] : null;
+  const size = existing ? (existing.s || 400) / 10 : edit.textSize;
+  const x = existing ? existing.x / 10 : pt.x;
+  const y = existing ? existing.y / 10 : pt.y;   // baseline
+  const scale = page.getBoundingClientRect().width / PAGE_W;   // display px per page unit
+  const el = document.createElement('input');
+  el.type = 'text'; el.className = 'tbox'; el.value = existing ? existing.t : '';
+  el.style.font = runFont(size * scale);
+  el.style.left = (x * scale) + 'px';
+  el.style.top = ((y - runAscent(size)) * scale) + 'px';
+  el.style.height = (size * 1.05 * scale) + 'px';
+  el.style.minWidth = (40 * scale) + 'px';
+  el.style.width = Math.max(40, (existing ? runWidth(existing) : 0) + 60) * scale + 'px';
+  el.spellcheck = false;
+  el.addEventListener('input', () => {
+    measureCtx.font = runFont(size * scale);
+    el.style.width = (measureCtx.measureText(el.value).width + 24 * scale) + 'px';
+  });
+  el.addEventListener('keydown', (ev) => {
+    ev.stopPropagation();   // the page shortcuts must not eat the typing
+    if (ev.key === 'Enter') { ev.preventDefault(); commitTextBox(); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); cancelTextBox(); }
+  });
+  el.addEventListener('blur', () => { if (liveBox && liveBox.el === el) commitTextBox(); });
+  page.appendChild(el);
+  liveBox = { el, page, key, model, index, before: snapshot(model), x, y, size };
+  // hide the run being edited so it is not drawn twice
+  if (existing) { model.texts = model.texts.filter((_, i) => i !== index); repaintPage(page); }
+  el.focus();
+  el.setSelectionRange(el.value.length, el.value.length);
+}
+
+function commitTextBox() {
+  const box = liveBox;
+  if (!box) return;
+  liveBox = null;
+  const value = box.el.value.replace(/\s+$/, '');
+  box.el.remove();
+  if (value) {
+    box.model.texts.push({ x: Math.round(box.x * 10), y: Math.round(box.y * 10),
+                           s: Math.round(box.size * 10), g: 0, t: value });
+  }
+  repaintPage(box.page);
+  // an empty box that created nothing (and edited nothing) is not an edit
+  if (!value && box.index < 0) return;
+  pushUndo(box.key, box.before, snapshot(box.model));
+  markDirty(box.key);
+}
+
+function cancelTextBox() {
+  const box = liveBox;
+  if (!box) return;
+  liveBox = null;
+  box.el.remove();
+  restoreSnapshot(box.model, box.before);   // puts an edited run back untouched
+  repaintPage(box.page);
+}
+
 /* ---------- erasing ---------- */
 /* Object mode drops a whole touched stroke; pixel mode splits it around the
  * nib. Both apply to the user's ink AND to pi's — tablet parity: the user
@@ -1197,6 +1350,14 @@ function eraseAt(page, key, model, pt) {
     } else { user = true; }
   }
   if (user) model.strokes = kept;
+  // the user's typed runs erase glyph by glyph, exactly like pi's
+  const keptTexts = [];
+  for (const run of model.texts) {
+    const pieces = eraseGlyphs(run, pt, ERASE_R);
+    if (!pieces) { keptTexts.push(run); continue; }
+    user = true; keptTexts.push(...pieces);
+  }
+  model.texts = keptTexts;
   const touched = erasePiInk(model, pt, ERASE_R);
   if (user || touched.size) repaintPage(page);
   touched.forEach((id) => schedulePatchSync(key, id));
@@ -1307,8 +1468,14 @@ function schedulePatchSync(key, id) {
 }
 
 /* ---------- undo / redo ---------- */
-/* Snapshots of the user-stroke list, per page: one entry per gesture. pi
- * patch edits stay out of it — they are already synced to the server. */
+/* Snapshots of the user layer — strokes AND typed runs — per page, one
+ * entry per gesture. pi patch edits stay out of it: they are already
+ * synced to the server. */
+const snapshot = (model) => ({ strokes: model.strokes.slice(), texts: model.texts.slice() });
+function restoreSnapshot(model, snap) {
+  model.strokes = snap.strokes.slice();
+  model.texts = snap.texts.slice();
+}
 function pushUndo(key, before, after) {
   const st = pageStatus(key);
   st.undo.push({ before, after });
@@ -1325,7 +1492,7 @@ function applyHistory(dir) {
   const st = pageStatus(key);
   const entry = dir === 'undo' ? st.undo.pop() : st.redo.pop();
   if (!entry) return;
-  model.strokes = (dir === 'undo' ? entry.before : entry.after).slice();
+  restoreSnapshot(model, dir === 'undo' ? entry.before : entry.after);
   (dir === 'undo' ? st.redo : st.undo).push(entry);
   const page = document.querySelectorAll('.page')[edit.current];
   if (page) repaintPage(page);
@@ -1380,6 +1547,7 @@ async function writePage(key, d, model, st) {
 }
 
 async function flushAll(explicit) {
+  commitTextBox();          // a caret left open is text the user typed
   const doc = state.open;
   const keys = [...edit.status.keys()].filter((k) => edit.status.get(k).dirty);
   await Promise.all(keys.map((k) => flushPage(k, doc)));
@@ -1807,6 +1975,7 @@ function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 window.addEventListener('resize', () => { if ($('med').classList.contains('show') && med.pageImg && $('med-stage')) { sizeStage(med.pageImg.naturalWidth, med.pageImg.naturalHeight); layoutBox(); } });
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (liveBox) { cancelTextBox(); return; }                        // the caret first
     if ($('pv').classList.contains('show')) closePdfViewer();       // PDF viewer overlay first
     else if ($('cmp').classList.contains('show')) composeModal(false);
     else if ($('med').classList.contains('show')) closeEditor();    // then the crop editor
@@ -1832,7 +2001,14 @@ window.addEventListener('keydown', (e) => {
     if (edit.sel) { e.preventDefault(); deleteSelection(); }
     return;
   }
+  if (e.key === '[' || e.key === ']') {
+    edit.textSize = clamp(edit.textSize + (e.key === ']' ? TEXT_SIZE_STEP : -TEXT_SIZE_STEP),
+                          TEXT_SIZE_MIN, TEXT_SIZE_MAX);
+    setTool('text');
+    return;
+  }
   if (e.key === 'p') setTool('pen');
+  else if (e.key === 't') setTool('text');
   else if (e.key === 'e') { if (edit.tool === 'eraser') edit.erase = edit.erase === 'object' ? 'pixel' : 'object'; setTool('eraser'); }
   else if (e.key === 'l') setTool('lasso');
   else if (e.key === 'r') setTool('read');
