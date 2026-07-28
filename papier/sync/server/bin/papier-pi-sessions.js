@@ -191,6 +191,42 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     return removed;
   }
 
+  /* Debug trail — born of the July 2026 silent OAuth death. Every failed
+   * or empty turn lands in PI_HOME/pi-errors.log with the REAL reason
+   * (e.g. "OAuth refresh failed for openai-codex"), pulled from the pi
+   * session transcript. One `grep` or one glance at the iPad toast now
+   * answers "why is pi quiet?" instead of a week of mystery. */
+  function lastTurnError(s) {
+    try {
+      const dir = path.join(PI_HOME, s.id, 'sessions');
+      const files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'))
+        .map((f) => ({ f, m: fs.statSync(path.join(dir, f)).mtimeMs }))
+        .sort((a, b) => b.m - a.m);
+      if (!files.length) return null;
+      const p = path.join(dir, files[0].f);
+      const size = fs.statSync(p).size;
+      const len = Math.min(size, 65536);
+      const buf = Buffer.alloc(len);
+      const fd = fs.openSync(p, 'r');
+      fs.readSync(fd, buf, 0, len, size - len);
+      fs.closeSync(fd);
+      const matches = [...buf.toString('utf8').matchAll(/"errorMessage"\s*:\s*"((?:[^"\\]|\\.)*)"/g)];
+      if (!matches.length) return null;
+      return JSON.parse(`"${matches[matches.length - 1][1]}"`).slice(0, 200);
+    } catch (_) { return null; }
+  }
+
+  function logPiError(s, reason) {
+    try {
+      // ONE line per failure — multi-line provider errors collapse so the
+      // log stays grep-able: `grep OAuth pi-errors.log` must just work.
+      const flat = String(reason).replace(/\s+/g, ' ').trim().slice(0, 300);
+      const log = path.join(PI_HOME, 'pi-errors.log');
+      fs.appendFileSync(log, `${new Date().toISOString()} doc=${s.id} ${flat}\n`);
+      if (fs.statSync(log).size > 200_000) fs.truncateSync(log, 0);
+    } catch (_) {}
+  }
+
   async function finishTurn(s, { said = '', exitCode } = {}) {
     if (s.finishing) return;
     s.finishing = true;
@@ -202,6 +238,7 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
     }
     if (exitCode !== undefined) {
       const why = s.killReason ? `: ${s.killReason}` : '';
+      logPiError(s, `pi exited (${exitCode})${why}`);
       emit(s, { type: 'notice', text: `[pi exited (${exitCode})${why}; next turn restarts it]` });
     } else {
       const text = (said || '').trim();
@@ -209,7 +246,14 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
         emit(s, { type: 'notice', text });
       }
       if (!text && !s.turnActivity) {
-        emit(s, { type: 'notice', text: '[pi returned nothing — possible model outage; check /pi/health]' });
+        const err = lastTurnError(s);
+        logPiError(s, err ? `turn failed: ${err}` : 'turn produced nothing (no error in transcript)');
+        emit(s, {
+          type: 'notice',
+          text: err
+            ? `[pi error: ${err}]`
+            : '[pi returned nothing — possible model outage; check /pi/health]',
+        });
       }
     }
     s.killReason = null;
@@ -410,7 +454,13 @@ function createPiSessions({ mirrorDocs, inboundDocs }) {
         }
         break;
       case 'response':
-        if (v.success === false) emit(s, { type: 'notice', text: `[pi error: ${v.error || '?'}]` });
+        if (v.success === false) {
+          // The other failure mouth: errors that kill a request before a
+          // turn even starts (missing/expired auth, bad model id) arrive
+          // as RPC response errors — log those too.
+          logPiError(s, `request failed: ${String(v.error || '?').slice(0, 200)}`);
+          emit(s, { type: 'notice', text: `[pi error: ${v.error || '?'}]` });
+        }
         break;
       case 'agent_end':
         void finishTurn(s, { said: s.turnText });
