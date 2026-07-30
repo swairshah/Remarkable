@@ -9,6 +9,7 @@ with its own README.
 | [`sync/`](sync/) | Tablet → server pipeline: rsync backup, JPG/PDF export, LLM activity digest + web viewer at [remarkable.exe.xyz](https://remarkable.exe.xyz/updates/) |
 | [`sample-app/`](sample-app/) | Minimal AppLoad doodle-pad app in C — hackable template with direct Wacom input |
 | [`sample-app-rust/`](sample-app-rust/) | The Rust twin of `sample-app`, kept at feature parity |
+| [`inkwash/`](inkwash/) | Wet-ink painting app: native port of [johnowhitaker/inkwash](https://github.com/johnowhitaker/inkwash) — pen inks, Marker tail or finger paints water, ink bleeds where wet and dries into the page |
 | [`pi/`](pi/) | Running a headless Raspberry Pi from the reMarkable 2 |
 | [`pi-collab/`](pi-collab/) | Handwriting chat app: write on the tablet, pi answers via RPC (code/markdown/SVG rendered in-place) |
 | [`agent/`](agent/) | RBot — standalone Flue agent |
