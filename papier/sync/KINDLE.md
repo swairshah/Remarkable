@@ -19,8 +19,8 @@ What gets sent (`--format auto`):
 `--format pdf` forces the PDF path even for compose docs. `--format epub`
 errors on docs with no markdown source — PDF→EPUB conversion mangles
 papers, so it is deliberately not offered. Ink never leaves the
-tablet/web reader; the Kindle copy is the clean document. Amazon's email
-gateway caps attachments at 50MB; the script refuses larger files.
+tablet/web reader; the Kindle copy is the clean document. Resend caps an email at 40MB after attachment Base64 encoding; the
+script checks that encoded size before sending.
 
 ## One-time setup
 
@@ -34,40 +34,25 @@ Document Settings**:
   List** — this is the `KINDLE_FROM` below; mail from unapproved senders
   is silently dropped.
 
-### 2. VM: SMTP relay (`~/.msmtprc`, mode 600)
+### 2. Resend side
 
-msmtp is installed by `deploy-server.sh`. For Gmail, create an app
-password (Google Account → Security → 2-Step Verification → App
-passwords) and write:
-
-```
-defaults
-auth           on
-tls            on
-tls_trust_file /etc/ssl/certs/ca-certificates.crt
-logfile        ~/.msmtp.log
-
-account default
-host           smtp.gmail.com
-port           587
-from           you@gmail.com
-user           you@gmail.com
-password       <app password>
-```
-
-`chmod 600 ~/.msmtprc`. Any other SMTP provider works the same way; a
-non-default account name goes in `KINDLE_MSMTP_ACCOUNT`.
+Create a Resend API key and verify the domain used by your sender. The
+`KINDLE_FROM` address does not need an inbox, but its domain must be
+verified by Resend and the full address must also appear in Amazon's
+Approved Personal Document E-mail List.
 
 ### 3. VM: `~/.papier-kindle.env`
 
 ```
+RESEND_API_KEY=re_...
 KINDLE_TO=your-address@kindle.com
-KINDLE_FROM=you@gmail.com
+KINDLE_FROM=Papier <kindle@your-verified-domain.example>
 ```
 
-Optional: `KINDLE_MSMTP_ACCOUNT` (msmtp account, default `default`),
-`KINDLE_WEBTEX` (pandoc --webtex URL prefix for math images; default
-codecogs at 200dpi).
+Protect the credentials with `chmod 600 ~/.papier-kindle.env`. The API
+key may instead live in the VM's existing `~/.env` file. Optional:
+`KINDLE_WEBTEX` sets Pandoc's WebTeX URL prefix for math images; it
+defaults to CodeCogs at 200dpi.
 
 ### 4. Verify
 
