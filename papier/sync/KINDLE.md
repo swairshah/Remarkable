@@ -19,7 +19,9 @@ What gets sent (`--format auto`):
 `--format pdf` forces the PDF path even for compose docs. `--format epub`
 errors on docs with no markdown source — PDF→EPUB conversion mangles
 papers, so it is deliberately not offered. Ink never leaves the
-tablet/web reader; the Kindle copy is the clean document. Resend caps an email at 40MB after attachment Base64 encoding; the
+tablet/web reader; the Kindle copy is the clean document.
+
+Resend caps an email at 40MB after attachment Base64 encoding; the
 script checks that encoded size before sending.
 
 ## One-time setup
@@ -46,7 +48,7 @@ Approved Personal Document E-mail List.
 ```
 RESEND_API_KEY=re_...
 KINDLE_TO=your-address@kindle.com
-KINDLE_FROM=Papier <kindle@your-verified-domain.example>
+KINDLE_FROM='Papier <kindle@your-verified-domain.example>'
 ```
 
 Protect the credentials with `chmod 600 ~/.papier-kindle.env`. The API
@@ -60,6 +62,8 @@ defaults to CodeCogs at 200dpi.
 ssh exedev@remarkable.exe.xyz 'bin/papier-kindle.sh <some-doc-id>'
 ```
 
-`sent: <file> (<n>KB) -> ...@kindle.com` means it worked; the doc lands
-on the Kindle within a minute or two. Failures print one line naming the
-missing piece (config, msmtp, pandoc, approved sender).
+`sent: <file> (<n>KB) -> ...@kindle.com (Resend <email-id>)` means
+Resend accepted the message; the document should then arrive through
+Amazon's Send-to-Kindle gateway. Failures print one line naming the
+missing configuration, Resend API error, Pandoc error, or sender-approval
+problem.
