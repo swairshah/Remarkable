@@ -5,13 +5,13 @@ import Foundation
 
 // MARK: - Library manifest (/papier/api/library)
 
-struct Library: Decodable {
+struct Library: Codable {
     let v: Int
     let generation: String
     let docs: [PapierDoc]
 }
 
-struct PapierDoc: Decodable, Identifiable, Equatable, Hashable {
+struct PapierDoc: Codable, Identifiable, Equatable, Hashable {
     let id: String
     let base: String            // "/papier/data/" (mirror) or "/papier/inbound/"
     let pending: Bool           // true = web/iPad-added, not yet pulled by the tablet
@@ -35,7 +35,7 @@ struct PapierDoc: Decodable, Identifiable, Equatable, Hashable {
     var pageH: Double { meta.h ?? 1872 }
 }
 
-struct DocMeta: Decodable {
+struct DocMeta: Codable {
     let title: String
     let pages: Int?
     let w: Double?
@@ -46,7 +46,7 @@ struct DocMeta: Decodable {
 
 /// One entry of a document's page sequence: {"p": N} (0-based pdf page)
 /// or {"n": N} (1-based note page).
-enum SeqEntry: Decodable, Hashable {
+enum SeqEntry: Codable, Hashable {
     case pdf(Int)
     case note(Int)
 
@@ -56,6 +56,14 @@ enum SeqEntry: Decodable, Hashable {
         if let n = try c.decodeIfPresent(Int.self, forKey: .n) { self = .note(n); return }
         throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
                                                 debugDescription: "seq entry has neither p nor n"))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .pdf(let page): try c.encode(page, forKey: .p)
+        case .note(let page): try c.encode(page, forKey: .n)
+        }
     }
 
     private enum CodingKeys: String, CodingKey { case p, n }

@@ -55,12 +55,12 @@ final class PageModel: ObservableObject {
             base = pending
             // even with local pending strokes, the server may hold newer
             // pi patches — they are server-authoritative
-            if let remote = try? await store.client.fetchInk(doc, key: key) {
+            if let remote = try? await store.fetchInk(doc, key: key) {
                 base.patches = remote.patches
                 base.nextPatch = max(base.nextPatch, remote.nextPatch)
             }
         } else {
-            base = (try? await store.client.fetchInk(doc, key: key)).flatMap { $0 } ?? InkPage()
+            base = (try? await store.fetchInk(doc, key: key)).flatMap { $0 } ?? InkPage()
         }
         initialDrawing = PencilBridge.drawing(from: base, scale: scale)
         latestDrawing = initialDrawing ?? PKDrawing()
@@ -73,7 +73,7 @@ final class PageModel: ObservableObject {
     /// (user strokes stay local truth) and animate the new ones in.
     func refreshPatches() async {
         guard loaded else { return }
-        guard let remote = try? await store.client.fetchInk(doc, key: entry.inkKey) else { return }
+        guard let remote = try? await store.fetchInk(doc, key: entry.inkKey) else { return }
         let known = Set(base.patches.map(\.id))
         base.patches = remote.patches
         base.nextPatch = max(base.nextPatch, remote.nextPatch)

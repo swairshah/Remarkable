@@ -703,12 +703,11 @@ private struct PageScreen: View {
         ZStack {
             Color.white
             if case .pdf(let p) = entry {
-                AsyncImage(url: store.client.pageURL(doc, pdfPage: p)) { phase in
+                CachedRemoteImage(url: store.client.pageURL(doc, pdfPage: p)) { phase in
                     switch phase {
                     case .success(let img): img.resizable().scaledToFit()
                     case .empty: ProgressView()
                     case .failure: Image(systemName: "photo").foregroundStyle(.tertiary)
-                    @unknown default: EmptyView()
                     }
                 }
             }

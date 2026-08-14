@@ -6,6 +6,17 @@ options:
   createIntermediateGroups: true
 
 targets:
+  PapierTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [PapierTests]
+    dependencies:
+      - target: Papier
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+        PRODUCT_BUNDLE_IDENTIFIER: com.swair.papier.tests
+
   PapierUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -50,8 +61,8 @@ targets:
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 8B9YURJS4G
         SWIFT_VERSION: "5.9"
-        MARKETING_VERSION: "1.1.20"
-        CURRENT_PROJECT_VERSION: "32"
+        MARKETING_VERSION: "1.1.21"
+        CURRENT_PROJECT_VERSION: "33"
         INFOPLIST_KEY_CFBundleDisplayName: Papier
         SUPPORTS_MACCATALYST: false
         ENABLE_PREVIEWS: true

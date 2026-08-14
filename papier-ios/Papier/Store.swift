@@ -10,37 +10,130 @@ import SwiftUI
 
 @MainActor
 final class LibraryStore: ObservableObject {
+    private static let defaultServerRoot = "http://100.90.235.68:8000"
+
     // The papier VM (remarkable.exe.xyz) on the tailnet; editable in Settings.
-    @AppStorage("serverRoot") var serverRoot: String = "http://100.90.235.68:8000" {
-        didSet { etag = nil }
+    @AppStorage("serverRoot") var serverRoot: String = LibraryStore.defaultServerRoot {
+        didSet {
+            guard OfflineLibraryCache.normalized(oldValue) != OfflineLibraryCache.normalized(serverRoot)
+            else { return }
+            refreshID += 1
+            etag = nil
+            docs = []
+            generation = ""
+            lastError = nil
+            lastSuccessfulSync = nil
+            restoreCachedLibrary(for: serverRoot)
+        }
     }
 
     @Published var docs: [PapierDoc] = []
     @Published var generation: String = ""
     @Published var lastError: String?
     @Published var loading = false
+    @Published private(set) var lastSuccessfulSync: Date?
 
+    private let offlineLibrary = OfflineLibraryCache()
+    private var librarySchemaVersion = 1
     private var etag: String?
     private var pollTask: Task<Void, Never>?
+    private var refreshID = 0
 
-    var client: PapierClient { PapierClient(serverRoot: serverRoot.trimmingCharacters(in: .whitespaces)) }
+    init() {
+        let savedRoot = UserDefaults.standard.string(forKey: "serverRoot")
+            ?? Self.defaultServerRoot
+        restoreCachedLibrary(for: savedRoot)
+    }
+
+    var client: PapierClient {
+        PapierClient(serverRoot: OfflineLibraryCache.normalized(serverRoot))
+    }
     var configured: Bool { serverRoot.contains("://") }
+    var isOffline: Bool { lastError != nil }
 
     func refresh() async {
         guard configured else { return }
+        refreshID += 1
+        let requestID = refreshID
+        let requestRoot = OfflineLibraryCache.normalized(serverRoot)
+        let requestClient = PapierClient(serverRoot: requestRoot)
         loading = docs.isEmpty
-        defer { loading = false }
+        defer {
+            if requestID == refreshID { loading = false }
+        }
+
         do {
-            let (lib, newTag) = try await client.library(etag: etag)
+            let (lib, newTag) = try await requestClient.library(etag: etag)
+            guard requestID == refreshID,
+                  requestRoot == OfflineLibraryCache.normalized(serverRoot)
+            else { return }
+
             etag = newTag
+            let syncedAt = Date()
             if let lib {
-                docs = lib.docs.sorted { $0.meta.title.localizedCaseInsensitiveCompare($1.meta.title) == .orderedAscending }
+                librarySchemaVersion = lib.v
+                docs = sorted(lib.docs)
                 generation = lib.generation
                 prunePending(docs: lib.docs)
+                try? offlineLibrary.save(
+                    library: lib,
+                    etag: newTag,
+                    serverRoot: requestRoot,
+                    syncedAt: syncedAt
+                )
+            } else {
+                let current = Library(v: librarySchemaVersion, generation: generation, docs: docs)
+                try? offlineLibrary.save(
+                    library: current,
+                    etag: newTag,
+                    serverRoot: requestRoot,
+                    syncedAt: syncedAt
+                )
             }
+            lastSuccessfulSync = syncedAt
             lastError = nil
         } catch {
+            guard requestID == refreshID else { return }
             lastError = error.localizedDescription
+        }
+    }
+
+    /// Fetch current ink when online; if the server is unreachable, fall
+    /// back to the version-matched copy from the last time this page opened.
+    func fetchInk(_ doc: PapierDoc, key: String) async throws -> InkPage? {
+        let root = OfflineLibraryCache.normalized(serverRoot)
+        do {
+            let page = try await PapierClient(serverRoot: root).fetchInk(doc, key: key)
+            if let page {
+                await OfflineInkCache.shared.save(page, serverRoot: root, doc: doc, key: key)
+            }
+            return page
+        } catch {
+            lastError = error.localizedDescription
+            if let cached = await OfflineInkCache.shared.load(
+                serverRoot: root,
+                doc: doc,
+                key: key
+            ) {
+                return cached
+            }
+            throw error
+        }
+    }
+
+    private func restoreCachedLibrary(for serverRoot: String) {
+        guard let snapshot = offlineLibrary.load(serverRoot: serverRoot) else { return }
+        librarySchemaVersion = snapshot.library.v
+        etag = snapshot.etag
+        docs = sorted(snapshot.library.docs)
+        generation = snapshot.library.generation
+        lastSuccessfulSync = snapshot.syncedAt
+        prunePending(docs: snapshot.library.docs)
+    }
+
+    private func sorted(_ docs: [PapierDoc]) -> [PapierDoc] {
+        docs.sorted {
+            $0.meta.title.localizedCaseInsensitiveCompare($1.meta.title) == .orderedAscending
         }
     }
 

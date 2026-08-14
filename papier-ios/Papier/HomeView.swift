@@ -20,6 +20,8 @@ struct HomeView: View {
                     unconfigured
                 } else if store.docs.isEmpty && store.loading {
                     ProgressView("Loading library…")
+                } else if store.docs.isEmpty && store.isOffline {
+                    offlineEmptyState
                 } else if store.docs.isEmpty {
                     emptyState
                 } else {
@@ -69,15 +71,56 @@ struct HomeView: View {
 
     private var grid: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: 26) {
-                ForEach(store.docs) { doc in
-                    Button { openedDoc = doc } label: { DocCell(doc: doc) }
-                        .buttonStyle(.plain)
+            VStack(spacing: 18) {
+                if store.isOffline { offlineBanner }
+                LazyVGrid(columns: columns, spacing: 26) {
+                    ForEach(store.docs) { doc in
+                        Button { openedDoc = doc } label: { DocCell(doc: doc) }
+                            .buttonStyle(.plain)
+                    }
                 }
             }
             .padding(22)
         }
         .background(Color(uiColor: .systemGroupedBackground))
+    }
+
+    private var offlineBanner: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "icloud.slash")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(.orange)
+                .frame(width: 28, height: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Offline — showing saved library")
+                    .font(.subheadline.weight(.semibold))
+                if let date = store.lastSuccessfulSync {
+                    Text("Last synced \(date.formatted(.relative(presentation: .named)))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 12)
+            Button {
+                Task { await store.refresh() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 40, height: 40)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Retry connection")
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 6)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.orange.opacity(0.18), lineWidth: 1)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private var unconfigured: some View {
@@ -95,6 +138,19 @@ struct HomeView: View {
             Label("No documents", systemImage: "books.vertical")
         } description: {
             Text("Documents added on the tablet or dropped on the web viewer appear here.")
+        }
+    }
+
+    private var offlineEmptyState: some View {
+        ContentUnavailableView {
+            Label("Library unavailable", systemImage: "icloud.slash")
+        } description: {
+            Text("Papier cannot reach the server and has no saved library on this device yet.")
+        } actions: {
+            Button("Retry") { Task { await store.refresh() } }
+                .buttonStyle(.borderedProminent)
+            Button("Open Settings") { showSettings = true }
+                .buttonStyle(.bordered)
         }
     }
 
@@ -117,14 +173,13 @@ private struct DocCell: View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack {
                 Color.white
-                AsyncImage(url: store.client.coverURL(doc)) { phase in
+                CachedRemoteImage(url: store.client.coverURL(doc)) { phase in
                     switch phase {
                     case .success(let img): img.resizable().scaledToFill()
                     case .empty, .failure:
                         Image(systemName: doc.isNotebook ? "pencil.and.outline" : "book.closed")
                             .font(.system(size: 34))
                             .foregroundStyle(.tertiary)
-                    @unknown default: EmptyView()
                     }
                 }
             }
