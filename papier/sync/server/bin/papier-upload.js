@@ -17,12 +17,17 @@
 //                           state.json/ink, so annotations survive).
 //   GET  /source-pdf?id=&v= stream the retained source PDF (immutable when
 //                           versioned) — the viewer renders it with PDF.js.
-//   POST /compose  {instructions,title?}  agentic doc creation: a pi agent on
+//   POST /compose  {instructions,title?,formats?}  agentic doc creation: a pi agent on
 //                           this VM researches the instructions/links, writes
-//                           a typeset markdown article, renders it with
-//                           notes-md2pdf.sh, and the result enters the normal
-//                           upload path (book bundle -> inbound -> tablet).
+//                           a typeset markdown article, and renders PDF and/or
+//                           EPUB. PDF enters the normal upload path (book
+//                           bundle -> inbound -> tablet); EPUB is downloadable.
 //   GET  /compose-status?job=  phase/progress of a compose job.
+//   GET  /compose-download?job=&format=  download a completed PDF or EPUB.
+//   POST /kindle   {id,format?}  email the doc to the configured Kindle
+//                           address via papier-kindle.sh (EPUB from a
+//                           compose doc's markdown, else source/derived PDF).
+//   GET  /kindle-status?job=  status of a kindle send.
 //
 // Inbound is a SEPARATE dir from the mirror on purpose: the tablet's outbound
 // rsync uses --delete, so writing straight into the mirror would be wiped on
@@ -51,6 +56,7 @@ const DERIVED = path.join(BACKUP, 'papier-derived-pdf'); // PDFs built from bund
 const RENDER = process.env.PAPIER_RENDER || '/home/exedev/bin/papier-render.sh';
 const MAKE_PDF_PY = '/home/exedev/bin/papier-make-pdf.py';
 const COMPOSE_SH = process.env.PAPIER_COMPOSE || '/home/exedev/bin/papier-compose.sh';
+const KINDLE_SH = process.env.PAPIER_KINDLE || '/home/exedev/bin/papier-kindle.sh';
 const PREVIEW_PY = '/home/exedev/bin/papier-preview-page.py';
 const PY = '/home/exedev/papier-venv/bin/python3';
 const PORT = Number(process.env.PAPIER_PORT || 8093);
@@ -641,13 +647,14 @@ setTimeout(warmDerivedPdfs, 15000);
 setInterval(warmDerivedPdfs, 6 * 3600000);
 
 /* ---- agentic compose --------------------------------------------------- */
-// POST /compose {instructions, title?} -> {ok, job}. A detached-ish pipeline:
+// POST /compose {instructions, title?, formats?} -> {ok, job}. A detached-ish pipeline:
 //   1. job dir under papier-compose/<job>/ with instructions.md
 //   2. papier-compose.sh runs a headless pi agent (research + write + render
-//      via notes-md2pdf.sh) -> <job>/out/article.pdf + <job>/title.txt,
-//      updating <job>/status.txt as it goes
-//   3. on success the PDF takes the exact upload path: book bundle into
-//      inbound docs/, source retained for the crop editor + PDF.js viewer.
+//      via notes-md2pdf.sh/Pandoc) -> selected files in <job>/out/ plus
+//      <job>/title.txt, updating <job>/status.txt as it goes
+//   3. on success a selected PDF takes the exact upload path: book bundle
+//      into inbound docs/, source retained for the crop editor + PDF.js
+//      viewer. A selected EPUB stays in the job directory for download.
 // Result is also persisted to <job>/result.json so status survives restarts.
 const composeJobs = new Map();
 const COMPOSE_TIMEOUT = 40 * 60000;
@@ -660,15 +667,39 @@ function persistComposeResult(id, job) {
   try { fs.writeFileSync(path.join(composeDir(id), 'result.json'), JSON.stringify(job)); } catch (_) {}
 }
 
+function selectedComposeFormats(value) {
+  if (value == null) return ['pdf'];
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const formats = [];
+  for (const format of value) {
+    if (!['pdf', 'epub'].includes(format)) return null;
+    if (!formats.includes(format)) formats.push(format);
+  }
+  return formats;
+}
+
+function completeCompose(job, dir, title, docId) {
+  const outputs = job.formats.filter((format) => fs.existsSync(path.join(dir, 'out', `article.${format}`)));
+  Object.assign(job, { status: 'done', title, outputs, updated: Date.now() });
+  if (docId) job.docId = docId;
+  persistComposeResult(job.id, job);
+}
+
 function finishCompose(job, dir) {
   const pdf = path.join(dir, 'out', 'article.pdf');
-  if (!fs.existsSync(pdf)) {
-    Object.assign(job, { status: 'failed', error: 'agent produced no PDF', updated: Date.now() });
+  const epub = path.join(dir, 'out', 'article.epub');
+  const missing = job.formats.filter((format) => !fs.existsSync(format === 'pdf' ? pdf : epub));
+  if (missing.length) {
+    Object.assign(job, { status: 'failed', error: `agent produced no ${missing.join(' or ').toUpperCase()}`, updated: Date.now() });
     persistComposeResult(job.id, job); return;
   }
   let title = job.title || '';
   try { title = (fs.readFileSync(path.join(dir, 'title.txt'), 'utf8').trim() || title); } catch (_) {}
   title = title || 'Composed document';
+  if (!job.formats.includes('pdf')) {
+    console.log('composed EPUB', job.id, '->', epub);
+    completeCompose(job, dir, title); return;
+  }
   const out = freeDir(slugify(title + '.pdf'));
   const docId = path.basename(out);
   Object.assign(job, { status: 'rendering', phase: 'rendering pages for the tablet', updated: Date.now() });
@@ -680,8 +711,7 @@ function finishCompose(job, dir) {
     try { fs.copyFileSync(pdf, sourcePdf(docId)); } catch (e) { console.error('compose source save failed', e); }
     setOrigCrop(out);
     console.log('composed', docId, '->', out);
-    Object.assign(job, { status: 'done', docId, title, updated: Date.now() });
-    persistComposeResult(job.id, job);
+    completeCompose(job, dir, title, docId);
   });
 }
 
@@ -690,8 +720,10 @@ function handleCompose(req, res) {
     let body; try { body = JSON.parse(buf.toString('utf8')); } catch (_) { return json(res, 400, { ok: false, error: 'bad json' }); }
     const instructions = String(body && body.instructions || '').trim();
     const title = String(body && body.title || '').trim().slice(0, 160);
+    const formats = selectedComposeFormats(body && body.formats);
     if (!instructions) return json(res, 400, { ok: false, error: 'instructions are required' });
     if (instructions.length > 100000) return json(res, 413, { ok: false, error: 'instructions too long' });
+    if (!formats) return json(res, 400, { ok: false, error: 'select at least one valid output format' });
 
     const id = crypto.randomBytes(8).toString('hex');
     const dir = composeDir(id);
@@ -699,9 +731,10 @@ function handleCompose(req, res) {
     fs.mkdirSync(path.join(dir, 'out'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'instructions.md'),
       (title ? `Preferred title: ${title}\n\n` : '') + instructions + '\n');
+    fs.writeFileSync(path.join(dir, 'formats.txt'), formats.join('\n') + '\n');
     fs.writeFileSync(path.join(dir, 'status.txt'), 'starting');
 
-    const job = { id, ok: true, status: 'running', phase: 'starting', title, updated: Date.now() };
+    const job = { id, ok: true, status: 'running', phase: 'starting', title, formats, updated: Date.now() };
     composeJobs.set(id, job);
     json(res, 202, { ok: true, job: id });
 
@@ -751,6 +784,84 @@ function handleComposeStatus(res, id) {
   json(res, 200, { ...job, phase });
 }
 
+function handleComposeDownload(req, res, id, format) {
+  if (!/^[a-f0-9]{16}$/.test(id || '') || !['pdf', 'epub'].includes(format)) {
+    res.writeHead(400); res.end('bad compose download'); return;
+  }
+  const file = path.join(composeDir(id), 'out', `article.${format}`);
+  let st;
+  try { st = fs.statSync(file); } catch (_) { res.writeHead(404); res.end('output not found'); return; }
+  let title = 'Composed document';
+  try { title = fs.readFileSync(path.join(composeDir(id), 'title.txt'), 'utf8').trim() || title; } catch (_) {}
+  const ascii = (title.replace(/[^A-Za-z0-9 ._-]+/g, '-').replace(/-+/g, '-').slice(0, 120) || 'composed-document') + `.${format}`;
+  const encoded = encodeURIComponent((title.slice(0, 160) || 'Composed document') + `.${format}`);
+  const headers = {
+    'Content-Type': format === 'pdf' ? 'application/pdf' : 'application/epub+zip',
+    'Content-Length': st.size,
+    'Content-Disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`,
+    'Cache-Control': 'private, no-store',
+  };
+  if (req.method === 'HEAD') { res.writeHead(200, headers); res.end(); return; }
+  res.writeHead(200, headers);
+  fs.createReadStream(file).pipe(res);
+}
+
+/* ---- send to Kindle ---------------------------------------------------- */
+// POST /kindle {id, format?} -> {ok, job}. papier-kindle.sh builds the file
+// (EPUB from a compose doc's retained markdown, else the source/derived PDF)
+// and emails it to the configured @kindle.com address (~/.papier-kindle.env).
+// Jobs are memory-only: a send is quick and the button just polls briefly.
+const kindleJobs = new Map();
+const KINDLE_TIMEOUT = 10 * 60000;
+
+function handleKindle(req, res) {
+  readBody(req, res, (buf) => {
+    let body; try { body = JSON.parse(buf.toString('utf8')); } catch (_) { return json(res, 400, { ok: false, error: 'bad json' }); }
+    const id = safeId(body && body.id);
+    if (!id) return json(res, 400, { ok: false, error: 'bad id' });
+    const format = ['auto', 'epub', 'pdf'].includes(body && body.format) ? body.format : 'auto';
+    const jobId = crypto.randomBytes(8).toString('hex');
+    const job = { ok: true, id: jobId, doc: id, status: 'running', updated: Date.now() };
+    kindleJobs.set(jobId, job);
+    if (kindleJobs.size > 200) {   // memory-only: drop the oldest settled jobs
+      for (const [k, j] of kindleJobs) {
+        if (kindleJobs.size <= 100) break;
+        if (j.status !== 'running') kindleJobs.delete(k);
+      }
+    }
+    const child = spawn(KINDLE_SH, [id, '--format', format], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let tail = '';
+    child.stdout.on('data', (c) => { tail = (tail + c.toString()).slice(-2000); });
+    child.stderr.on('data', (c) => { tail = (tail + c.toString()).slice(-2000); });
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, KINDLE_TIMEOUT);
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      Object.assign(job, { status: 'failed', error: String(err.message || err), updated: Date.now() });
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (job.status === 'failed') return;
+      const last = tail.trim().split('\n').pop() || '';
+      if (code === 0) {
+        console.log('kindle', id, '->', last);
+        Object.assign(job, { status: 'done', detail: last, updated: Date.now() });
+      } else {
+        const reason = signal === 'SIGKILL' ? 'timed out' : (last.replace(/^papier-kindle: /, '') || `exit ${code == null ? signal : code}`);
+        console.error('kindle send failed:', id, reason);
+        Object.assign(job, { status: 'failed', error: reason, updated: Date.now() });
+      }
+    });
+    json(res, 202, { ok: true, job: jobId });
+  });
+}
+
+function handleKindleStatus(res, id) {
+  if (!/^[a-f0-9]{16}$/.test(id || '')) return json(res, 400, { ok: false, error: 'bad job id' });
+  const job = kindleJobs.get(id);
+  if (!job) return json(res, 404, { ok: false, error: 'unknown kindle job (service restarted?)' });
+  json(res, 200, job);
+}
+
 /* ---- router ----------------------------------------------------------- */
 http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
@@ -763,6 +874,9 @@ http.createServer((req, res) => {
   if ((req.method === 'GET' || req.method === 'HEAD') && p === '/source-pdf') return handleSourcePdf(req, res, u.searchParams.get('id'), u.searchParams.get('v'));
   if (req.method === 'POST' && p === '/compose') return handleCompose(req, res);
   if (req.method === 'GET' && p === '/compose-status') return handleComposeStatus(res, u.searchParams.get('job'));
+  if ((req.method === 'GET' || req.method === 'HEAD') && p === '/compose-download') return handleComposeDownload(req, res, u.searchParams.get('job'), u.searchParams.get('format'));
+  if (req.method === 'POST' && p === '/kindle') return handleKindle(req, res);
+  if (req.method === 'GET' && p === '/kindle-status') return handleKindleStatus(res, u.searchParams.get('job'));
   if (piSessions.handle(req, res, p, u)) return;
   if (req.method === 'GET' && p === '/ink') return handleInkRead(res, u.searchParams.get('id'), u.searchParams.get('file'));
   if (req.method === 'POST' && p === '/ink') return handleInkWrite(req, res, u.searchParams.get('id'), u.searchParams.get('file'));

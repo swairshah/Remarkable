@@ -15,6 +15,7 @@
 #   make book FILE=~/papers/x.pdf [TITLE="..."] [SLUG=x] [MARGIN=90]  render + push
 #   make mirror-list [ONLY=frag]     browse the tablet's OWN pdf library
 #   make mirror ONLY="name frag"     import matching xochitl pdfs as docs
+#   make kindle DOC=<id> [FORMAT=auto|epub|pdf]   email a doc to your Kindle
 #
 #   make fonts        extract xochitl's UI fonts from the device -> build/fonts/
 #   make ref          capture xochitl reference screenshots -> build/ref/
@@ -32,6 +33,7 @@
 # Requires pi already on the tablet (../pi/pi-harness/install.sh).
 
 HOST ?= root@192.168.0.16
+VM ?= exedev@remarkable.exe.xyz
 BIN := papier
 TARGET := armv7-unknown-linux-musleabihf
 BUILT := target/$(TARGET)/release/$(BIN)
@@ -59,7 +61,7 @@ MIGRATE_LEGACY := if [ -d /home/root/.local/share/alt-ui ] && [ ! -d $(DATA_DIR)
                   rm -rf /home/root/xovi/exthome/appload/alt-ui; \
                   rm -f /home/root/bin/alt-ui-sync.sh
 
-.PHONY: all build preview test-host testbook fetch-server deploy book book-rm mirror mirror-list fonts ref adopt trace log log-server kill restore-ui restart-ui uninstall clean
+.PHONY: all build preview test-host testbook fetch-server deploy book book-rm kindle mirror mirror-list fonts ref adopt trace log log-server kill restore-ui restart-ui uninstall clean
 
 all: build
 
@@ -156,6 +158,14 @@ endif
 	$(SSH) 'mkdir -p $(DOCS_DIR)'
 	tar -C build/docs -cf - "$(SLUG)" | $(SSH) 'tar -C $(DOCS_DIR) -xf -'
 	@echo "doc '$(SLUG)' pushed — it appears on the Papier home grid."
+
+# Email a doc to the Kindle configured on the VM (~/.papier-kindle.env).
+# Compose docs go as reflowable EPUBs; everything else as the clean PDF.
+kindle:
+ifndef DOC
+	@echo 'usage: make kindle DOC=<doc-id> [FORMAT=auto|epub|pdf]' && exit 1
+endif
+	ssh $(VM) 'bin/papier-kindle.sh $(DOC) --format $(or $(FORMAT),auto)'
 
 book-rm:
 ifndef SLUG

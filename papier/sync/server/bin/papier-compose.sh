@@ -5,7 +5,9 @@
 #   instructions.md   what the user asked for (links, topic, guidance)
 #   status.txt        phase string, polled by the viewer
 #   work/             the agent's working directory (article.md + assets/)
-#   out/article.pdf   the final typeset PDF (rendered by notes-md2pdf.sh)
+#   formats.txt       selected outputs, one of pdf/epub per line (default pdf)
+#   out/article.pdf   optional fixed-layout PDF (notes-md2pdf.sh)
+#   out/article.epub  optional reflowable EPUB 3 (Pandoc + MathML)
 #   title.txt         resolved document title
 #
 # The writing style/pipeline is a port of the local Clippings enrichment
@@ -21,6 +23,23 @@ WORK="$JOB/work"
 OUT="$JOB/out"
 MD2PDF="${MD2PDF:-$HOME/bin/notes-md2pdf.sh}"
 PI_BIN="${PI_BIN:-pi}"
+FORMATS_FILE="$JOB/formats.txt"
+WANT_PDF=false
+WANT_EPUB=false
+
+if [ ! -s "$FORMATS_FILE" ]; then printf '%s\n' pdf > "$FORMATS_FILE"; fi
+while IFS= read -r format; do
+  case "$format" in
+    pdf) WANT_PDF=true ;;
+    epub) WANT_EPUB=true ;;
+    '') ;;
+    *) echo "[compose] bad output format: $format" >&2; exit 1 ;;
+  esac
+done < "$FORMATS_FILE"
+if ! $WANT_PDF && ! $WANT_EPUB; then
+  echo "[compose] no output formats selected" >&2
+  exit 1
+fi
 
 status() { printf '%s' "$1" > "$JOB/status.txt"; echo "[compose] $1" >&2; }
 
@@ -40,8 +59,8 @@ You are a document-composition agent for Papier (a reMarkable tablet
 library). The user wants a new reading document created from the
 instructions below. Your final deliverable is ONE markdown file at
 article.md in the current directory. A separate renderer turns it into a
-typeset PDF for an e-ink tablet, so the markdown must be clean and
-self-contained.
+typeset the selected PDF and/or EPUB outputs, so the markdown must be
+clean, portable, and self-contained.
 
 --- USER INSTRUCTIONS ---
 PROMPT
@@ -146,7 +165,8 @@ if [ ! -s "$WORK/article.md" ]; then
 fi
 
 # Portable-math normalization (same fix enrich_clippings applies).
-sed -i 's/\\hdots/\\dots/g' "$WORK/article.md"
+sed 's/\\hdots/\\dots/g' "$WORK/article.md" > "$WORK/article.md.tmp"
+mv "$WORK/article.md.tmp" "$WORK/article.md"
 
 # ---- review pass: catch what the typesetter cannot render ---------------
 # Pandoc's MathML converter rejects some LaTeX (\colorbox, \textcolor, ...)
@@ -219,8 +239,135 @@ TITLE="$(awk -F': *' '/^title:/ { sub(/^title: */, ""); gsub(/^"|"$/, ""); print
 [ -n "$TITLE" ] || TITLE="Composed document"
 printf '%s' "$TITLE" > "$JOB/title.txt"
 
-status "typesetting the PDF"
-"$MD2PDF" "$WORK/article.md" "$OUT/article.pdf" "$TITLE" >&2
+if $WANT_PDF; then
+  status "typesetting the PDF"
+  "$MD2PDF" "$WORK/article.md" "$OUT/article.pdf" "$TITLE" >&2
+fi
+
+if $WANT_EPUB; then
+  status "typesetting the EPUB"
+  EPUB_CSS="$OUT/epub.css"
+  EPUB_FONT_DIR="$OUT/epub-fonts"
+  READER_FONT_DIR="${READER_FONT_DIR:-$HOME/.local/share/fonts}"
+  EPUB_BODY_FONT="serif"
+  EPUB_FONT_CSS=""
+  EPUB_FONT_ARGS=()
+
+  if [ -f "$READER_FONT_DIR/Reader-Regular.ttf" ]; then
+    mkdir -p "$EPUB_FONT_DIR"
+    EPUB_BODY_FONT='"Reader", serif'
+    while IFS='|' read -r file weight style; do
+      [ -f "$READER_FONT_DIR/$file" ] || continue
+      cp "$READER_FONT_DIR/$file" "$EPUB_FONT_DIR/$file"
+      EPUB_FONT_ARGS+=(--epub-embed-font "$EPUB_FONT_DIR/$file")
+      EPUB_FONT_CSS+="@font-face { font-family: \"Reader\"; src: url(\"../fonts/$file\") format(\"truetype\"); font-weight: $weight; font-style: $style; }"$'\n'
+    done <<'FONTS'
+Reader-Light.ttf|300|normal
+Reader-LightItalic.ttf|300|italic
+Reader-Regular.ttf|400|normal
+Reader-Italic.ttf|400|italic
+Reader-Medium.ttf|500 600|normal
+Reader-MediumItalic.ttf|500 600|italic
+Reader-Bold.ttf|700 900|normal
+Reader-BoldItalic.ttf|700 900|italic
+FONTS
+  fi
+
+  cat > "$EPUB_CSS" <<CSS
+/* kindle-reader-fonts-faux-350-v6 */
+/* papier-white-page-v1 */
+$EPUB_FONT_CSS
+html, body {
+  background: #fff !important;
+  color: #000;
+}
+body {
+  font-family: $EPUB_BODY_FONT;
+  font-weight: 300;
+  line-height: 1.45;
+  text-shadow: 0 0 0.35px currentColor;
+  -webkit-text-stroke: 0.18px currentColor;
+}
+p, li, blockquote, td, th { font-weight: 300; }
+strong, b { font-weight: 500; text-shadow: none; -webkit-text-stroke: 0; }
+h1, h2, h3, h4 {
+  font-family: $EPUB_BODY_FONT;
+  font-weight: 500;
+  line-height: 1.2;
+  page-break-after: avoid;
+  break-after: avoid;
+}
+img { max-width: 100%; height: auto; }
+code { font-family: monospace; font-size: 0.82em; line-height: 1.2; }
+pre {
+  font-family: monospace;
+  font-size: 0.76em;
+  line-height: 1.18;
+  margin: 0.65em 0;
+  padding: 0.45em 0.55em;
+  overflow-x: auto;
+}
+pre code { font-size: 1em; line-height: inherit; white-space: pre-wrap; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border-bottom: 1px solid #ddd; padding: 0.3em 0.45em; vertical-align: top; }
+math[display="block"] { display: block; text-align: center; margin: 1em 0; overflow-x: auto; }
+math[display="inline"] { display: inline math; }
+div.aside, div.concept, div.difficult, div.note {
+  margin: 0.9em 0 0.9em 0.8em;
+  padding: 0.4em 0.7em;
+  border-left: 2px solid #b0a89a;
+  background: rgba(0, 0, 0, 0.04);
+  font-size: 0.92em;
+}
+div.aside strong, div.concept strong, div.difficult strong, div.note strong { font-weight: 500; }
+CSS
+
+  (
+    cd "$WORK"
+    PANDOC_ARGS=(
+      article.md
+      --from markdown+smart+yaml_metadata_block+header_attributes+fenced_divs+bracketed_spans+tex_math_dollars
+      --to epub3
+      --standalone
+      --toc
+      --mathml
+      --css "$EPUB_CSS"
+      --metadata "title=$TITLE"
+    )
+    if [ "${#EPUB_FONT_ARGS[@]}" -gt 0 ]; then PANDOC_ARGS+=("${EPUB_FONT_ARGS[@]}"); fi
+    PANDOC_ARGS+=(-o "$OUT/article.epub")
+    pandoc "${PANDOC_ARGS[@]}"
+  ) >&2
+
+  # Weak EPUB readers sometimes show Pandoc's embedded TeX source beside
+  # MathML. Mirror the Clippings renderer: remove those annotations while
+  # keeping the required mimetype member first and uncompressed.
+  python3 - "$OUT/article.epub" <<'PY'
+import re
+import sys
+import zipfile
+from pathlib import Path
+
+epub = Path(sys.argv[1])
+tmp = epub.with_suffix(".tmp.epub")
+annotation = re.compile(rb"<annotation\b[^>]*>.*?</annotation>", flags=re.S)
+with zipfile.ZipFile(epub, "r") as source, zipfile.ZipFile(tmp, "w") as target:
+    names = {info.filename for info in source.infolist()}
+    if "mimetype" in names:
+        target.writestr("mimetype", source.read("mimetype"), compress_type=zipfile.ZIP_STORED)
+    for info in source.infolist():
+        if info.filename == "mimetype":
+            continue
+        data = source.read(info.filename)
+        if info.filename.endswith((".xhtml", ".html")):
+            data = annotation.sub(b"", data)
+        target.writestr(info.filename, data, compress_type=zipfile.ZIP_DEFLATED)
+tmp.replace(epub)
+PY
+fi
 
 status "done writing"
-echo "[compose] ok: $OUT/article.pdf ($TITLE)" >&2
+OUTPUTS=""
+$WANT_PDF && OUTPUTS="$OUTPUTS $OUT/article.pdf"
+$WANT_EPUB && OUTPUTS="$OUTPUTS $OUT/article.epub"
+echo "[compose] ok:$OUTPUTS ($TITLE)" >&2

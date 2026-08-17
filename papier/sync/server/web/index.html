@@ -108,11 +108,44 @@
   #cmp .sub { color: var(--muted); font-size: 13px; margin-bottom: 14px; line-height: 1.45; }
   #cmp input[type=text], #cmp textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--accent); font: inherit; font-size: 14px; padding: 9px 11px; }
   #cmp textarea { min-height: 150px; resize: vertical; margin-top: 10px; }
+  #cmp .formats { border: 0; padding: 0; margin: 13px 0 0; }
+  #cmp .formats legend { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  #cmp .format-options { display: flex; gap: 10px; }
+  #cmp .format-option { display: flex; align-items: center; gap: 7px; min-width: 92px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; cursor: pointer; user-select: none; }
+  #cmp .format-option:has(input:checked) { border-color: var(--accent); }
+  #cmp .format-option input { accent-color: var(--accent); }
   #cmp .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
   #cmpchip { position: fixed; right: 18px; bottom: 18px; z-index: 25; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,.18); display: none; align-items: center; gap: 9px; max-width: 340px; }
   #cmpchip.show { display: flex; }
   #cmpchip .spin { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: cspin 1s linear infinite; flex: none; }
+  #cmpchip .result { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+  #cmpchip a { color: var(--accent); font-weight: 600; }
+  #cmpchip .close { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 16px; padding: 0 0 0 3px; }
   @keyframes cspin { to { transform: rotate(360deg); } }
+
+  /* ---- Send to Kindle format picker ---- */
+  #kfmt { position:fixed; inset:0; z-index:44; display:grid; place-items:center; padding:20px; background:rgba(15,15,17,.62); opacity:0; visibility:hidden; pointer-events:none; transition:opacity 160ms ease, visibility 160ms step-end; }
+  #kfmt.show { opacity:1; visibility:visible; pointer-events:auto; transition:opacity 160ms ease; }
+  #kfmt .box { width:min(430px, calc(100vw - 40px)); padding:22px; border-radius:18px; background:var(--card); box-shadow:0 24px 70px rgba(0,0,0,.32), 0 0 0 1px rgba(127,127,120,.15); transform:translateY(8px) scale(.985); transition:transform 160ms ease; }
+  #kfmt.show .box { transform:translateY(0) scale(1); }
+  #kfmt h3 { margin:0; font:600 22px/1.15 "EB Garamond", Garamond, Georgia, serif; text-wrap:balance; }
+  #kfmt .sub { margin:6px 0 17px; color:var(--muted); font-size:13px; line-height:1.45; text-wrap:pretty; overflow-wrap:anywhere; }
+  #kfmt fieldset { display:grid; gap:8px; margin:0; padding:0; border:0; }
+  #kfmt .choice { display:grid; grid-template-columns:20px 1fr; gap:3px 11px; align-items:center; min-height:64px; padding:10px 13px; border-radius:11px; background:var(--bg); cursor:pointer; user-select:none; box-shadow:inset 0 0 0 1px transparent; transition:background-color 150ms ease, box-shadow 150ms ease, transform 120ms ease; }
+  #kfmt .choice:hover { box-shadow:inset 0 0 0 1px var(--muted); }
+  #kfmt .choice:active { transform:scale(.99); }
+  #kfmt .choice:has(input:checked) { background:var(--card); box-shadow:inset 0 0 0 1.5px var(--accent), 0 2px 9px rgba(0,0,0,.08); }
+  #kfmt .choice input { grid-row:1 / span 2; width:17px; height:17px; margin:0; accent-color:var(--accent); }
+  #kfmt .choice strong { align-self:end; font-size:14px; line-height:1.25; }
+  #kfmt .choice span { align-self:start; color:var(--muted); font-size:12px; line-height:1.35; }
+  #kfmt .row { display:flex; justify-content:flex-end; gap:9px; margin-top:17px; }
+  #kfmt button { min-height:42px; padding:8px 15px; border:0; border-radius:9px; font:600 13px/1 -apple-system, "Segoe UI", sans-serif; cursor:pointer; transition:background-color 150ms ease, color 150ms ease, transform 120ms ease, box-shadow 150ms ease; }
+  #kfmt button:active { transform:scale(.96); }
+  #kfmt .cancel { background:transparent; color:var(--muted); }
+  #kfmt .cancel:hover { background:var(--bg); color:var(--accent); }
+  #kfmt .send { background:var(--accent); color:var(--card); box-shadow:0 3px 10px rgba(0,0,0,.16); }
+  #kfmt .send:hover { box-shadow:0 5px 14px rgba(0,0,0,.22); }
+  @media (prefers-reduced-motion:reduce) { #kfmt, #kfmt .box, #kfmt .choice, #kfmt button { transition:none; } }
 
   /* ---- margin editor ---- */
   #med { position: fixed; inset: 0; z-index: 40; background: rgba(15,15,17,.86); display:none; }
@@ -160,10 +193,34 @@
 <div id="pv"><div class="pvbar"><span class="pvtitle" id="pv-title"></span><span class="spacer"></span><button class="addbtn" id="pv-close">✕ Close</button></div><iframe id="pv-frame" title="PDF viewer"></iframe></div>
 <div id="cmp"><div class="box">
   <h3>✦ Compose a document</h3>
-  <div class="sub">Paste links and/or describe what you want. An agent on the server researches it, writes a typeset article, and adds the PDF to Papier — it syncs to your tablet like any upload. Takes a few minutes.</div>
+  <div class="sub">Paste links and/or describe what you want. An agent on the server researches it and writes a typeset article. PDF syncs into Papier on your tablet; EPUB is a reflowable download. Takes a few minutes.</div>
   <input type="text" id="cmp-title" placeholder="Title (optional)">
   <textarea id="cmp-instr" placeholder="e.g. https://arxiv.org/abs/2405.12345 — teach me this paper properly, with the math worked through and a running example…"></textarea>
+  <fieldset class="formats">
+    <legend>Output formats</legend>
+    <div class="format-options">
+      <label class="format-option"><input type="checkbox" id="cmp-pdf" checked> PDF</label>
+      <label class="format-option"><input type="checkbox" id="cmp-epub"> EPUB</label>
+    </div>
+  </fieldset>
   <div class="row"><button class="addbtn" id="cmp-cancel">Cancel</button><button class="addbtn" id="cmp-go" style="background:var(--accent);color:var(--card)">Create</button></div>
+</div></div>
+<div id="kfmt" role="dialog" aria-modal="true" aria-labelledby="kfmt-heading"><div class="box">
+  <h3 id="kfmt-heading">Send to Kindle</h3>
+  <div class="sub" id="kfmt-title"></div>
+  <fieldset aria-label="Kindle document format">
+    <label class="choice">
+      <input type="radio" name="kfmt-format" id="kfmt-pdf" value="pdf" checked>
+      <strong>PDF</strong>
+      <span>Fixed layout, with a clean title page for your Kindle library.</span>
+    </label>
+    <label class="choice">
+      <input type="radio" name="kfmt-format" value="epub">
+      <strong>EPUB</strong>
+      <span>Reflowable text. Available for documents made with Compose.</span>
+    </label>
+  </fieldset>
+  <div class="row"><button class="cancel" id="kfmt-cancel">Cancel</button><button class="send" id="kfmt-send">Send</button></div>
 </div></div>
 <div id="cmpchip"></div>
 <div class="toast" id="toast"></div>
@@ -464,6 +521,55 @@ function openPdfViewer(d) {
   $('pv').classList.add('show');
 }
 function closePdfViewer() { $('pv').classList.remove('show'); $('pv-frame').src = 'about:blank'; }
+/* Send to Kindle: choose a fixed-layout PDF (with an outgoing-only title
+ * sheet) or a reflowable EPUB made from retained Compose markdown. The
+ * button doubles as the status display; ink stays in the tablet/web reader. */
+let kindleRequest = null;
+function kindleModal(show, d, setLabel) {
+  if (show && sendToKindle._busy) { toast('A Kindle delivery is already in progress.'); return; }
+  const modal = $('kfmt');
+  if (show) {
+    kindleRequest = { d, setLabel };
+    $('kfmt-title').textContent = d.meta.title || d.id;
+    $('kfmt-pdf').checked = true;
+    modal.classList.add('show');
+    setTimeout(() => $('kfmt-send').focus(), 0);
+  } else {
+    modal.classList.remove('show');
+    kindleRequest = null;
+  }
+}
+function confirmKindleSend() {
+  if (!kindleRequest) return;
+  const request = kindleRequest;
+  const selected = document.querySelector('input[name="kfmt-format"]:checked');
+  const format = selected ? selected.value : 'pdf';
+  kindleModal(false);
+  sendToKindle(request.d, request.setLabel, format);
+}
+function sendToKindle(d, setLabel, format) {
+  if (sendToKindle._busy) return;
+  sendToKindle._busy = true;
+  const idle = (delay) => setTimeout(() => { sendToKindle._busy = false; setLabel('⇪', 'Send to Kindle'); }, delay);
+  const fail = (e) => { setLabel('✕', 'Kindle: ' + (e && e.message || 'failed')); idle(8000); };
+  const label = (format || 'pdf').toUpperCase();
+  setLabel('⇪', 'Sending ' + label + '…');
+  fetch(API + 'kindle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: d.id, format: format || 'pdf' }) })
+    .then((r) => r.json())
+    .then((j) => {
+      if (!j.ok) throw new Error(j.error || 'send failed');
+      const poll = () => fetch(API + 'kindle-status?job=' + j.job)
+        .then((r) => r.json())
+        .then((st) => {
+          if (st.status === 'running') { setTimeout(poll, 2000); return; }
+          if (st.status === 'done') { setLabel('✓', label + ' sent to Kindle'); idle(5000); return; }
+          throw new Error(st.error || 'send failed');
+        })
+        .catch(fail);
+      poll();
+    })
+    .catch(fail);
+}
 // Cmd/Ctrl+B -> show/hide the doc-view sidebar
 function toggleSidebar() {
   if (state.open) document.body.classList.toggle('sidebar');
@@ -487,6 +593,13 @@ function buildSidebar(d) {
   side.appendChild(mk('‹', 'My files', 'esc', goFiles));
   if (d.meta.kind === 'book') side.appendChild(mk('▦', 'Adjust margins', '', openEditor));
   if (d.meta.kind === 'book') side.appendChild(mk('⤡', 'PDF viewer', '', () => openPdfViewer(d)));
+  if (d.meta.kind === 'book') {
+    const kb = mk('⇪', 'Send to Kindle', '', null);
+    kb.onclick = () => kindleModal(true, d, (ico, label) => {
+      kb.innerHTML = '<span class="ico">' + ico + '</span><span>' + esc(label) + '</span>';
+    });
+    side.appendChild(kb);
+  }
   const ai = mk('✦', 'AI ink', '', null, state.aiBlue);
   ai.onclick = () => { state.aiBlue = !state.aiBlue; ai.classList.toggle('active', state.aiBlue); redrawOpenPages(); };
   side.appendChild(ai);
@@ -516,6 +629,10 @@ async function openDoc(d) {
     pvb.textContent = '⤡  PDF viewer';
     pvb.onclick = () => openPdfViewer(d);
     bar.appendChild(pvb);
+    const kb = document.createElement('button'); kb.className = 'addbtn';
+    kb.textContent = '⇪  Send to Kindle';
+    kb.onclick = () => kindleModal(true, d, (ico, label) => { kb.textContent = ico + '  ' + label; });
+    bar.appendChild(kb);
     $view.appendChild(bar);
   }
   const wrap = document.createElement('div'); wrap.className = 'pages';
@@ -642,10 +759,11 @@ async function upload(files) {
 function toast(msg, ms) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms || 3000); }
 
 /* ---------- compose (agentic doc creation) ---------- */
-/* ✦ Compose: instructions/links -> POST /papier/api/compose -> a pi agent on
- * the VM researches + writes + typesets a PDF -> it enters the normal upload
- * path and appears in the library (then on the tablet). The job id lives in
- * localStorage so a reload keeps tracking the run. */
+/* ✦ Compose: instructions/links + selected formats -> POST
+ * /papier/api/compose -> a pi agent on the VM researches + writes + typesets
+ * PDF and/or EPUB. PDF enters the normal upload path and EPUB remains a
+ * browser download. The job id lives in localStorage so a reload keeps
+ * tracking the run. */
 const COMPOSE_KEY = 'papier-compose-job';
 let composeTimer = null;
 function composeModal(show) { $('cmp').classList.toggle('show', !!show); if (show) $('cmp-instr').focus(); }
@@ -655,17 +773,32 @@ function chipShow(text, spinning) {
   c.classList.add('show');
 }
 function chipHide() { $('cmpchip').classList.remove('show'); }
+function chipResult(j) {
+  const formats = Array.isArray(j.outputs) ? j.outputs.filter((f) => f === 'pdf' || f === 'epub') : [];
+  const c = $('cmpchip');
+  const links = formats.map((format) =>
+    '<a href="' + API + 'compose-download?job=' + encodeURIComponent(j.id) + '&amp;format=' + format + '">Download ' + format.toUpperCase() + '</a>'
+  ).join('');
+  c.innerHTML = '<div class="result"><span>“' + esc(j.title || 'Composed document') + '” is ready</span>' + links + '</div><button class="close" id="cmpchip-close" aria-label="Dismiss">×</button>';
+  c.classList.add('show');
+  $('cmpchip-close').onclick = chipHide;
+}
 async function submitCompose() {
   const instructions = $('cmp-instr').value.trim();
   const title = $('cmp-title').value.trim();
+  const formats = [];
+  if ($('cmp-pdf').checked) formats.push('pdf');
+  if ($('cmp-epub').checked) formats.push('epub');
   if (!instructions) { toast('Describe what to create (or paste links) first.'); return; }
+  if (!formats.length) { toast('Select PDF, EPUB, or both.'); return; }
   const btn = $('cmp-go'); btn.disabled = true; btn.textContent = 'Starting…';
   try {
-    const r = await fetch(API + 'compose', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instructions, title }) });
+    const r = await fetch(API + 'compose', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instructions, title, formats }) });
     const j = await r.json().catch(() => null);
     if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ('compose ' + r.status));
     localStorage.setItem(COMPOSE_KEY, j.job);
     composeModal(false); $('cmp-instr').value = ''; $('cmp-title').value = '';
+    $('cmp-pdf').checked = true; $('cmp-epub').checked = false;
     watchCompose(j.job);
   } catch (err) { toast('Compose failed to start: ' + err.message, 5000); }
   btn.disabled = false; btn.textContent = 'Create';
@@ -688,9 +821,14 @@ function watchCompose(job) {
     clearInterval(composeTimer); composeTimer = null;
     localStorage.removeItem(COMPOSE_KEY);
     if (j.status === 'done') {
-      chipHide();
-      toast('“' + (j.title || j.docId) + '” is ready — syncing to your tablet.', 8000);
-      state.sig = ''; refresh();
+      const outputs = Array.isArray(j.outputs) ? j.outputs : [];
+      if (outputs.includes('epub')) chipResult(j); else chipHide();
+      if (j.docId) {
+        toast('“' + (j.title || j.docId) + '” is ready — syncing to your tablet' + (outputs.includes('epub') ? ', with EPUB ready to download.' : '.'), 8000);
+        state.sig = ''; refresh();
+      } else {
+        toast('“' + (j.title || 'Your document') + '” is ready to download.', 8000);
+      }
     } else {
       chipShow('Compose failed: ' + (j.error || 'unknown error'), false);
       setTimeout(chipHide, 15000);
@@ -893,6 +1031,7 @@ window.addEventListener('resize', () => { if ($('med').classList.contains('show'
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if ($('pv').classList.contains('show')) closePdfViewer();       // PDF viewer overlay first
+    else if ($('kfmt').classList.contains('show')) kindleModal(false);
     else if ($('cmp').classList.contains('show')) composeModal(false);
     else if ($('med').classList.contains('show')) closeEditor();    // then the crop editor
     else if (state.open) goFiles();                                  // then: back to My files
@@ -921,6 +1060,9 @@ $('compose-btn').onclick = () => composeModal(true);
 $('cmp-cancel').onclick = () => composeModal(false);
 $('cmp-go').onclick = submitCompose;
 $('cmp').addEventListener('click', (e) => { if (e.target.id === 'cmp') composeModal(false); });
+$('kfmt-cancel').onclick = () => kindleModal(false);
+$('kfmt-send').onclick = confirmKindleSend;
+$('kfmt').addEventListener('click', (e) => { if (e.target.id === 'kfmt') kindleModal(false); });
 $('pv-close').onclick = closePdfViewer;
 $('file').onchange = (e) => upload(e.target.files);
 let dragN = 0;
