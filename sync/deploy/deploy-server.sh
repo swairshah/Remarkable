@@ -66,11 +66,13 @@ scp -q "$HERE"/server/bin/*.sh "$HERE"/server/bin/notebook-live-relay.js "$BUILD
 ssh "$HOST" 'chmod +x ~/bin/remarkable-post-sync.sh ~/bin/remarkable-post-sync-by-name.sh ~/bin/remarkable-activity-agent-hook.sh ~/bin/notebook-live-ingest.sh ~/bin/notes-md2pdf.sh ~/bin/notes-pdf-export.sh 2>/dev/null || true'
 
 echo "[deploy-server] scp Papier viewer + library/upload service"
+# mkbook.py is the renderer papier-render.sh drives; it lives with the tablet
+# app rather than under sync/server, but the VM needs the same copy.
 scp -q "$PAPIER_SERVER"/bin/papier-upload.js "$PAPIER_SERVER"/bin/papier-library.js \
   "$PAPIER_SERVER"/bin/papier-preview-page.py "$PAPIER_SERVER"/bin/papier-render.sh \
   "$PAPIER_SERVER"/bin/papier-compose.sh "$PAPIER_SERVER"/bin/papier-make-pdf.py \
   "$PAPIER_SERVER"/bin/papier-epub.sh "$PAPIER_SERVER"/bin/papier-kindle-cover.py \
-  "$PAPIER_SERVER"/bin/papier-kindle.sh "$HOST:bin/"
+  "$PAPIER_SERVER"/bin/papier-kindle.sh "$HERE/../papier"/tools/mkbook.py "$HOST:bin/"
 
 echo "[deploy-server] ensure papier python venv (pymupdf + numpy + reportlab for PDF output)"
 ssh "$HOST" '

@@ -71,6 +71,12 @@ def write_png_gray(path: str, img: np.ndarray) -> None:
 
 
 CROP_BORDER = 30  # device px of breathing room around a cropped page
+# A crop rect may reach OUTSIDE the page (negative / >1 fractions). The part
+# that overlaps the page is rendered; the rest becomes white paper, which is
+# how the editor's "add margin" works. One page-size of overhang each way is
+# plenty and keeps the scale-down bounded.
+CROP_LO, CROP_HI = -1.0, 2.0
+CROP_MIN_KEEP = 0.05   # the rect must still overlap this much of the page
 
 
 def build_book(pdf: str, out: str, title: str | None = None,
@@ -80,10 +86,13 @@ def build_book(pdf: str, out: str, title: str | None = None,
     """Render `pdf` into a bundle at `out`; returns the resolved title.
 
     Two placement modes:
-      `crop` = (cx0, cy0, cx1, cy1) fractions 0..1 of each source page to
-        KEEP; that region is scaled UP to fill the screen (with a small
-        border), so cropping a PDF's wasteful margins makes the text bigger.
-        This is what the web crop editor sends. Applied to every page.
+      `crop` = (cx0, cy0, cx1, cy1) page fractions of each source page to
+        KEEP; that region is scaled to fill the screen (with a small border),
+        so cropping a PDF's wasteful margins makes the text bigger. The rect
+        may extend PAST the page (fractions below 0 / above 1) — the overhang
+        renders as white paper, which is how the editor adds margin instead of
+        removing it. This is what the web crop editor sends; applied to every
+        page.
       `margins` = (left, top, right, bottom) white border in device px — the
         whole page is scaled to fit inside (the CLI default). Asymmetric
         margins shift the page like the stock app's page adjustment."""
@@ -93,9 +102,12 @@ def build_book(pdf: str, out: str, title: str | None = None,
         raise ValueError("empty PDF")
 
     if crop is not None:
-        cx0, cy0, cx1, cy1 = (min(max(float(v), 0.0), 1.0) for v in crop)
+        cx0, cy0, cx1, cy1 = (min(max(float(v), CROP_LO), CROP_HI) for v in crop)
         if cx1 - cx0 < 0.05 or cy1 - cy0 < 0.05:
             raise ValueError(f"crop region {crop} too small")
+        if (min(cx1, 1.0) - max(cx0, 0.0) < CROP_MIN_KEEP
+                or min(cy1, 1.0) - max(cy0, 0.0) < CROP_MIN_KEEP):
+            raise ValueError(f"crop region {crop} barely overlaps the page")
     else:
         ml, mt, mr, mb = ((margin, margin, margin, margin) if margins is None else
                           tuple(margin if v is None else v for v in margins))
@@ -115,28 +127,41 @@ def build_book(pdf: str, out: str, title: str | None = None,
         page = doc[i]
         rect = page.rect
         if crop is not None:
-            # keep the crop region; scale it up to fill the screen (minus border)
-            clip = fitz.Rect(rect.x0 + cx0 * rect.width, rect.y0 + cy0 * rect.height,
+            # `want` is the whole requested rect — possibly larger than the
+            # page. It is what gets scaled to fill the screen; only its
+            # intersection with the page has pixels to draw, so the overhang
+            # stays the canvas's white and reads as added margin.
+            want = fitz.Rect(rect.x0 + cx0 * rect.width, rect.y0 + cy0 * rect.height,
                              rect.x0 + cx1 * rect.width, rect.y0 + cy1 * rect.height)
-            k = min((W - 2 * CROP_BORDER) / clip.width, (H - 2 * CROP_BORDER) / clip.height)
+            clip = want & rect
+            k = min((W - 2 * CROP_BORDER) / want.width, (H - 2 * CROP_BORDER) / want.height)
             pix = page.get_pixmap(matrix=fitz.Matrix(k, k), colorspace=fitz.csGRAY, alpha=False, clip=clip)
-            orig_x, orig_y = clip.x0, clip.y0   # page-pt that maps to the pixmap's top-left
+            orig_x, orig_y = want.x0, want.y0   # page-pt that maps to the want box's top-left
+            vis_w, vis_h = want.width * k, want.height * k
+            ox = (W - round(vis_w)) // 2        # canvas px of the want box
+            oy = (H - round(vis_h)) // 2
+            img_x = ox + round((clip.x0 - want.x0) * k)   # ...and of the pixels within it
+            img_y = oy + round((clip.y0 - want.y0) * k)
             drop_outside = True
         else:
             k = min(box_w / rect.width, box_h / rect.height)
             pix = page.get_pixmap(matrix=fitz.Matrix(k, k), colorspace=fitz.csGRAY, alpha=False)
             orig_x, orig_y = 0.0, 0.0
-            drop_outside = False
-        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.stride)[:, :pix.width]
-        if crop is not None:
-            ox = (W - pix.width) // 2
-            oy = (H - pix.height) // 2
-        else:
             # center the residual slack WITHIN the margin box (asymmetric shift)
             ox = ml + (box_w - pix.width) // 2
             oy = mt + (box_h - pix.height) // 2
+            img_x, img_y = ox, oy
+            vis_w, vis_h = pix.width, pix.height
+            drop_outside = False
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.stride)[:, :pix.width]
         canvas = np.full((H, W), 255, dtype=np.uint8)
-        canvas[oy:oy + pix.height, ox:ox + pix.width] = img
+        # Blit clipped on every side: with an out-of-page crop the rounding
+        # above can land the sub-rect a pixel outside the canvas.
+        sx, sy = max(0, -img_x), max(0, -img_y)
+        dx, dy = max(0, img_x), max(0, img_y)
+        cw, ch = min(pix.width - sx, W - dx), min(pix.height - sy, H - dy)
+        if cw > 0 and ch > 0:
+            canvas[dy:dy + ch, dx:dx + cw] = img[sy:sy + ch, sx:sx + cw]
         if dither:
             canvas = dither_1bit(canvas)
 
@@ -148,7 +173,7 @@ def build_book(pdf: str, out: str, title: str | None = None,
         for (x0, y0, x1, y1, w, *_rest) in page.get_text("words"):
             nx0, ny0 = (x0 - orig_x) * k + ox, (y0 - orig_y) * k + oy
             nx1, ny1 = (x1 - orig_x) * k + ox, (y1 - orig_y) * k + oy
-            if drop_outside and (nx1 < ox or nx0 > ox + pix.width or ny1 < oy or ny0 > oy + pix.height):
+            if drop_outside and (nx1 < ox or nx0 > ox + vis_w or ny1 < oy or ny0 > oy + vis_h):
                 continue  # word cropped away
             words.append([int(nx0), int(ny0), int(nx1 + 0.5), int(ny1 + 0.5), w])
         text = page.get_text().strip()
@@ -187,6 +212,7 @@ def main() -> int:
     ap.add_argument("--margin-bottom", type=int)
     ap.add_argument("--dither", action="store_true",
                     help="force 1-bit pages (Bayer); default keeps grayscale")
+    # Values outside 0..1 are allowed and pad with white — see build_book.
     ap.add_argument("--crop", nargs=4, type=float, metavar=("CX0", "CY0", "CX1", "CY1"),
                     help="keep this fraction (0..1) of each page and scale it up to "
                          "fill the screen — crops a PDF's margins to enlarge text")

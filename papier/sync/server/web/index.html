@@ -166,10 +166,19 @@
   #med .mnav button:disabled { opacity:.35; cursor:default; }
   #med .mread { color:#cfcfca; font-size:12.5px; font-variant-numeric:tabular-nums; }
   #med .mhint { color:#8a8a86; font-size:12px; margin-left:14px; }
-  #med .mstage-wrap { display:grid; place-items:center; overflow:hidden; padding:16px; }
-  /* the stage is sized in JS to the SOURCE page's aspect (it shows the whole
-     page for a photo-style crop), so no fixed aspect-ratio here */
-  #med .mstage { position:relative; background:#fbfbf9; box-shadow:0 4px 30px rgba(0,0,0,.5); touch-action:none; }
+  #med .mzoom { display:flex; align-items:center; gap:6px; }
+  #med .mzoom button { width:28px; height:28px; border-radius:6px; border:1px solid rgba(255,255,255,.3); background:transparent; color:#e8e8e4; cursor:pointer; font-size:15px; line-height:1; }
+  #med .mzoom button.wide { width:auto; padding:0 10px; font-size:12px; }
+  #med .mzoom .mzpct { color:#cfcfca; font-size:12px; font-variant-numeric:tabular-nums; min-width:42px; text-align:center; }
+  /* a grid whose single child STRETCHES (the stage fills the row); the
+     loading/attach panel opts out with place-self:center */
+  #med .mstage-wrap { display:grid; overflow:hidden; padding:14px; box-sizing:border-box; min-height:0; }
+  /* The stage is a fixed VIEWPORT filling the middle row; the source page is
+     drawn inside it under a pan/zoom transform. Keeping the page smaller than
+     the stage leaves room to drag the crop box PAST the page edge, which is
+     how margin gets added rather than only trimmed. */
+  #med .mstage { position:relative; width:100%; height:100%; box-sizing:border-box;
+                 background:#232327; border-radius:5px; overflow:hidden; touch-action:none; }
   /* Everything (page preview, margin shade, box, handles) is drawn on ONE
      canvas with coordinate hit-testing — no DOM overlays — so dark-mode
      browser extensions (Dark Reader) can't invert the page or paint over the
@@ -841,18 +850,85 @@ function watchCompose(job) {
 }
 
 /* ---------- crop editor ---------- */
-/* Photo-crop UX: the stage shows the FULL source page; drag a box around the
- * content to KEEP; everything outside fades. That kept region is what fills
- * the reMarkable screen on render, so cropping a PDF's wasteful margins makes
- * the text BIGGER. The crop lives in page FRACTIONS (0..1) so it applies to
- * every page. Drawn on one canvas (Dark-Reader-proof). */
-const MIN_FRAC = 0.08;
+/* Photo-crop UX, and the zoom IS the margin control. A fixed frame in the
+ * middle of the stage is the sheet that gets rendered; the source page moves
+ * and scales behind it. Zoom in and the frame covers less of the page, so the
+ * text lands bigger on the tablet (margin removed). Zoom out until the page is
+ * smaller than the frame and the leftover frame is blank paper (margin ADDED).
+ * The handles reshape the sheet itself.
+ *
+ * So the stored crop — page FRACTIONS applied to every page, 0 = left/top edge
+ * and 1 = right/bottom — is derived from where the frame lands on the page
+ * rather than dragged directly; outside 0..1 means padding. Drawn on one
+ * canvas, so dark-mode browser extensions can't invert or overpaint it. */
+const MIN_FRAC = 0.08;                  // tightest crop (zoomed furthest in)
+const MAX_FRAC = 3;                     // loosest (mirrors the server's cap)
+const CROP_LO = -1, CROP_HI = 2;        // how far outside the page a sheet may reach
+const MIN_KEEP = 0.05;                  // the sheet must still cover this much page
 const HANDLES = [['nw',0,0],['n',.5,0],['ne',1,0],['e',1,.5],['se',1,1],['s',.5,1],['sw',0,1],['w',0,.5]];
-const CURSORS = { nw:'nwse-resize', se:'nwse-resize', ne:'nesw-resize', sw:'nesw-resize', n:'ns-resize', s:'ns-resize', e:'ew-resize', w:'ew-resize', move:'move' };
-const med = { id: null, pages: 0, page: 0, crop: null, orig: null, pageImg: null, sw: 0, sh: 0 };
+const CURSORS = { nw:'nwse-resize', se:'nwse-resize', ne:'nesw-resize', sw:'nesw-resize', n:'ns-resize', s:'ns-resize', e:'ew-resize', w:'ew-resize', pan:'grab' };
+// `frame` (the sheet) and `pg` (the page) are both stage px; `crop` is derived
+// from the two and is what the renderer is sent.
+const med = { id: null, pages: 0, page: 0, crop: null, orig: null, pageImg: null,
+              sw: 0, sh: 0, pageAR: 1 / Math.SQRT2, frame: null, pg: null, pending: null };
 
 const boxFromCrop = (c) => ({ x: c[0], y: c[1], w: c[2] - c[0], h: c[3] - c[1] });   // [x0,y0,x1,y1] -> box
-const cropArray = (b) => [b.x, b.y, b.x + b.w, b.y + b.h].map(v => Math.max(0, Math.min(1, v)));
+const round4 = (v) => Math.round(v * 1e4) / 1e4;   // keep the render CLI args tidy
+const cropArray = (b) => [b.x, b.y, b.x + b.w, b.y + b.h].map(round4);
+
+/* Legal sheet: big enough to render, small enough to stay sane, and still
+ * overlapping the page — a sheet floating entirely off it would be all margin
+ * and no content, which the renderer rejects. Mirrors cropSide() on the
+ * server, so anything the editor allows is something the renderer accepts. */
+function cropLegal(c) {
+  const side = (lo, len) => len >= MIN_FRAC && len <= MAX_FRAC
+    && lo >= CROP_LO && lo + len <= CROP_HI
+    && Math.min(lo + len, 1) - Math.max(lo, 0) >= MIN_KEEP;
+  return side(c.x, c.w) && side(c.y, c.h);
+}
+
+// the sheet's position on the page, in page fractions — this is the crop
+function cropFromView() {
+  const f = med.frame, p = med.pg;
+  return { x: (f.x - p.x) / p.w, y: (f.y - p.y) / p.h, w: f.w / p.w, h: f.h / p.h };
+}
+
+/* Place frame + page so the crop reads back as `c`. The frame takes the
+ * crop's shape and is centred with room to spare, then the page is scaled and
+ * offset to line up behind it. */
+function setCrop(c) {
+  const ar = (c.w / c.h) * med.pageAR;                 // sheet aspect on screen
+  const maxW = med.sw * 0.66, maxH = med.sh * 0.74;
+  let w = maxW, h = w / ar;
+  if (h > maxH) { h = maxH; w = h * ar; }
+  med.frame = { x: (med.sw - w) / 2, y: (med.sh - h) / 2, w, h };
+  const pw = w / c.w;
+  med.pg = { x: med.frame.x - c.x * pw, y: med.frame.y - c.y * (pw / med.pageAR),
+             w: pw, h: pw / med.pageAR };
+}
+
+// Move/scale the page behind the frame; refuse anything that would leave an
+// unrenderable crop, so the gesture stops at the limit instead of breaking.
+function applyView(next) {
+  const saved = med.pg;
+  med.pg = next;
+  if (!cropLegal(cropFromView())) { med.pg = saved; return false; }
+  layoutBox();
+  return true;
+}
+function zoomPage(fx, fy, factor) {
+  if (!med.pg) return;
+  const p = med.pg;
+  applyView({ x: fx - (fx - p.x) * factor, y: fy - (fy - p.y) * factor,
+              w: p.w * factor, h: p.h * factor });
+}
+function panPage(dx, dy) {
+  if (!med.pg) return;
+  applyView({ ...med.pg, x: med.pg.x + dx, y: med.pg.y + dy });
+}
+// zoom about the middle of the sheet, for the buttons and keyboard
+const frameMid = () => (med.frame ? [med.frame.x + med.frame.w / 2, med.frame.y + med.frame.h / 2] : [med.sw / 2, med.sh / 2]);
+const zoomStep = (factor) => zoomPage(...frameMid(), factor);
 
 async function openMarginEditor(d) {
   const el = $('med'); el.className = 'show';
@@ -866,7 +942,9 @@ async function openMarginEditor(d) {
   if (!st.hasSource) return renderAttach(d);
   med.id = d.id; med.doc = d; med.pages = st.pages || 1; med.page = 0; med.pageImg = null;
   med.orig = st.orig || [0, 0, 1, 1];
-  med.crop = boxFromCrop(st.crop || [0, 0, 1, 1]);
+  // lay the saved crop out once the stage is measured and the page aspect known
+  med.frame = null; med.pg = null;
+  med.pending = boxFromCrop(st.crop || [0, 0, 1, 1]);
   renderEditor(d);
 }
 
@@ -900,17 +978,27 @@ function renderEditor(d) {
       '<div class="mnav"><button id="med-prev">‹</button><span id="med-pg"></span><button id="med-next">›</button></div></div>' +
     '<div class="mstage-wrap"><div class="mstage" id="med-stage"><canvas class="medcanvas" id="med-canvas"></canvas></div></div>' +
     '<div class="mfoot"><span class="mread" id="med-read"></span>' +
-      '<span class="mhint">drag the box around what to keep — the faded part is cropped away</span>' +
+      '<span class="mhint">pinch or ⌘-scroll to zoom the page inside the sheet — in trims margin, ' +
+        'out adds it. drag to reposition, drag a handle to reshape the sheet</span>' +
       '<span class="mspacer"></span>' +
+      '<div class="mzoom">' +
+        '<button id="med-zout" title="Add margin (−)">−</button>' +
+        '<span class="mzpct" id="med-zpct">100%</span>' +
+        '<button id="med-zin" title="Trim margin (+)">+</button>' +
+        '<button class="wide" id="med-zfit" title="Back to the whole page (0)">Whole page</button>' +
+      '</div>' +
       '<button class="mbtn" id="med-reset">Reset to original</button>' +
       '<button class="mbtn" id="med-cancel">Cancel</button>' +
       '<button class="mbtn primary" id="med-save">Save &amp; push</button></div>';
   $('med-prev').onclick = () => gotoPage(med.page - 1);
   $('med-next').onclick = () => gotoPage(med.page + 1);
   $('med-cancel').onclick = closeEditor;
-  $('med-reset').onclick = () => { med.crop = boxFromCrop(med.orig); layoutBox(); };
+  $('med-reset').onclick = () => reframe(boxFromCrop(med.orig));
   $('med-save').onclick = saveCrop;
-  setupBoxDrag();
+  $('med-zin').onclick = () => zoomStep(1.08);
+  $('med-zout').onclick = () => zoomStep(1 / 1.08);
+  $('med-zfit').onclick = () => reframe({ x: 0, y: 0, w: 1, h: 1 });
+  setupStageInput();
   gotoPage(0);
 }
 
@@ -921,82 +1009,176 @@ function gotoPage(p) {
   $('med-next').disabled = med.page === med.pages - 1;
   const want = med.page;
   const im = new Image();
-  im.onload = () => { if (med.page === want) { med.pageImg = im; sizeStage(im.naturalWidth, im.naturalHeight); layoutBox(); } };
+  im.onload = () => {
+    if (med.page !== want) return;
+    med.pageImg = im;
+    const ar = im.naturalWidth / im.naturalHeight;
+    // only re-lay-out when the page shape actually changes (mixed-size PDFs);
+    // flipping between same-shaped pages must not disturb the crop
+    if (Math.abs(ar - med.pageAR) > 0.001) { med.pageAR = ar; med.pending = med.crop; med.frame = null; med.pg = null; }
+    layoutBox();
+  };
   im.src = API + 'preview?id=' + encodeURIComponent(med.id) + '&page=' + med.page;
   if (med.pageImg) layoutBox();   // keep the last page visible until the new one loads
   if (med.page + 1 < med.pages) { const nx = new Image(); nx.src = API + 'preview?id=' + encodeURIComponent(med.id) + '&page=' + (med.page + 1); }
 }
 
-// size the stage to the SOURCE page's aspect, as big as fits the viewport
-function sizeStage(iw, ih) {
-  const stage = $('med-stage'); if (!stage) return;
-  const A = iw / ih, maxH = window.innerHeight * 0.80, maxW = window.innerWidth - 56;
-  let h = maxH, w = h * A; if (w > maxW) { w = maxW; h = w / A; }
-  stage.style.width = Math.round(w) + 'px'; stage.style.height = Math.round(h) + 'px';
-}
-
-/* draw the full source page, fade everything outside the crop, then the box +
- * handles — all on one canvas so Dark Reader can't touch it. */
+/* Draw the sheet that will be rendered, lay the source page over it, fade
+ * everything the render drops, then the sheet outline + handles — all on one
+ * canvas so Dark Reader can't touch it. Where the sheet overhangs the page it
+ * stays blank: that is the margin being added. */
 function layoutBox() {
   const stage = $('med-stage'), cv = $('med-canvas'); if (!stage || !cv) return;
   const r = stage.getBoundingClientRect(), W = r.width, H = r.height;
   med.sw = W; med.sh = H;
+  if (!med.frame || !med.pg) setCrop(med.pending || { x: 0, y: 0, w: 1, h: 1 });
+  med.pending = null;
   const dpr = window.devicePixelRatio || 1;
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
   cv.style.width = W + 'px'; cv.style.height = H + 'px';
   const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = '#fbfbf9'; ctx.fillRect(0, 0, W, H);
-  if (med.pageImg) ctx.drawImage(med.pageImg, 0, 0, W, H);   // whole source page fills the stage
-  const b = med.crop, bx = b.x * W, by = b.y * H, bw = b.w * W, bh = b.h * H;
-  ctx.fillStyle = 'rgba(12,12,15,0.60)';   // fade what gets cropped away
-  ctx.fillRect(0, 0, W, by); ctx.fillRect(0, by + bh, W, H - (by + bh));
-  ctx.fillRect(0, by, bx, bh); ctx.fillRect(bx + bw, by, W - (bx + bw), bh);
-  ctx.strokeStyle = '#f0a020'; ctx.lineWidth = 1.5; ctx.strokeRect(bx, by, bw, bh);
-  for (const [, fx, fy] of HANDLES) {
-    ctx.beginPath(); ctx.arc(bx + fx * bw, by + fy * bh, 6, 0, 7);
+  ctx.fillStyle = '#232327'; ctx.fillRect(0, 0, W, H);          // backdrop around the page
+
+  const f = med.frame, p = med.pg;
+  ctx.fillStyle = '#fbfbf9'; ctx.fillRect(f.x, f.y, f.w, f.h);  // the sheet that gets rendered
+  if (med.pageImg) ctx.drawImage(med.pageImg, p.x, p.y, p.w, p.h);
+
+  ctx.fillStyle = 'rgba(12,12,15,0.62)';   // fade what falls outside the sheet
+  ctx.fillRect(0, 0, W, f.y); ctx.fillRect(0, f.y + f.h, W, H - (f.y + f.h));
+  ctx.fillRect(0, f.y, f.x, f.h); ctx.fillRect(f.x + f.w, f.y, W - (f.x + f.w), f.h);
+
+  ctx.save();                              // page edge: where added margin starts
+  ctx.setLineDash([5, 4]); ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 1;
+  ctx.strokeRect(p.x + .5, p.y + .5, p.w - 1, p.h - 1);
+  ctx.restore();
+
+  ctx.strokeStyle = '#f0a020'; ctx.lineWidth = 1.5; ctx.strokeRect(f.x, f.y, f.w, f.h);
+  for (const [, hx, hy] of HANDLES) {
+    ctx.beginPath(); ctx.arc(f.x + hx * f.w, f.y + hy * f.h, 6, 0, 7);
     ctx.fillStyle = '#f0a020'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
   }
-  $('med-read').textContent = 'keeping ' + Math.round(b.w * 100) + '% × ' + Math.round(b.h * 100) + '% of the page';
+
+  med.crop = cropFromView();
+  $('med-read').textContent = cropReadout(med.crop);
+  // 100% = the sheet is exactly the page; above it the text lands bigger,
+  // below it the render pads with blank paper
+  const zp = $('med-zpct'); if (zp) zp.textContent = Math.round(100 / med.crop.w) + '%';
+}
+
+/* "keeping 84% × 91% of the page · adding margin 0/6/0/6% (top/right/bottom/left)" */
+function cropReadout(b) {
+  const keepW = Math.min(b.x + b.w, 1) - Math.max(b.x, 0);
+  const keepH = Math.min(b.y + b.h, 1) - Math.max(b.y, 0);
+  const pads = [Math.max(0, -b.y), Math.max(0, b.x + b.w - 1), Math.max(0, b.y + b.h - 1), Math.max(0, -b.x)];
+  const keep = 'keeping ' + Math.round(keepW * 100) + '% × ' + Math.round(keepH * 100) + '% of the page';
+  if (Math.max(...pads) < 0.005) return keep;
+  return keep + ' · adding margin ' + pads.map(v => Math.round(v * 100)).join('/') + '% (top/right/bottom/left)';
 }
 
 const toStage = (e) => { const r = $('med-stage').getBoundingClientRect(); return { sx: e.clientX - r.left, sy: e.clientY - r.top }; };
-function hitTest(sx, sy) {   // in stage pixels
-  const b = med.crop, W = med.sw, H = med.sh, R = 22;
-  for (const [name, fx, fy] of HANDLES) {
-    if (Math.abs(sx - (b.x + fx * b.w) * W) <= R && Math.abs(sy - (b.y + fy * b.h) * H) <= R) return name;
+// only the handles are grabbable; dragging anywhere else moves the page
+function hitTest(sx, sy) {
+  if (!med.frame) return 'pan';
+  const f = med.frame, R = 22;
+  for (const [name, hx, hy] of HANDLES) {
+    if (Math.abs(sx - (f.x + hx * f.w)) <= R && Math.abs(sy - (f.y + hy * f.h)) <= R) return name;
   }
-  return (sx >= b.x * W && sx <= (b.x + b.w) * W && sy >= b.y * H && sy <= (b.y + b.h) * H) ? 'move' : null;
+  return 'pan';
 }
 
-function setupBoxDrag() {
-  const cv = $('med-canvas');
-  let mode = null, start = null, sp = null;
+/* Reshape the sheet by dragging one edge; the opposite edge stays put. The
+ * sheet is kept on-stage so its handles stay reachable, and any resize that
+ * would make the crop unrenderable is dropped. */
+function resizeFrame(mode, start, dx, dy) {
+  const f = { ...start };
+  const lim = 30;                                   // smallest sheet in stage px
+  if (mode.includes('w')) { const r = start.x + start.w; f.x = clamp(start.x + dx, 0, r - lim); f.w = r - f.x; }
+  if (mode.includes('e')) { f.w = clamp(start.w + dx, lim, med.sw - start.x); }
+  if (mode.includes('n')) { const b = start.y + start.h; f.y = clamp(start.y + dy, 0, b - lim); f.h = b - f.y; }
+  if (mode.includes('s')) { f.h = clamp(start.h + dy, lim, med.sh - start.y); }
+  const saved = med.frame;
+  med.frame = f;
+  if (!cropLegal(cropFromView())) { med.frame = saved; return; }
+  layoutBox();
+}
+
+function setupStageInput() {
+  const cv = $('med-canvas'), stage = $('med-stage');
+  let mode = null, startFrame = null, sp = null;
+  const pointers = new Map();       // live touches, for pinch
+  let gesture = null;               // { dist, cx, cy } while 2+ fingers are down
+
   const move = (e) => {
     const { sx, sy } = toStage(e);
-    const dx = (sx - sp.sx) / med.sw, dy = (sy - sp.sy) / med.sh;   // fraction deltas
-    let { x, y, w, h } = start;
-    if (mode === 'move') {
-      x = clamp(start.x + dx, 0, 1 - w); y = clamp(start.y + dy, 0, 1 - h);
-    } else {
-      if (mode.includes('w')) { const nx = clamp(start.x + dx, 0, start.x + start.w - MIN_FRAC); w = start.w + (start.x - nx); x = nx; }
-      if (mode.includes('e')) { w = clamp(start.w + dx, MIN_FRAC, 1 - start.x); }
-      if (mode.includes('n')) { const ny = clamp(start.y + dy, 0, start.y + start.h - MIN_FRAC); h = start.h + (start.y - ny); y = ny; }
-      if (mode.includes('s')) { h = clamp(start.h + dy, MIN_FRAC, 1 - start.y); }
-    }
-    med.crop = { x, y, w, h }; layoutBox();
+    if (mode === 'pan') { panPage(sx - sp.sx, sy - sp.sy); sp = { sx, sy }; return; }
+    resizeFrame(mode, startFrame, sx - sp.sx, sy - sp.sy);
   };
-  const end = () => { window.removeEventListener('pointermove', move); mode = null; };
+  const end = () => { window.removeEventListener('pointermove', move); mode = null; cv.style.cursor = 'default'; };
+
+  /* Pinch: any two-or-more-finger gesture scales the page about its centroid
+   * and drags with it, so a two- or three-finger pinch both work. Because the
+   * sheet stays put, pinching out adds margin. */
+  const gestureState = () => {
+    const pts = [...pointers.values()];
+    const cx = pts.reduce((a, p) => a + p.sx, 0) / pts.length;
+    const cy = pts.reduce((a, p) => a + p.sy, 0) / pts.length;
+    const dist = pts.reduce((a, p) => a + Math.hypot(p.sx - cx, p.sy - cy), 0) / pts.length;
+    return { cx, cy, dist };
+  };
+
   cv.addEventListener('pointerdown', (e) => {
-    const { sx, sy } = toStage(e); const m = hitTest(sx, sy);
-    if (!m) return;
-    e.preventDefault(); mode = m; start = { ...med.crop }; sp = { sx, sy };
+    const { sx, sy } = toStage(e);
+    if (e.pointerType === 'touch') {
+      pointers.set(e.pointerId, { sx, sy });
+      if (pointers.size >= 2) { end(); gesture = gestureState(); return; }   // fingers win over a drag
+    }
+    e.preventDefault(); mode = hitTest(sx, sy); startFrame = { ...med.frame }; sp = { sx, sy };
+    if (mode === 'pan') cv.style.cursor = 'grabbing';
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', end, { once: true });
+    window.addEventListener('pointercancel', end, { once: true });
   });
-  cv.addEventListener('pointermove', (e) => {   // hover cursor
+
+  cv.addEventListener('pointermove', (e) => {
+    const { sx, sy } = toStage(e);
+    if (e.pointerType === 'touch' && pointers.has(e.pointerId)) {
+      pointers.set(e.pointerId, { sx, sy });
+      if (gesture && pointers.size >= 2) {
+        const g = gestureState();
+        if (gesture.dist > 4 && g.dist > 4) zoomPage(g.cx, g.cy, g.dist / gesture.dist);
+        panPage(g.cx - gesture.cx, g.cy - gesture.cy);
+        gesture = g;
+        e.preventDefault(); return;
+      }
+    }
     if (mode) return;
-    const { sx, sy } = toStage(e); const m = hitTest(sx, sy);
-    cv.style.cursor = m ? CURSORS[m] : 'default';
+    cv.style.cursor = CURSORS[hitTest(sx, sy)];
+  });
+
+  const lift = (e) => {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) gesture = null;
+  };
+  cv.addEventListener('pointerup', lift);
+  cv.addEventListener('pointercancel', lift);
+
+  /* Trackpad pinch arrives as ctrl+wheel in Chrome/Firefox; a plain wheel
+   * (two-finger scroll) nudges the page instead of scrolling the modal. */
+  stage.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const { sx, sy } = toStage(e);
+    if (e.ctrlKey || e.metaKey) zoomPage(sx, sy, Math.exp(-e.deltaY * 0.01));
+    else panPage(-e.deltaX, -e.deltaY);
+  }, { passive: false });
+
+  // Safari reports trackpad pinch as gesture events rather than ctrl+wheel
+  let gscale = 1;
+  stage.addEventListener('gesturestart', (e) => { e.preventDefault(); gscale = e.scale || 1; });
+  stage.addEventListener('gesturechange', (e) => {
+    e.preventDefault();
+    const { sx, sy } = toStage(e);
+    if (gscale > 0 && e.scale > 0) zoomPage(sx, sy, e.scale / gscale);
+    gscale = e.scale;
   });
 }
 
@@ -1029,7 +1211,14 @@ async function saveCrop() {
 
 function closeEditor() { const el = $('med'); el.className = ''; el.innerHTML = ''; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-window.addEventListener('resize', () => { if ($('med').classList.contains('show') && med.pageImg && $('med-stage')) { sizeStage(med.pageImg.naturalWidth, med.pageImg.naturalHeight); layoutBox(); } });
+// lay the stage out again around a given crop, keeping that crop intact
+function reframe(crop) { med.pending = crop; med.frame = null; med.pg = null; layoutBox(); }
+// the stage follows the window; re-lay-out around the crop the user has now,
+// so a resize changes the framing but never the crop itself
+window.addEventListener('resize', () => {
+  if (!$('med').classList.contains('show') || !$('med-stage')) return;
+  reframe(med.crop || { x: 0, y: 0, w: 1, h: 1 });
+});
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if ($('pv').classList.contains('show')) closePdfViewer();       // PDF viewer overlay first
@@ -1041,6 +1230,13 @@ window.addEventListener('keydown', (e) => {
   }
   if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B')) {   // Cmd/Ctrl+B: toggle the sidebar
     if (state.open) { e.preventDefault(); toggleSidebar(); }
+    return;
+  }
+  // crop editor: +/- crop tighter or looser, 0 goes back to the whole page
+  if ($('med').classList.contains('show') && $('med-stage') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomStep(1.08); }
+    else if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomStep(1 / 1.08); }
+    else if (e.key === '0') { e.preventDefault(); reframe({ x: 0, y: 0, w: 1, h: 1 }); }
   }
 });
 

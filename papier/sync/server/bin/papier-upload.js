@@ -66,6 +66,12 @@ const piSessions = createPiSessions({ mirrorDocs: MIRROR, inboundDocs: DOCS });
 
 const MAX_BYTES = 200 * 1024 * 1024;
 const DEFAULT_CROP = [0, 0, 1, 1];   // whole page (fractions 0..1)
+// A crop rect may reach outside the page: mkbook renders the overlapping part
+// and pads the overhang with white, which is how the editor ADDS margin rather
+// than only removing it. Bounds mirror mkbook.py's CROP_LO/CROP_HI.
+const CROP_LO = -1, CROP_HI = 2;
+const CROP_MIN_SIDE = 0.05;   // smallest rect, and smallest page overlap, each way
+const CROP_MAX_SIDE = 3;      // keeps the scale-down (and so the blank border) bounded
 
 /* ---- helpers ---------------------------------------------------------- */
 function slugify(name) {
@@ -513,13 +519,24 @@ function handleAttach(req, res) {
 }
 
 /* ---- full-book crop rendering ---------------------------------------- */
+// one axis of a crop rect: big enough to be a page, and still touching the
+// page it came from (a rect entirely off the sheet would render blank)
+function cropSide(lo, hi) {
+  const side = hi - lo;
+  const overlap = Math.min(hi, 1) - Math.max(lo, 0);
+  return side >= CROP_MIN_SIDE && side <= CROP_MAX_SIDE && overlap >= CROP_MIN_SIDE;
+}
+
 function renderSpec(body) {
   const id = safeId(body && body.id);
   const crop = body && body.crop;
   if (!id) return { status: 400, error: 'bad id' };
-  if (!Array.isArray(crop) || crop.length !== 4 || !crop.every((v) => Number.isFinite(v) && v >= 0 && v <= 1)
-      || crop[2] - crop[0] < 0.05 || crop[3] - crop[1] < 0.05)
-    return { status: 400, error: 'crop must be 4 fractions 0..1 (min 5% each way)' };
+  if (!Array.isArray(crop) || crop.length !== 4
+      || !crop.every((v) => Number.isFinite(v) && v >= CROP_LO && v <= CROP_HI)
+      || !cropSide(crop[0], crop[2]) || !cropSide(crop[1], crop[3]))
+    return { status: 400, error: `crop must be 4 fractions ${CROP_LO}..${CROP_HI}, each side `
+      + `${CROP_MIN_SIDE * 100}%-${CROP_MAX_SIDE * 100}% wide and overlapping the page by `
+      + `at least ${CROP_MIN_SIDE * 100}%` };
   const src = sourcePdf(id);
   if (!fs.existsSync(src)) return { status: 404, error: 'no source PDF — attach one first' };
   const existing = readMeta(id) || {};
