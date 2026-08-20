@@ -151,7 +151,7 @@
   bar.id = 'rm-site-nav';
   var brand = document.createElement('a');
   brand.textContent = 'remarkable';
-  brand.href = '/notes/';
+  brand.href = '/papier/';
   brand.className = 'rm-brand';
   bar.appendChild(brand);
   bar.appendChild(makeLinks('rm-nav-link'));
