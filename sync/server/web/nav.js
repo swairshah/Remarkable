@@ -141,7 +141,21 @@
     'html[data-theme=light] .rm-nav-link:hover{color:rgb(24,25,28)}' +
     'html[data-theme=light] .rm-nav-link.current{color:rgb(217,119,6)}' +
     'html[data-theme=light] .rm-theme-toggle{border-color:rgba(20,24,32,.18);color:rgb(64,68,74)}' +
-    'html[data-theme=light] .rm-theme-toggle:hover{border-color:rgb(217,119,6);color:rgb(217,119,6)}';
+    'html[data-theme=light] .rm-theme-toggle:hover{border-color:rgb(217,119,6);color:rgb(217,119,6)}' +
+    // On phones the brand repeats the domain already shown by the browser.
+    // Removing it leaves room for every destination and the theme control,
+    // without making the entire page horizontally scrollable.
+    '@media(max-width:520px){' +
+      '#rm-site-nav{gap:6px;padding:4px 8px;font-size:12px;overflow:hidden}' +
+      '#rm-site-nav .rm-brand{display:none}' +
+      '.rm-nav-link{display:inline-flex;align-items:center;min-height:40px;padding:0 5px;white-space:nowrap}' +
+      '.rm-live-dot{margin-left:5px}' +
+      '.rm-theme-toggle{flex:0 0 40px;width:40px;height:40px;margin-left:auto}' +
+    '}' +
+    '@media(max-width:360px){' +
+      '#rm-site-nav{gap:2px;padding-left:4px;padding-right:4px}' +
+      '.rm-nav-link{padding-left:3px;padding-right:3px}' +
+    '}';
 
   var style = document.createElement('style');
   style.textContent = css;

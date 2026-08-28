@@ -87,6 +87,29 @@
     body.reading.sidebar .docside { display:flex; }       /* Cmd+B toggles the .sidebar class */
     body.reading.sidebar main { margin-left:230px; }
   }
+  @media (max-width:600px) {
+    html, body { max-width:100%; overflow-x:hidden; overflow-x:clip; }
+    header {
+      display:grid; grid-template-columns:auto minmax(0,1fr) minmax(0,1fr);
+      gap:8px 10px; padding:10px 12px;
+    }
+    header .brand { grid-column:1; grid-row:1; align-self:center; }
+    header #crumb {
+      grid-column:2 / 4; grid-row:1; min-width:0; overflow:hidden;
+      text-overflow:ellipsis; white-space:nowrap;
+    }
+    header .spacer { display:none; }
+    header .badge { grid-column:1; grid-row:2; align-self:center; white-space:nowrap; }
+    header #compose-btn { grid-column:2; grid-row:2; }
+    header #add { grid-column:3; grid-row:2; }
+    header .addbtn, .docbar .addbtn {
+      min-width:0; min-height:44px; padding:7px 8px; line-height:1.25;
+      white-space:normal;
+    }
+    main { padding:14px 12px 48px; }
+    .docbar { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+    .docbar .addbtn { height:100%; }
+  }
   .docside .sect { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.07em; margin:14px 6px 3px; }
   .docside .sbtn { display:flex; align-items:center; gap:10px; padding:9px 12px; border:1px solid var(--line); background:var(--card); color:var(--accent); border-radius:9px; cursor:pointer; font:inherit; font-size:13px; text-align:left; width:100%; }
   .docside .sbtn:hover { border-color:var(--muted); }
