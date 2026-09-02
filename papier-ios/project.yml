@@ -62,7 +62,7 @@ targets:
         DEVELOPMENT_TEAM: 8B9YURJS4G
         SWIFT_VERSION: "5.9"
         MARKETING_VERSION: "1.1.21"
-        CURRENT_PROJECT_VERSION: "33"
+        CURRENT_PROJECT_VERSION: "34"
         INFOPLIST_KEY_CFBundleDisplayName: Papier
         SUPPORTS_MACCATALYST: false
         ENABLE_PREVIEWS: true

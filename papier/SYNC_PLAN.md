@@ -162,3 +162,29 @@ overwrites an open doc.
   one is de-collided with an id suffix (never overwrites).
 - The whole outbound half is proven (notebook runs it today); the net-new
   surface is the inbound leg + the app rescan.
+
+Third revision (2026-09-02), **⇗ Publish to swair.dev** (notebooks):
+
+- The notebook is the draft, the post on the site is the typed artifact,
+  and a pi agent is the transcriber-editor. A "Publish to swair.dev" button
+  in the notebook's sidebar/docbar posts `POST /papier/api/publish {id}`;
+  `papier-publish.sh` runs as a compose-style job (status polling, trace,
+  `result.json`).
+- **Diff, not the whole notebook.** `papier-publish-render.py` compares
+  each page's ink JSON with the snapshot saved at the last publish
+  (strokes matched by content, since the iPad heals ids) and renders only
+  the changed pages: grey = already published, black = new, red = erased,
+  blue = pi's ink. Those images plus the current `post.md` go to one
+  headless `pi -p` run whose only job is to merge the new ink into the
+  post in place. A shrink guard refuses a rewrite that halves the post
+  without any erased ink.
+- **Every publish is a commit.** `~/remarkable-backup/papier-publish/site/`
+  is a git repo: `posts/<id>/post.md`, `meta.json`, `snapshot/` (ink at
+  last publish) and `pages/NN.png` (clean renders shown under the post as
+  "Handwritten pages"). A bad transcription is one `git revert` + republish.
+- **One hop out.** `papier-publish-site.py` rebuilds the static
+  `/notebook/` tree (the hand-written site's own `styles.css`/`theme.js`
+  plus a generated `notebook.css`; pandoc + MathML, no scripts, so the
+  site's CSP holds) and rsyncs it to `swair@swair.dev:/` through a key
+  jailed with `rrsync /home/public/notebook`. "Unpublish" removes the post
+  directory and pushes again. Nothing runs on the Mac or the tablet.
