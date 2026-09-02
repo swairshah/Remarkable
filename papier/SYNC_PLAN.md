@@ -168,9 +168,11 @@ Third revision (2026-09-02), **⇗ Publish to swair.dev** (`Writings` only):
 - The single notebook with stable id `writings` and title **Writings** is the
   draft; one continuously updated post on the site is the typed artifact; and
   a pi agent is the transcriber-editor. Other notebooks cannot be published.
-  A "Publish to swair.dev" button appears only in Writings and posts
-  `POST /papier/api/publish {id}`; `papier-publish.sh` runs as a compose-style
-  job (status polling, trace, `result.json`).
+  The server watches only this bundle and automatically publishes after two
+  minutes without a synced change, so a writing burst is not published
+  mid-sentence. The "Publish to swair.dev" button remains in Writings as a
+  manual fallback. Both paths run `papier-publish.sh` as a compose-style job
+  (status polling, trace, `result.json`).
 - **Diff, not the whole notebook.** `papier-publish-render.py` compares
   each page's ink JSON with the snapshot saved at the last publish
   (strokes matched by content, since the iPad heals ids) and renders only
