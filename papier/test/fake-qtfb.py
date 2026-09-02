@@ -10,9 +10,10 @@ The container has no Wacom device, so the app falls back to AppLoad pen
 events — which is exactly what we script here.
 
 PAPIER_SCENARIO picks the scripted session (one per milestone):
-  m0    white canvas: scribble, top-edge swipe -> CLOSE, tap CLOSE -> exit
+  m0    white canvas: scribble, top-edge swipe -> EXIT, tap EXIT -> exit
   m1    doc model: book open/ink/flip/persist, notebook quick-sheets grow,
-        ink persistence across an app restart (three app sessions)
+        ink persistence across an app restart (three app sessions), and
+        CLOSE returning from a document to the Papier library
 """
 import json
 import math
@@ -51,7 +52,7 @@ class PaperHarness(Harness):
 
 
 def scenario_m0(h, out_png):
-    """Smoke test: empty home renders, top bar reveals, CLOSE exits clean."""
+    """Smoke test: empty home renders, top bar reveals, EXIT exits clean."""
     subprocess.run(["rm", "-rf", DATA_DIR], check=False)
     s = h.launch(PAPIER_FAKE_SYS="1")
     time.sleep(1.5)  # first paint
@@ -59,10 +60,10 @@ def scenario_m0(h, out_png):
 
     s.swipe_down_from_top()
     s.drain(1.0)
-    write_png(out_png)  # top bar with CLOSE visible
+    write_png(out_png)  # top bar with EXIT visible
 
     s.tap(CLOSE_TAP_X, CLOSE_TAP_Y)
-    s.expect_exit("CLOSE tap")
+    s.expect_exit("EXIT tap")
 
 
 def scenario_m1(h, out_png):
@@ -99,7 +100,15 @@ def scenario_m1(h, out_png):
     s.swipe_down_from_top()
     s.drain(0.8)
     s.tap(CLOSE_TAP_X, CLOSE_TAP_Y)
-    s.expect_exit("CLOSE tap")
+    s.drain(1.5)
+    assert s.app.poll() is None, "CLOSE inside a document must keep Papier running"
+    shot("book-close-home")  # CLOSE leaves the document; Papier stays running
+
+    # EXIT from the library still exits the app.
+    s.swipe_down_from_top()
+    s.drain(0.8)
+    s.tap(CLOSE_TAP_X, CLOSE_TAP_Y)
+    s.expect_exit("EXIT tap from library")
 
     # -- session B: the notebook (quick-sheets growth) -----------------------
     s = h.launch(PAPIER_OPEN="nb-test")
@@ -125,7 +134,19 @@ def scenario_m1(h, out_png):
     s = h.launch()
     time.sleep(1.8)
     shot("nb-resume")  # last_doc=nb-test, page 1 ink straight from disk
-    s.terminate_clean()
+
+    # Closing a notebook returns to the library instead of restarting xochitl.
+    s.swipe_down_from_top()
+    s.drain(0.8)
+    s.tap(CLOSE_TAP_X, CLOSE_TAP_Y)
+    s.drain(1.5)
+    assert s.app.poll() is None, "closing a notebook must keep Papier running"
+    shot("nb-close-home")
+
+    s.swipe_down_from_top()
+    s.drain(0.8)
+    s.tap(CLOSE_TAP_X, CLOSE_TAP_Y)
+    s.expect_exit("EXIT tap from library")
 
     st = json.load(open(f"{DATA_DIR}/docs/nb-test/state.json"))
     assert len(st["seq"]) == 2, f"notebook should have exactly 2 pages, has {st['seq']}"

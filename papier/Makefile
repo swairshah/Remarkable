@@ -142,7 +142,7 @@ deploy: build vendor/rm2fb_server
 	fi
 	@echo
 	@echo 'Deployed. On the tablet: open the AppLoad menu -> tap "Papier".'
-	@echo 'It stops xochitl and takes the panel over; top-edge swipe -> CLOSE.'
+	@echo 'It stops xochitl and takes the panel over; from the library, top-edge swipe -> EXIT.'
 
 vendor/rm2fb_server:
 	@echo 'vendor/rm2fb_server missing — run: make fetch-server' && exit 1

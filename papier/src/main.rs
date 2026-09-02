@@ -140,7 +140,7 @@ const TB_FEATURES: [Feature; 13] = [
 const TB_EDGE: i32 = TB_CX - toolbar::STRIP_W / 2;
 const DOT_RECT: Rect = Rect { x0: TB_EDGE - 40, y0: 8, x1: TB_EDGE - 14, y1: 34 };
 
-/* the top-edge swipe reveals the top bar (CLOSE / MY FILES / status) */
+/* the top-edge swipe reveals the top bar (CLOSE or EXIT / MY FILES / status) */
 const EDGE_Y: i32 = 16;
 const SWIPE_DIST: i32 = 90;
 const BAR_H: i32 = 90;
@@ -1710,9 +1710,9 @@ impl App {
     fn paint_top_bar(&mut self) {
         self.fb.fill_rect(0, 0, FB_W, BAR_H, WHITE);
         self.fb.fill_rect(0, BAR_H - 2, FB_W, 2, BLACK);
-        /* CLOSE — small, top-right */
+        /* CLOSE the document, or EXIT when already in the library */
         self.fb.fill_rect(CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H, BLACK);
-        let label = "CLOSE";
+        let label = if matches!(self.screen, Screen::Doc(_)) { "CLOSE" } else { "EXIT" };
         self.fb.text(
             CLOSE_X0 + (CLOSE_BTN_W - text_width(label, 3)) / 2,
             CLOSE_Y0 + (CLOSE_BTN_H - 21) / 2,
@@ -1770,8 +1770,14 @@ impl App {
 
     fn top_bar_press(&mut self, x: i32, y: i32) {
         if in_rect(x, y, CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H) {
-            println!("papier: close button");
-            RUNNING.store(false, Ordering::Relaxed);
+            if matches!(self.screen, Screen::Doc(_)) {
+                println!("papier: close document");
+                self.bar_until = None;
+                self.go_home(None);
+            } else {
+                println!("papier: close app");
+                RUNNING.store(false, Ordering::Relaxed);
+            }
             return;
         }
         if matches!(self.screen, Screen::Doc(_))
@@ -3428,7 +3434,7 @@ fn main() -> std::process::ExitCode {
         if pfds[2].revents & libc::POLLIN != 0 {
             if let Some(t) = touchdev.as_mut() {
                 /* no 5-finger quit (a writing palm reads as 5+ contacts) —
-                 * the top-edge swipe -> CLOSE is the exit */
+                 * from the library, top-edge swipe -> EXIT quits */
                 let (evs, _quit) = t.drain();
                 if !evs.is_empty() {
                     last_activity = Instant::now();
