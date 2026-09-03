@@ -185,7 +185,9 @@ Third revision (2026-09-02), **⇗ Publish to swair.dev** (`Writings` only):
   Nonessential margin annotations can become responsive side notes: outer-margin
   notes on wide screens and inline notes on narrow screens. Inline and display
   LaTeX render as MathML, while fenced code gets language-aware highlighting in
-  Google Sans Code. Raw handwritten pages are not appended automatically.
+  Google Sans Code. Handwritten `[do: ...]` directives are replaced in place by
+  pi-generated prose, code, equations, SVGs, or cropped art. Raw handwritten
+  pages are not appended automatically.
 - **Every publish is a commit.** `~/remarkable-backup/papier-publish/site/`
   stores `posts/<slug>/post.md`, selected `assets/`, metadata, and the source
   snapshot in git, so a bad editorial decision is reversible.
