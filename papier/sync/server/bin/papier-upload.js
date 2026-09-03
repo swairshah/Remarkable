@@ -22,7 +22,8 @@
 //                           a typeset markdown article, and renders PDF and/or
 //                           EPUB. PDF enters the normal upload path (book
 //                           bundle -> inbound -> tablet); EPUB is downloadable.
-//   GET  /compose-status?job=  phase/progress of a compose job.
+//   GET  /compose-status?job=&trace=1  phase/progress and optional live trace
+//                           of a compose job.
 //   GET  /compose-download?job=&format=  download a completed PDF or EPUB.
 //   POST /kindle   {id,format?}  email the doc to the configured Kindle
 //                           address via papier-kindle.sh (EPUB from a
@@ -759,10 +760,32 @@ setInterval(warmDerivedPdfs, 6 * 3600000);
 // Result is also persisted to <job>/result.json so status survives restarts.
 const composeJobs = new Map();
 const COMPOSE_TIMEOUT = 40 * 60000;
+const COMPOSE_TRACE_BYTES = 16 * 1024;
 
 function composeDir(id) { return path.join(COMPOSE, id); }
 function readComposePhase(id) {
   try { return fs.readFileSync(path.join(composeDir(id), 'status.txt'), 'utf8').trim().slice(0, 200); } catch (_) { return null; }
+}
+function readComposeTrace(id) { return readTraceFile(path.join(composeDir(id), 'trace.log')); }
+function readTraceFile(file) {
+  let fd;
+  try {
+    const size = fs.statSync(file).size;
+    const length = Math.min(size, COMPOSE_TRACE_BYTES);
+    const buf = Buffer.alloc(length);
+    fd = fs.openSync(file, 'r');
+    fs.readSync(fd, buf, 0, length, size - length);
+    return buf.toString('utf8')
+      .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+      .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+      .replace(/\r(?!\n)/g, '\n')
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+      .split('\n').slice(-120).join('\n').trim();
+  } catch (_) {
+    return '';
+  } finally {
+    if (fd != null) try { fs.closeSync(fd); } catch (_) {}
+  }
 }
 function persistComposeResult(id, job) {
   try { fs.writeFileSync(path.join(composeDir(id), 'result.json'), JSON.stringify(job)); } catch (_) {}
@@ -834,6 +857,7 @@ function handleCompose(req, res) {
       (title ? `Preferred title: ${title}\n\n` : '') + instructions + '\n');
     fs.writeFileSync(path.join(dir, 'formats.txt'), formats.join('\n') + '\n');
     fs.writeFileSync(path.join(dir, 'status.txt'), 'starting');
+    fs.writeFileSync(path.join(dir, 'trace.log'), '[compose] starting\n');
 
     const job = { id, ok: true, status: 'running', phase: 'starting', title, formats, updated: Date.now() };
     composeJobs.set(id, job);
@@ -849,8 +873,13 @@ function handleCompose(req, res) {
     }
     const child = spawn(script, [dir], { stdio: ['ignore', 'pipe', 'pipe'] });
     let tail = '';
-    child.stdout.resume();
-    child.stderr.on('data', (c) => { tail = (tail + c.toString()).slice(-8000); });
+    const recordTrace = (chunk) => {
+      const text = chunk.toString();
+      tail = (tail + text).slice(-8000);
+      try { fs.appendFileSync(path.join(dir, 'trace.log'), text); } catch (_) {}
+    };
+    child.stdout.on('data', recordTrace);
+    child.stderr.on('data', recordTrace);
     const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, COMPOSE_TIMEOUT);
     child.on('error', (err) => {
       clearTimeout(timer);
@@ -871,7 +900,7 @@ function handleCompose(req, res) {
   });
 }
 
-function handleComposeStatus(res, id) {
+function handleComposeStatus(res, id, includeTrace) {
   if (!/^[a-f0-9]{16}$/.test(id || '')) return json(res, 400, { ok: false, error: 'bad job id' });
   let job = composeJobs.get(id);
   if (!job) {   // service restarted mid-job or long after: fall back to disk
@@ -882,7 +911,12 @@ function handleComposeStatus(res, id) {
     }
   }
   const phase = job.status === 'running' ? (readComposePhase(id) || job.phase) : job.phase;
-  json(res, 200, { ...job, phase });
+  const detail = { ...job, phase };
+  if (includeTrace) {
+    res.setHeader('Cache-Control', 'private, no-store');
+    detail.trace = readComposeTrace(id);
+  }
+  json(res, 200, detail);
 }
 
 function handleComposeDownload(req, res, id, format) {
@@ -974,7 +1008,9 @@ http.createServer((req, res) => {
   if (req.method === 'GET' && p === '/preview') return handlePreview(res, u.searchParams.get('id'), parseInt(u.searchParams.get('page'), 10));
   if ((req.method === 'GET' || req.method === 'HEAD') && p === '/source-pdf') return handleSourcePdf(req, res, u.searchParams.get('id'), u.searchParams.get('v'));
   if (req.method === 'POST' && p === '/compose') return handleCompose(req, res);
-  if (req.method === 'GET' && p === '/compose-status') return handleComposeStatus(res, u.searchParams.get('job'));
+  if (req.method === 'GET' && p === '/compose-status') {
+    return handleComposeStatus(res, u.searchParams.get('job'), u.searchParams.get('trace') === '1');
+  }
   if ((req.method === 'GET' || req.method === 'HEAD') && p === '/compose-download') return handleComposeDownload(req, res, u.searchParams.get('job'), u.searchParams.get('format'));
   if (req.method === 'POST' && p === '/kindle') return handleKindle(req, res);
   if (req.method === 'GET' && p === '/kindle-status') return handleKindleStatus(res, u.searchParams.get('job'));

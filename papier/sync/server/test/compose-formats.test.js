@@ -115,6 +115,7 @@ test('compose API validates formats, publishes EPUB downloads, and only syncs se
 const fs = require('fs'), path = require('path');
 const job = process.argv[2];
 const formats = fs.readFileSync(path.join(job, 'formats.txt'), 'utf8').trim().split(/\\s+/);
+console.error('\\u001b[36m[compose] researching sources\\u001b[0m');
 fs.writeFileSync(path.join(job, 'title.txt'), 'Format Test');
 for (const format of formats) fs.writeFileSync(path.join(job, 'out', 'article.' + format), format === 'pdf' ? '%PDF-test' : 'PK-epub-test');
 fs.writeFileSync(path.join(job, 'status.txt'), 'done writing');
@@ -161,6 +162,7 @@ fs.writeFileSync(path.join(out, 'meta.json'), JSON.stringify({ title, kind: 'boo
   assert.equal(epubSubmission.response.status, 202);
   const epubStatus = await waitForJob(port, epubSubmission.json.job);
   assert.equal(epubStatus.status, 'done', serviceErr);
+  assert.equal(epubStatus.trace, undefined);
   assert.deepEqual(epubStatus.formats, ['epub']);
   assert.deepEqual(epubStatus.outputs, ['epub']);
   assert.equal(epubStatus.docId, undefined);
@@ -171,6 +173,13 @@ fs.writeFileSync(path.join(out, 'meta.json'), JSON.stringify({ title, kind: 'boo
   assert.equal(download.headers.get('content-type'), 'application/epub+zip');
   assert.match(download.headers.get('content-disposition'), /Format Test\.epub/);
   assert.equal(await download.text(), 'PK-epub-test');
+
+  const tracedResponse = await fetch(`http://127.0.0.1:${port}/compose-status?job=${epubSubmission.json.job}&trace=1`);
+  const traced = await tracedResponse.json();
+  assert.equal(tracedResponse.headers.get('cache-control'), 'private, no-store');
+  assert.match(traced.trace, /\[compose\] starting/);
+  assert.match(traced.trace, /\[compose\] researching sources/);
+  assert.doesNotMatch(traced.trace, /\u001b/);
 
   const defaultSubmission = await submit({ instructions: 'Default output' });
   assert.equal(defaultSubmission.response.status, 202);

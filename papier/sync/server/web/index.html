@@ -140,13 +140,27 @@
   #cmp .format-option:has(input:checked) { border-color: var(--accent); }
   #cmp .format-option input { accent-color: var(--accent); }
   #cmp .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
-  #cmpchip { position: fixed; right: 18px; bottom: 18px; z-index: 25; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,.18); display: none; align-items: center; gap: 9px; max-width: 340px; }
+  #cmpchip { position: fixed; right: 18px; bottom: 18px; z-index: 25; width: min(430px, calc(100vw - 36px)); background: var(--card); border-radius: 10px; padding: 10px 12px; font-size: 13px; box-shadow: 0 0 0 1px rgba(0,0,0,.06), 0 6px 24px rgba(0,0,0,.18); display: none; flex-direction: column; align-items: stretch; }
   #cmpchip.show { display: flex; }
+  #cmpchip .summary { display: flex; align-items: center; gap: 9px; min-height: 24px; }
   #cmpchip .spin { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: cspin 1s linear infinite; flex: none; }
+  #cmpchip .label { flex: 1; min-width: 0; line-height: 1.35; overflow-wrap: anywhere; }
+  #cmpchip .trace-toggle { min-width: 44px; min-height: 40px; margin: -8px -6px -8px 0; padding: 0 7px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; font: 600 11px/1 -apple-system, "Segoe UI", sans-serif; letter-spacing: .01em; transition: color 150ms ease, background-color 150ms ease, scale 150ms ease; }
+  #cmpchip .trace-toggle:hover, #cmpchip .trace-toggle[aria-expanded=true] { color: var(--accent); background: var(--bg); }
+  #cmpchip .trace-toggle:active { scale: .96; }
+  #cmptrace { max-height: 0; opacity: 0; overflow: hidden; transition: max-height 180ms cubic-bezier(.2,0,0,1), opacity 120ms ease; }
+  #cmptrace.open { max-height: 220px; opacity: 1; }
+  #cmptrace .trace-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 2px 5px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+  #cmptrace .trace-job { font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; opacity: .72; }
+  #cmptrace pre { margin: 0; max-height: 180px; overflow: auto; padding: 9px 10px; border-radius: 6px; background: var(--bg); color: var(--muted); box-shadow: inset 0 0 0 1px rgba(127,127,120,.13); font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; overscroll-behavior: contain; }
   #cmpchip .result { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
   #cmpchip a { color: var(--accent); font-weight: 600; }
   #cmpchip .close { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 16px; padding: 0 0 0 3px; }
   @keyframes cspin { to { transform: rotate(360deg); } }
+  @media (prefers-color-scheme:dark) { :root:not([data-theme]) #cmpchip { box-shadow:0 0 0 1px rgba(255,255,255,.08), 0 6px 24px rgba(0,0,0,.28); } }
+  html[data-theme=dark] #cmpchip { box-shadow:0 0 0 1px rgba(255,255,255,.08), 0 6px 24px rgba(0,0,0,.28); }
+  @media (max-width:520px) { #cmpchip { right:12px; bottom:12px; width:calc(100vw - 24px); } #cmptrace pre { max-height:32vh; } }
+  @media (prefers-reduced-motion:reduce) { #cmptrace, #cmpchip .trace-toggle { transition:none; } }
 
   /* ---- Send to Kindle format picker ---- */
   #kfmt { position:fixed; inset:0; z-index:44; display:grid; place-items:center; padding:20px; background:rgba(15,15,17,.62); opacity:0; visibility:hidden; pointer-events:none; transition:opacity 160ms ease, visibility 160ms step-end; }
@@ -800,13 +814,58 @@ function toast(msg, ms) { const t = $('toast'); t.textContent = msg; t.classList
  * tracking the run. */
 const COMPOSE_KEY = 'papier-compose-job';
 let composeTimer = null;
+let composeTraceOpen = false;
+let composeTraceJob = null;
+let composeTraceText = '';
 function composeModal(show) { $('cmp').classList.toggle('show', !!show); if (show) $('cmp-instr').focus(); }
-function chipShow(text, spinning) {
-  const c = $('cmpchip');
-  c.innerHTML = (spinning ? '<span class="spin"></span>' : '') + '<span>' + esc(text) + '</span>';
-  c.classList.add('show');
+function applyComposeTraceState() {
+  const panel = $('cmptrace');
+  const toggle = $('cmptrace-toggle');
+  if (!panel || !toggle) return;
+  panel.classList.toggle('open', composeTraceOpen);
+  panel.setAttribute('aria-hidden', String(!composeTraceOpen));
+  toggle.setAttribute('aria-expanded', String(composeTraceOpen));
+  if (composeTraceOpen) requestAnimationFrame(() => { const pre = $('cmptrace-log'); if (pre) pre.scrollTop = pre.scrollHeight; });
 }
-function chipHide() { $('cmpchip').classList.remove('show'); }
+async function refreshComposeTrace(job) {
+  try {
+    const r = await fetch(API + 'compose-status?job=' + encodeURIComponent(job) + '&trace=1', { cache: 'no-store' });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || composeTraceJob !== job) return;
+    composeTraceText = j.trace || '';
+    const pre = $('cmptrace-log');
+    if (pre) {
+      pre.textContent = composeTraceText || 'Waiting for trace output…';
+      requestAnimationFrame(() => { pre.scrollTop = pre.scrollHeight; });
+    }
+  } catch (_) {}
+}
+function chipProgress(text, spinning, job) {
+  const c = $('cmpchip');
+  if (composeTraceJob !== job) {
+    composeTraceJob = job;
+    composeTraceText = '';
+    composeTraceOpen = false;
+  }
+  c.innerHTML = '<div class="summary">' + (spinning ? '<span class="spin" aria-hidden="true"></span>' : '') +
+    '<span class="label" aria-live="polite">' + esc(text) + '</span>' +
+    '<button type="button" class="trace-toggle" id="cmptrace-toggle" aria-controls="cmptrace">Trace</button></div>' +
+    '<div id="cmptrace"><div class="trace-head"><span>Live trace</span><span class="trace-job">' + esc(job.slice(0, 8)) + '</span></div>' +
+    '<pre id="cmptrace-log">' + esc(composeTraceText || 'Waiting for trace output…') + '</pre></div>';
+  c.classList.add('show');
+  $('cmptrace-toggle').onclick = () => {
+    composeTraceOpen = !composeTraceOpen;
+    applyComposeTraceState();
+    if (composeTraceOpen) refreshComposeTrace(job);
+  };
+  applyComposeTraceState();
+}
+function chipHide() {
+  $('cmpchip').classList.remove('show');
+  composeTraceOpen = false;
+  composeTraceJob = null;
+  composeTraceText = '';
+}
 function chipResult(j) {
   const formats = Array.isArray(j.outputs) ? j.outputs.filter((f) => f === 'pdf' || f === 'epub') : [];
   const c = $('cmpchip');
@@ -839,17 +898,19 @@ async function submitCompose() {
 }
 function watchCompose(job) {
   clearInterval(composeTimer);
-  chipShow('Composing…', true);
+  chipProgress('Composing…', true, job);
   const poll = async () => {
     let j = null;
     try {
-      const r = await fetch(API + 'compose-status?job=' + encodeURIComponent(job), { cache: 'no-store' });
+      const trace = composeTraceOpen ? '&trace=1' : '';
+      const r = await fetch(API + 'compose-status?job=' + encodeURIComponent(job) + trace, { cache: 'no-store' });
       j = await r.json().catch(() => null);
       if (r.status === 404) { clearInterval(composeTimer); composeTimer = null; localStorage.removeItem(COMPOSE_KEY); chipHide(); return; }
     } catch (_) { return; }   // transient network error: keep polling
     if (!j) return;
     if (j.status === 'running' || j.status === 'rendering') {
-      chipShow((j.title ? j.title + ' — ' : '') + (j.phase || 'working…'), true);
+      if (typeof j.trace === 'string') composeTraceText = j.trace;
+      chipProgress((j.title ? j.title + ' — ' : '') + (j.phase || 'working…'), true, job);
       return;
     }
     clearInterval(composeTimer); composeTimer = null;
@@ -864,8 +925,9 @@ function watchCompose(job) {
         toast('“' + (j.title || 'Your document') + '” is ready to download.', 8000);
       }
     } else {
-      chipShow('Compose failed: ' + (j.error || 'unknown error'), false);
-      setTimeout(chipHide, 15000);
+      if (typeof j.trace === 'string') composeTraceText = j.trace;
+      chipProgress('Compose failed: ' + (j.error || 'unknown error'), false, job);
+      setTimeout(() => { if (!composeTraceOpen) chipHide(); }, 15000);
     }
   };
   poll();

@@ -153,10 +153,11 @@ cd "$WORK"
 
 # Headless pi run; stdout's last line is the title (best effort).
 set +e
-AGENT_OUT="$("$PI_BIN" -p --no-session "@$JOB/prompt.md" 2>"$JOB/agent.stderr.log")"
-AGENT_RC=$?
+"$PI_BIN" -p --no-session "@$JOB/prompt.md" 2>&1 >"$JOB/agent.stdout.log" \
+  | tee -a "$JOB/agent.stderr.log" >&2
+AGENT_RC=${PIPESTATUS[0]}
 set -e
-printf '%s\n' "$AGENT_OUT" > "$JOB/agent.stdout.log"
+AGENT_OUT="$(cat "$JOB/agent.stdout.log")"
 
 if [ ! -s "$WORK/article.md" ]; then
   status "failed: agent produced no article.md (exit $AGENT_RC)"
@@ -228,7 +229,8 @@ Edit article.md now. When done, reply with one line: FIXED.
 FIX
   } > "$JOB/fix-prompt.md"
   set +e
-  "$PI_BIN" -p --no-session "@$JOB/fix-prompt.md" >> "$JOB/agent.stdout.log" 2>>"$JOB/agent.stderr.log"
+  "$PI_BIN" -p --no-session "@$JOB/fix-prompt.md" 2>&1 >>"$JOB/agent.stdout.log" \
+    | tee -a "$JOB/agent.stderr.log" >&2
   set -e
 done
 
