@@ -157,7 +157,7 @@ const FLIP_DX: i32 = 260;
 const FLIP_DY_MAX: i32 = 240;
 
 /* long-press on a home cell */
-const HOLD_MS: u128 = 650;
+const HOLD_DELAY: Duration = Duration::from_millis(650);
 
 /* transient page-number indicator after a flip: a subtle grey number in the
  * bottom-right (no box), sitting clear of the right-edge toolbar strip */
@@ -585,6 +585,24 @@ impl App {
                 self.render_home(false);
             }
         }
+    }
+
+    /// Open the document menu as soon as the hold threshold passes. Waiting
+    /// for release made the required hold duration invisible to the user.
+    fn home_hold_tick(&mut self) {
+        if !matches!(self.screen, Screen::Home(_)) || self.dialog.is_some() {
+            return;
+        }
+        let (Some((sx, sy)), Some(t0)) = (self.touch_start, self.touch_t0) else { return };
+        let (dx, dy) = (self.touch_last.0 - sx, self.touch_last.1 - sy);
+        if dx.abs() >= 40 || dy.abs() >= 40 || t0.elapsed() < HOLD_DELAY {
+            return;
+        }
+        /* Consume this contact before opening the modal so its eventual
+         * release cannot also open the document. */
+        self.touch_start = None;
+        self.touch_t0 = None;
+        self.home_hold(sx, sy);
     }
 
     /* -- documents ------------------------------------------------------ */
@@ -1671,7 +1689,7 @@ impl App {
             Phase::Release => {
                 self.swipe_from = None;
                 let Some((sx, sy)) = self.touch_start.take() else { return };
-                let held = self.touch_t0.take().map_or(0, |t| t.elapsed().as_millis());
+                let held = self.touch_t0.take().is_some_and(|t| t.elapsed() >= HOLD_DELAY);
                 let (dx, dy) = (self.touch_last.0 - sx, self.touch_last.1 - sy);
                 match &self.screen {
                     Screen::Doc(_) => {
@@ -1693,7 +1711,7 @@ impl App {
                                 self.render_home(false);
                             }
                         } else if dx.abs() < 40 && dy.abs() < 40 {
-                            if held >= HOLD_MS {
+                            if held {
                                 self.home_hold(sx, sy);
                             } else {
                                 self.home_tap(sx, sy);
@@ -3575,6 +3593,7 @@ fn main() -> std::process::ExitCode {
         app.drag_settle_tick();
         app.maybe_send_page();
         app.check_pi_health();
+        app.home_hold_tick();
         app.thumb_tick();
 
         /* -- idle auto-suspend -- */
@@ -3632,6 +3651,12 @@ fn next_timeout(app: &App) -> i32 {
             }
             if app.dialog.is_none() {
                 soonest(app.home_rescan_at.saturating_duration_since(Instant::now()));
+                if let (Some((sx, sy)), Some(t0)) = (app.touch_start, app.touch_t0) {
+                    let (dx, dy) = (app.touch_last.0 - sx, app.touch_last.1 - sy);
+                    if dx.abs() < 40 && dy.abs() < 40 {
+                        soonest(HOLD_DELAY.saturating_sub(t0.elapsed()));
+                    }
+                }
             }
         }
         Screen::Agent(av) => {

@@ -190,8 +190,21 @@ def dialog_row_tap(s, nrows, i):
 
 
 def long_press(s, x, y, ms=900):
+    """Hold until the document menu appears, then release."""
     s.touch(TOUCH_PRESS, x, y)
     time.sleep(ms / 1000.0)
+    s.drain(0.1)
+
+    # The five-row menu must appear before release. Its six-pixel outer frame
+    # is GRAY (0x8410); this catches regressions to release-triggered holds.
+    DLG_W, DLG_ROW_H, TITLE_PAD = 760, 96, 84
+    h = TITLE_PAD + 5 * DLG_ROW_H + 24
+    x0, y0 = (W - DLG_W) // 2, (H - h) // 2
+    with open(SHM_PATH, "rb") as fb:
+        fb.seek(((y0 - 3) * W + x0 - 3) * 2)
+        pixel = struct.unpack("<H", fb.read(2))[0]
+    assert pixel == 0x8410, "document menu did not appear during long press"
+
     s.touch(TOUCH_RELEASE, x, y)
 
 
