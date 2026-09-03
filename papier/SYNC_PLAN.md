@@ -166,28 +166,28 @@ overwrites an open doc.
 Third revision (2026-09-02), **⇗ Publish to swair.dev** (`Writings` only):
 
 - The single notebook with stable id `writings` and title **Writings** is the
-  draft; one continuously updated post on the site is the typed artifact; and
-  a pi agent is the transcriber-editor. Other notebooks cannot be published.
-  The server watches only this bundle and automatically publishes after two
-  minutes without a synced change, so a writing burst is not published
-  mid-sentence. The "Publish to swair.dev" button remains in Writings as a
-  manual fallback. Both paths run `papier-publish.sh` as a compose-style job
-  (status polling, trace, `result.json`).
-- **Diff, not the whole notebook.** `papier-publish-render.py` compares
-  each page's ink JSON with the snapshot saved at the last publish
-  (strokes matched by content, since the iPad heals ids) and renders only
-  the changed pages: grey = already published, black = new, red = erased,
-  blue = pi's ink. Those images plus the current `post.md` go to one
-  headless `pi -p` run whose only job is to merge the new ink into the
-  post in place. A shrink guard refuses a rewrite that halves the post
-  without any erased ink.
+  source for the whole blog. Other notebooks cannot publish. The server watches
+  only this bundle and automatically publishes after two minutes without a
+  synced change, so a writing burst is not published mid-sentence. The manual
+  button remains as a fallback.
+- **Diff, not the whole notebook.** `papier-publish-render.py` compares pages
+  with the notebook-level snapshot from the last successful run and sends only
+  changed pages to pi: grey = already published, black = new, red = erased,
+  blue = pi's notebook ink. A failed run never advances the snapshot.
+- **One notebook, multiple posts.** The agent sees the existing post catalog
+  and uses handwritten titles, topics, and context to decide whether each
+  change updates a post or creates a new one. Clear topic changes become new
+  posts; ambiguous material is kept separate rather than mixed into an old
+  post. The agent can also move material or delete a fully erased post.
+- **Visual judgment.** Meaningful diagrams can become self-contained SVG assets.
+  Sketches and artwork remain the user's marks: the agent crops and cleans the
+  relevant source-page region into an image asset and embeds it in the post.
+  Raw handwritten pages are not appended automatically.
 - **Every publish is a commit.** `~/remarkable-backup/papier-publish/site/`
-  is a git repo: `posts/<id>/post.md`, `meta.json`, `snapshot/` (ink at
-  last publish) and `pages/NN.png` (clean renders shown under the post as
-  "Handwritten pages"). A bad transcription is one `git revert` + republish.
-- **One hop out.** `papier-publish-site.py` rebuilds the static
-  `/notebook/` tree (the hand-written site's own `styles.css`/`theme.js`
-  plus a generated `notebook.css`; pandoc + MathML, no scripts, so the
-  site's CSP holds) and rsyncs it to `swair@swair.dev:/` through a key
-  jailed with `rrsync /home/public/notebook`. "Unpublish" removes the post
-  directory and pushes again. Nothing runs on the Mac or the tablet.
+  stores `posts/<slug>/post.md`, selected `assets/`, metadata, and the source
+  snapshot in git, so a bad editorial decision is reversible.
+- **The blog is the home page.** `papier-publish-site.py` writes the post index
+  directly to `https://swair.dev/` and post pages under `/posts/<slug>/`, using
+  the site's existing CSS/theme plus generated `writing.css`. The write-only
+  key is jailed to `/home/public`; root files are updated without deletion and
+  only `/posts/` is mirrored with deletion. Nothing runs on the Mac or tablet.
