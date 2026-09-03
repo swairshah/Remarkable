@@ -182,7 +182,9 @@ Third revision (2026-09-02), **⇗ Publish to swair.dev** (`Writings` only):
 - **Visual judgment.** Meaningful diagrams can become self-contained SVG assets.
   Sketches and artwork remain the user's marks: the agent crops and cleans the
   relevant source-page region into an image asset and embeds it in the post.
-  Raw handwritten pages are not appended automatically.
+  Nonessential margin annotations can become responsive side notes: outer-margin
+  notes on wide screens and inline notes on narrow screens. Raw handwritten
+  pages are not appended automatically.
 - **Every publish is a commit.** `~/remarkable-backup/papier-publish/site/`
   stores `posts/<slug>/post.md`, selected `assets/`, metadata, and the source
   snapshot in git, so a bad editorial decision is reversible.
