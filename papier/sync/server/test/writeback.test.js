@@ -112,4 +112,32 @@ test('ink/state/notebook write-back lands in inbound with validation', async (t)
   // id collision -> de-collided fresh id
   r = await fetch(`${base}/notebook`, { method: 'POST', body: JSON.stringify({ title: 'Sketch Pad' }) });
   assert.equal((await r.json()).id, 'sketch-pad-2');
+
+  // recoverable document delete -> tombstone + archived assets. The live
+  // mirror stays in place until the tablet consumes the marker and pushes.
+  fs.mkdirSync(path.join(backup, 'papier-sources'), { recursive: true });
+  fs.writeFileSync(path.join(backup, 'papier-sources', 'nb.pdf'), '%PDF-test');
+  r = await fetch(`${base}/delete?id=nb`, { method: 'POST' });
+  assert.equal(r.status, 200);
+  assert.ok(fs.existsSync(path.join(backup, 'papier-inbound', 'deletions', 'nb')));
+  assert.ok(!fs.existsSync(path.join(backup, 'papier-inbound', 'docs', 'nb')));
+  assert.ok(fs.existsSync(path.join(backup, 'papier', 'docs', 'nb')));
+  assert.ok(!fs.existsSync(path.join(backup, 'papier-sources', 'nb.pdf')));
+
+  const trash = fs.readdirSync(path.join(backup, 'papier-trash'))
+    .find((name) => name.includes('-nb-'));
+  assert.ok(trash);
+  assert.ok(fs.existsSync(path.join(backup, 'papier-trash', trash, 'mirror', 'meta.json')));
+  assert.ok(fs.existsSync(path.join(backup, 'papier-trash', trash, 'source.pdf')));
+
+  r = await fetch(`${base}/library`);
+  assert.ok(!(await r.json()).docs.some((doc) => doc.id === 'nb'));
+  r = await fetch(`${base}/ink?id=nb&file=note-0001.json`, { method: 'POST', body: JSON.stringify(page) });
+  assert.equal(r.status, 404);
+  r = await fetch(`${base}/delete?id=nb`, { method: 'POST' });
+  assert.equal(r.status, 200, 'delete is idempotent while the tombstone is pending');
+  r = await fetch(`${base}/delete?id=not-there`, { method: 'POST' });
+  assert.equal(r.status, 404);
+  r = await fetch(`${base}/delete?id=../bad`, { method: 'POST' });
+  assert.equal(r.status, 400);
 });

@@ -47,7 +47,9 @@ const BACKUP = process.env.PAPIER_BACKUP || '/home/exedev/remarkable-backup';
 const INBOX = path.join(BACKUP, 'papier-inbound');
 const INCOMING = path.join(INBOX, 'incoming');
 const DOCS = path.join(INBOX, 'docs');                 // inbound bundles (delivery)
+const DELETIONS = path.join(INBOX, 'deletions');       // tablet-consumed delete tombstones
 const MIRROR = path.join(BACKUP, 'papier', 'docs');    // tablet mirror (read meta)
+const TRASH = path.join(BACKUP, 'papier-trash');       // recoverable document deletions
 const SOURCES = path.join(BACKUP, 'papier-sources');   // retained PDFs: <id>.pdf
 const PREVIEWS = path.join(BACKUP, 'papier-previews'); // cached raw pages: <id>/<n>.png
 const COVERS = path.join(BACKUP, 'papier-covers');     // small web covers, keyed by source+doc version
@@ -60,7 +62,7 @@ const KINDLE_SH = process.env.PAPIER_KINDLE || '/home/exedev/bin/papier-kindle.s
 const PREVIEW_PY = '/home/exedev/bin/papier-preview-page.py';
 const PY = '/home/exedev/papier-venv/bin/python3';
 const PORT = Number(process.env.PAPIER_PORT || 8093);
-[INCOMING, DOCS, SOURCES, PREVIEWS, COVERS, COMPOSE, DERIVED].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+[INCOMING, DOCS, DELETIONS, TRASH, SOURCES, PREVIEWS, COVERS, COMPOSE, DERIVED].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
 const piSessions = createPiSessions({ mirrorDocs: MIRROR, inboundDocs: DOCS });
 
@@ -144,6 +146,7 @@ function handleCover(res, source, id, version) {
 
 // A doc's meta from wherever it currently lives (pending inbound, then mirror).
 function readMeta(id) {
+  if (isDeleted(id)) return null;
   for (const base of [path.join(DOCS, id), path.join(MIRROR, id)]) {
     try { return JSON.parse(fs.readFileSync(path.join(base, 'meta.json'))); } catch (_) {}
   }
@@ -180,15 +183,96 @@ function setOrigCrop(docDir) {
 // last-writer-wins, the "editable later" hook from SYNC_PLAN.md), and the
 // push after that folds it back into the mirror for every viewer.
 
+function deletionMarker(id) { return path.join(DELETIONS, id); }
+function isDeleted(id) { return fs.existsSync(deletionMarker(id)); }
+
 function docExists(id) {
-  return fs.existsSync(path.join(BACKUP, 'papier', 'docs', id, 'meta.json'))
-      || fs.existsSync(path.join(DOCS, id, 'meta.json'));
+  return !isDeleted(id) && (
+    fs.existsSync(path.join(BACKUP, 'papier', 'docs', id, 'meta.json'))
+      || fs.existsSync(path.join(DOCS, id, 'meta.json'))
+  );
 }
 
 function writeAtomically(dst, data) {
   const tmp = dst + '.tmp';
   fs.writeFileSync(tmp, data);
   fs.renameSync(tmp, dst);
+}
+
+function moveIfExists(src, dst) {
+  if (!fs.existsSync(src)) return;
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  fs.renameSync(src, dst);
+}
+
+function moveFilesStartingWith(srcDir, prefix, dstDir) {
+  for (const name of fs.readdirSync(srcDir)) {
+    if (name.startsWith(prefix)) moveIfExists(path.join(srcDir, name), path.join(dstDir, name));
+  }
+}
+
+// POST /delete?id=<doc> — hide the document immediately and queue a
+// tombstone for the tablet. The tablet moves its local bundle to trash
+// before the next mirror push, then acknowledges the marker. Removing the
+// VM mirror directly would be insufficient: an offline tablet would simply
+// resurrect it on its next push.
+function handleDelete(res, id) {
+  id = safeId(id);
+  if (!id) return json(res, 400, { ok: false, error: 'bad id' });
+  if (isDeleted(id)) return json(res, 200, { ok: true, id, pending: true });
+  if (!docExists(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
+
+  const deletedAt = new Date();
+  const stamp = deletedAt.toISOString().replace(/[:.]/g, '-');
+  const trashId = `${stamp}-${id}-${crypto.randomBytes(3).toString('hex')}`;
+  const trashDir = path.join(TRASH, trashId);
+  const inboundDoc = path.join(DOCS, id);
+  const archivedInbound = path.join(trashDir, 'inbound');
+  let movedInbound = false;
+
+  try {
+    fs.mkdirSync(trashDir, { recursive: true });
+    const mirrorDoc = path.join(MIRROR, id);
+    if (fs.existsSync(mirrorDoc)) fs.cpSync(mirrorDoc, path.join(trashDir, 'mirror'), { recursive: true });
+    if (fs.existsSync(inboundDoc)) {
+      moveIfExists(inboundDoc, archivedInbound);
+      movedInbound = true;
+    }
+    writeAtomically(path.join(trashDir, 'deletion.json'), JSON.stringify({
+      v: 1,
+      id,
+      deleted_at: deletedAt.toISOString(),
+    }));
+    writeAtomically(deletionMarker(id), JSON.stringify({
+      v: 1,
+      id,
+      deleted_at: deletedAt.toISOString(),
+      trash: trashId,
+    }));
+  } catch (e) {
+    if (movedInbound && !fs.existsSync(inboundDoc)) {
+      try { moveIfExists(archivedInbound, inboundDoc); }
+      catch (restoreError) { console.error('document delete restore failed', id, restoreError); }
+    }
+    console.error('document delete archive failed', id, e);
+    return json(res, 500, { ok: false, error: 'could not archive document for deletion' });
+  }
+
+  // Once the mirror copy and tombstone are durable, archive auxiliary assets
+  // opportunistically. Failure leaves an unreachable live copy, never data loss.
+  try { moveIfExists(sourcePdf(id), path.join(trashDir, 'source.pdf')); }
+  catch (e) { console.error('document delete source archive failed', id, e); }
+  try { moveIfExists(path.join(PREVIEWS, id), path.join(trashDir, 'previews')); }
+  catch (e) { console.error('document delete preview archive failed', id, e); }
+  try {
+    moveFilesStartingWith(COVERS, `data-${id}-`, path.join(trashDir, 'covers'));
+    moveFilesStartingWith(COVERS, `inbound-${id}-`, path.join(trashDir, 'covers'));
+  } catch (e) { console.error('document delete cover archive failed', id, e); }
+  try { moveFilesStartingWith(DERIVED, `${id}-`, path.join(trashDir, 'derived')); }
+  catch (e) { console.error('document delete derived archive failed', id, e); }
+
+  console.log('queued document deletion', id, 'trash', trashId);
+  json(res, 200, { ok: true, id, pending: true });
 }
 
 // The freshest copy of a page ink file: the inbound overlay (iPad + pi
@@ -899,6 +983,7 @@ http.createServer((req, res) => {
   if (req.method === 'POST' && p === '/ink') return handleInkWrite(req, res, u.searchParams.get('id'), u.searchParams.get('file'));
   if (req.method === 'POST' && p === '/state') return handleStateWrite(req, res, u.searchParams.get('id'));
   if (req.method === 'POST' && p === '/notebook') return handleNotebookCreate(req, res);
+  if (req.method === 'POST' && p === '/delete') return handleDelete(res, u.searchParams.get('id'));
   if (req.method === 'POST' && p === '/patch-erase') return handlePatchErase(res, u.searchParams.get('id'), u.searchParams.get('file'), u.searchParams.get('patch'));
   if (req.method === 'POST' && p === '/patch-replace') return handlePatchReplace(req, res, u.searchParams.get('id'), u.searchParams.get('file'), u.searchParams.get('patch'));
   if (req.method === 'POST' && p === '/patch-move') return handlePatchMove(res, u.searchParams.get('id'), u.searchParams.get('file'), u.searchParams.get('patch'), u.searchParams.get('dx'), u.searchParams.get('dy'));

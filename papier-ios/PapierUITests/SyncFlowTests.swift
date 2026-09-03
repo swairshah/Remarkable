@@ -6,6 +6,36 @@
 import XCTest
 
 final class SyncFlowTests: XCTestCase {
+    func testLibrarySortAndDeleteConfirmation() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let sort = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Sort documents")
+        ).firstMatch
+        XCTAssertTrue(sort.waitForExistence(timeout: 15), "sort control should appear with the library")
+        sort.tap()
+        XCTAssertTrue(app.buttons["Recently updated"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Recently added"].exists)
+        app.buttons["Recently added"].tap()
+
+        sort.tap()
+        XCTAssertTrue(app.buttons["Title"].waitForExistence(timeout: 3))
+        app.buttons["Title"].tap()
+
+        let actions = app.buttons["Actions for pi crash probe (safe to delete)"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 15), "every document should expose its actions menu")
+        actions.tap()
+        XCTAssertTrue(app.buttons["Delete"].waitForExistence(timeout: 3))
+        app.buttons["Delete"].tap()
+
+        let confirmation = app.alerts.firstMatch
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 3), "delete should require confirmation")
+        XCTAssertTrue(confirmation.buttons["Cancel"].exists)
+        confirmation.buttons["Cancel"].tap()
+        XCTAssertFalse(confirmation.exists)
+    }
+
     func testOpenNotebookDrawAndSync() throws {
         let app = XCUIApplication()
         app.launch()

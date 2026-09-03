@@ -27,11 +27,50 @@ LOCAL=/home/root/.local/share/papier
 INBOUND=/home/exedev/remarkable-backup/papier-inbound
 MIRROR=/home/exedev/remarkable-backup/papier
 LOG=/home/root/.local/state/papier-sync.log
+DELETE_QUEUE=/home/root/.local/state/papier-delete-queue
+LOCAL_TRASH=/home/root/.local/share/papier-trash
 
-mkdir -p "$(dirname "$LOG")" "$LOCAL/docs"
+mkdir -p "$(dirname "$LOG")" "$LOCAL/docs" "$DELETE_QUEUE" "$LOCAL_TRASH"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
 # keep the log bounded
 [ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt 2000 ] && tail -n 1000 "$LOG" > "$LOG.t" && mv "$LOG.t" "$LOG"
+
+apply_deletions() {
+    # Deletion markers are retained on the VM until a later push proves the
+    # tablet removed the document. Move locally rather than purging so an
+    # accidental delete can still be recovered by hand.
+    if rsync -az --omit-dir-times --no-perms \
+         -e "$SSH" "$VM:$INBOUND/deletions/" "$DELETE_QUEUE/" >> "$LOG" 2>&1; then
+        for marker in "$DELETE_QUEUE"/*; do
+            [ -f "$marker" ] || continue
+            id=${marker##*/}
+            case "$id" in
+                ''|*[!a-z0-9_-]*) log "ignored invalid delete marker: $id"; continue ;;
+            esac
+            if [ -d "$LOCAL/docs/$id" ]; then
+                stamp=$(date '+%Y%m%d-%H%M%S')
+                mv "$LOCAL/docs/$id" "$LOCAL_TRASH/$stamp-$id"
+                log "moved deleted doc to trash: $id"
+            fi
+        done
+    else
+        log "delete queue pull failed"
+    fi
+}
+
+ack_deletions() {
+    # Only acknowledge after the --delete mirror push succeeds. Until then
+    # the VM tombstone keeps the stale mirrored bundle out of web/iOS lists.
+    for marker in "$DELETE_QUEUE"/*; do
+        [ -f "$marker" ] || continue
+        id=${marker##*/}
+        case "$id" in ''|*[!a-z0-9_-]*) continue ;; esac
+        if $SSH "$VM" "rm -f $INBOUND/deletions/$id" >> "$LOG" 2>&1; then
+            rm -f "$marker"
+            log "acknowledged delete: $id"
+        fi
+    done
+}
 
 do_pull() {
     # bring web-dropped docs onto the tablet, consuming them on the VM
@@ -51,14 +90,15 @@ do_push() {
          --exclude '*.tmp' --exclude 'sessions' \
          -e "$SSH" "$LOCAL/" "$VM:$MIRROR/" >> "$LOG" 2>&1; then
         log "push ok ($MODE)"
+        ack_deletions
     else
         log "push failed"
     fi
 }
 
 case "$MODE" in
-    pull) do_pull ;;
-    push) do_push ;;
-    both) do_pull; do_push ;;
+    pull) apply_deletions; do_pull ;;
+    push) apply_deletions; do_push ;;
+    both) apply_deletions; do_pull; do_push ;;
     *)    echo "usage: $0 [pull|push|both]" >&2; exit 2 ;;
 esac

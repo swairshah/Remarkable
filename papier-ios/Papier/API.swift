@@ -116,4 +116,8 @@ struct PapierClient {
         }
         return id
     }
+
+    func deleteDocument(docId: String) async throws {
+        try await post("/delete?id=\(docId)", body: Data())
+    }
 }
