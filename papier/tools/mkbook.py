@@ -26,6 +26,7 @@ import os
 import re
 import struct
 import sys
+import time
 import zlib
 
 import fitz  # pymupdf
@@ -183,7 +184,8 @@ def build_book(pdf: str, out: str, title: str | None = None,
         if (i + 1) % 20 == 0 or i + 1 == n:
             print(f"mkbook: {i + 1}/{n} pages", file=sys.stderr)
 
-    meta = {"title": title, "pages": n, "w": W, "h": H}
+    meta = {"title": title, "pages": n, "w": W, "h": H,
+            "created": int(time.time())}
     if crop is not None:
         meta["crop"] = [cx0, cy0, cx1, cy1]
     else:

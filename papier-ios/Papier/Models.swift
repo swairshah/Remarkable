@@ -15,6 +15,8 @@ struct PapierDoc: Codable, Identifiable, Equatable, Hashable {
     let id: String
     let base: String            // "/papier/data/" (mirror) or "/papier/inbound/"
     let pending: Bool           // true = web/iPad-added, not yet pulled by the tablet
+    let addedAt: Double?        // first addition to Papier, in Unix milliseconds
+    let mtime: Double?          // server modification time in Unix milliseconds
     let meta: DocMeta
     let version: String         // bumps whenever any doc file changes
     let cover: String?          // absolute path: /papier/api/cover?...
@@ -33,6 +35,43 @@ struct PapierDoc: Codable, Identifiable, Equatable, Hashable {
     var isNotebook: Bool { meta.kind == "notebook" }
     var pageW: Double { meta.w ?? 1404 }
     var pageH: Double { meta.h ?? 1872 }
+    var addedDate: Date? { addedAt.map { Date(timeIntervalSince1970: $0 / 1_000) } }
+    var modifiedAt: Date? { mtime.map { Date(timeIntervalSince1970: $0 / 1_000) } }
+}
+
+enum LibrarySort: String, CaseIterable {
+    case recent
+    case added
+    case title
+
+    var label: String {
+        switch self {
+        case .recent: "Recently updated"
+        case .added: "Recently added"
+        case .title: "Title"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .recent: "clock.arrow.circlepath"
+        case .added: "plus.circle"
+        case .title: "textformat"
+        }
+    }
+
+    func sorted(_ docs: [PapierDoc]) -> [PapierDoc] {
+        docs.sorted { lhs, rhs in
+            if self == .recent || self == .added {
+                let left = self == .added ? (lhs.addedAt ?? lhs.mtime ?? 0) : (lhs.mtime ?? 0)
+                let right = self == .added ? (rhs.addedAt ?? rhs.mtime ?? 0) : (rhs.mtime ?? 0)
+                if left != right { return left > right }
+            }
+            let titleOrder = lhs.meta.title.localizedCaseInsensitiveCompare(rhs.meta.title)
+            if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
+            return lhs.id < rhs.id
+        }
+    }
 }
 
 struct DocMeta: Codable {

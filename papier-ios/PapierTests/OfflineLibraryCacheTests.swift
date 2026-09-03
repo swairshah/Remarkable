@@ -88,17 +88,46 @@ final class OfflineLibraryCacheTests: XCTestCase {
         XCTAssertEqual(restored?.strokes.first?.points.first?.x, 10)
     }
 
+    func testLibrarySortSupportsUpdatedAddedAndTitle() {
+        let olderAddition = makeDoc(
+            id: "alpha",
+            title: "Alpha",
+            addedAt: 1_700_000_000_000,
+            mtime: 1_900_000_000_000
+        )
+        let newerAddition = makeDoc(
+            id: "zulu",
+            title: "Zulu",
+            addedAt: 1_800_000_000_000,
+            mtime: 1_800_000_000_000
+        )
+
+        XCTAssertEqual(LibrarySort.recent.sorted([olderAddition, newerAddition]).map(\.id), ["alpha", "zulu"])
+        XCTAssertEqual(LibrarySort.added.sorted([olderAddition, newerAddition]).map(\.id), ["zulu", "alpha"])
+        XCTAssertEqual(LibrarySort.title.sorted([olderAddition, newerAddition]).map(\.id), ["alpha", "zulu"])
+        XCTAssertEqual(newerAddition.addedDate?.timeIntervalSince1970, 1_800_000_000)
+        XCTAssertEqual(newerAddition.modifiedAt?.timeIntervalSince1970, 1_800_000_000)
+    }
+
     private func makeLibrary() -> Library {
         Library(v: 1, generation: "generation-1", docs: [makeDoc()])
     }
 
-    private func makeDoc(version: String = "version-1") -> PapierDoc {
+    private func makeDoc(
+        id: String = "offline-notebook",
+        title: String = "Offline Notebook",
+        addedAt: Double = 1_600_000_000_000,
+        mtime: Double = 1_700_000_000_000,
+        version: String = "version-1"
+    ) -> PapierDoc {
         PapierDoc(
-            id: "offline-notebook",
+            id: id,
             base: "/papier/inbound/",
             pending: false,
+            addedAt: addedAt,
+            mtime: mtime,
             meta: DocMeta(
-                title: "Offline Notebook",
+                title: title,
                 pages: 2,
                 w: 1404,
                 h: 1872,

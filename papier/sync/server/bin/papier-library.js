@@ -12,6 +12,19 @@ function mtimeMs(file) {
   try { return fs.statSync(file).mtimeMs; } catch (_) { return 0; }
 }
 
+function addedAtMs(docDir, meta) {
+  const created = Number(meta && meta.created);
+  if (Number.isFinite(created) && created > 0) {
+    return created < 1e12 ? created * 1000 : created;
+  }
+  try {
+    const stat = fs.statSync(docDir);
+    return stat.birthtimeMs || stat.ctimeMs || stat.mtimeMs || 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
 function versionOf(files) {
   return Math.trunc(Math.max(0, ...files.map(mtimeMs))).toString(36);
 }
@@ -22,14 +35,28 @@ function inkKey(entry) {
   return null;
 }
 
-function readInkKeys(docDir) {
+function readInkFiles(docDir) {
   try {
     return fs.readdirSync(path.join(docDir, 'ink'))
       .filter((name) => /^(?:pdf|note)-\d{4}\.json$/.test(name))
-      .map((name) => name.slice(0, -5))
+      .map((name) => path.join(docDir, 'ink', name))
       .sort();
   } catch (_) {
     return [];
+  }
+}
+
+function inkKeyFromFile(file) {
+  return path.basename(file, '.json');
+}
+
+function readDeletedIds(inbound) {
+  try {
+    return new Set(fs.readdirSync(path.join(inbound, 'deletions'), { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /^[a-z0-9][a-z0-9_-]{0,100}$/.test(entry.name))
+      .map((entry) => entry.name));
+  } catch (_) {
+    return new Set();
   }
 }
 
@@ -74,7 +101,10 @@ function readSource(root, base, pending, coverEndpoint, sourcesDir, overlayRoot 
     const srcMtime = sourcePdf ? mtimeMs(sourcePdf) : 0;
     const inkDir = path.join(docDir, 'ink');
     const pagesDir = path.join(docDir, 'pages');
-    const versionFiles = [docDir, metaPath, effectiveStatePath, thumbPath, inkDir, pagesDir];
+    const inkFiles = readInkFiles(docDir);
+    const overlayInkFiles = overlayDir ? readInkFiles(overlayDir) : [];
+    const versionFiles = [docDir, metaPath, effectiveStatePath, thumbPath, inkDir, pagesDir,
+      ...inkFiles, ...overlayInkFiles];
     if (overlayDir) versionFiles.push(overlayDir, path.join(overlayDir, 'ink'));
 
     docs.push({
@@ -82,12 +112,13 @@ function readSource(root, base, pending, coverEndpoint, sourcesDir, overlayRoot 
       base,
       pending,
       meta: { ...meta, kind },
-      mtime: Math.max(mtimeMs(metaPath), mtimeMs(effectiveStatePath), mtimeMs(docDir)),
+      addedAt: addedAtMs(docDir, meta),
+      mtime: Math.max(...versionFiles.map(mtimeMs)),
       version: versionOf(versionFiles),
       cover,
       coverVersion,
       seq,
-      ink: [...new Set([...readInkKeys(docDir), ...(overlayDir ? readInkKeys(overlayDir) : [])])].sort(),
+      ink: [...new Set([...inkFiles, ...overlayInkFiles].map(inkKeyFromFile))].sort(),
       hasSource: srcMtime > 0,
       srcVersion: srcMtime > 0 ? Math.trunc(srcMtime).toString(36) : null,
     });
@@ -98,8 +129,10 @@ function readSource(root, base, pending, coverEndpoint, sourcesDir, overlayRoot 
 function buildLibrary({ mirror, inbound, sources = null, dataBase = '/papier/data/', inboundBase = '/papier/inbound/', coverEndpoint = '/papier/api/cover' }) {
   const mirrored = readSource(mirror, dataBase, false, coverEndpoint, sources, inbound);
   const pending = readSource(inbound, inboundBase, true, coverEndpoint, sources);
+  const deleted = readDeletedIds(inbound);
   const have = new Set(mirrored.map((doc) => doc.id));
-  const docs = mirrored.concat(pending.filter((doc) => !have.has(doc.id)));
+  const docs = mirrored.concat(pending.filter((doc) => !have.has(doc.id)))
+    .filter((doc) => !deleted.has(doc.id));
 
   const foldersFile = path.join(mirror, 'folders.json');
   const folderDoc = readJson(foldersFile);

@@ -10,8 +10,14 @@ struct HomeView: View {
     @State private var newNotebookTitle = ""
     @State private var askNotebookTitle = false
     @State private var openedDoc: PapierDoc?
+    @State private var libraryAlert: LibraryAlert?
+    @State private var deletingID: String?
+    @AppStorage("librarySort") private var sortRaw = LibrarySort.recent.rawValue
 
     private let columns = [GridItem(.adaptive(minimum: 168, maximum: 230), spacing: 22)]
+
+    private var librarySort: LibrarySort { LibrarySort(rawValue: sortRaw) ?? .recent }
+    private var displayedDocs: [PapierDoc] { librarySort.sorted(store.docs) }
 
     var body: some View {
         NavigationStack {
@@ -30,6 +36,19 @@ struct HomeView: View {
             }
             .navigationTitle("Papier")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        Picker("Sort documents", selection: $sortRaw) {
+                            ForEach(LibrarySort.allCases, id: \.self) { option in
+                                Label(option.label, systemImage: option.systemImage)
+                                    .tag(option.rawValue)
+                            }
+                        }
+                    } label: {
+                        Label("Sort: \(librarySort.label)", systemImage: "arrow.up.arrow.down")
+                    }
+                    .accessibilityLabel("Sort documents, \(librarySort.label)")
+                }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if let err = store.lastError {
                         Image(systemName: "wifi.exclamationmark")
@@ -74,15 +93,67 @@ struct HomeView: View {
             VStack(spacing: 18) {
                 if store.isOffline { offlineBanner }
                 LazyVGrid(columns: columns, spacing: 26) {
-                    ForEach(store.docs) { doc in
-                        Button { openedDoc = doc } label: { DocCell(doc: doc) }
-                            .buttonStyle(.plain)
+                    ForEach(displayedDocs) { doc in
+                        documentTile(doc)
                     }
                 }
             }
             .padding(22)
         }
         .background(Color(uiColor: .systemGroupedBackground))
+        .alert(item: $libraryAlert) { alert in
+            switch alert {
+            case .delete(let doc):
+                Alert(
+                    title: Text("Delete “\(doc.meta.title)”?"),
+                    message: Text("It disappears from Papier and the web now, then from the reMarkable after its next sync. Deleted documents remain recoverable from Papier trash."),
+                    primaryButton: .destructive(Text("Delete")) { deleteDocument(doc) },
+                    secondaryButton: .cancel()
+                )
+            case .error(let message):
+                Alert(
+                    title: Text("Couldn’t Delete Document"),
+                    message: Text(message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+        }
+    }
+
+    private func documentTile(_ doc: PapierDoc) -> some View {
+        ZStack(alignment: .topTrailing) {
+            Button { openedDoc = doc } label: { DocCell(doc: doc, librarySort: librarySort) }
+                .buttonStyle(DocumentPressStyle())
+
+            Menu {
+                Button(role: .destructive) {
+                    libraryAlert = .delete(doc)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: deletingID == doc.id ? "hourglass" : "ellipsis")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 32, height: 32)
+                    .background(.thinMaterial, in: Circle())
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Actions for \(doc.meta.title)")
+            .disabled(deletingID == doc.id)
+            .padding(4)
+        }
+        .contextMenu {
+            Button(role: .destructive) {
+                libraryAlert = .delete(doc)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+        .opacity(deletingID == doc.id ? 0.55 : 1)
+        .allowsHitTesting(deletingID != doc.id)
+        .animation(.easeOut(duration: 0.15), value: deletingID == doc.id)
     }
 
     private var offlineBanner: some View {
@@ -163,10 +234,48 @@ struct HomeView: View {
             await store.refresh()
         }
     }
+
+    private func deleteDocument(_ doc: PapierDoc) {
+        deletingID = doc.id
+        Task {
+            do {
+                try await store.deleteDocument(doc)
+            } catch {
+                libraryAlert = .error(error.localizedDescription)
+            }
+            deletingID = nil
+        }
+    }
+}
+
+private enum LibraryAlert: Identifiable {
+    case delete(PapierDoc)
+    case error(String)
+
+    var id: String {
+        switch self {
+        case .delete(let doc): "delete-\(doc.id)"
+        case .error(let message): "error-\(message)"
+        }
+    }
+}
+
+private struct DocumentPressStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: 0.12),
+                value: configuration.isPressed
+            )
+    }
 }
 
 private struct DocCell: View {
     let doc: PapierDoc
+    let librarySort: LibrarySort
     @EnvironmentObject private var store: LibraryStore
 
     var body: some View {
@@ -193,9 +302,17 @@ private struct DocCell: View {
                 .lineLimit(2, reservesSpace: true)
                 .foregroundStyle(.primary)
 
-            Text(doc.isNotebook ? "Notebook" : "\(doc.meta.pages ?? 0) pages")
+            Text(detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var detail: String {
+        let kind = doc.isNotebook ? "Notebook" : "\(doc.meta.pages ?? 0) pages"
+        let date = librarySort == .added ? (doc.addedDate ?? doc.modifiedAt) : doc.modifiedAt
+        guard let date else { return kind }
+        let verb = librarySort == .added ? "Added" : "Updated"
+        return "\(kind) · \(verb) \(date.formatted(.relative(presentation: .named)))"
     }
 }

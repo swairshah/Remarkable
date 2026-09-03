@@ -55,12 +55,14 @@ const COMPOSE = path.join(BACKUP, 'papier-compose');   // compose job workdirs
 const DERIVED = path.join(BACKUP, 'papier-derived-pdf'); // PDFs built from bundles (no retained source)
 const RENDER = process.env.PAPIER_RENDER || '/home/exedev/bin/papier-render.sh';
 const MAKE_PDF_PY = '/home/exedev/bin/papier-make-pdf.py';
+const DELETIONS = path.join(INBOX, 'deletions');       // tablet-consumed delete tombstones
 const COMPOSE_SH = process.env.PAPIER_COMPOSE || '/home/exedev/bin/papier-compose.sh';
+const TRASH = path.join(BACKUP, 'papier-trash');       // recoverable document deletions
 const KINDLE_SH = process.env.PAPIER_KINDLE || '/home/exedev/bin/papier-kindle.sh';
 const PREVIEW_PY = '/home/exedev/bin/papier-preview-page.py';
 const PY = '/home/exedev/papier-venv/bin/python3';
 const PORT = Number(process.env.PAPIER_PORT || 8093);
-[INCOMING, DOCS, SOURCES, PREVIEWS, COVERS, COMPOSE, DERIVED].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+[INCOMING, DOCS, DELETIONS, TRASH, SOURCES, PREVIEWS, COVERS, COMPOSE, DERIVED].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
 const piSessions = createPiSessions({ mirrorDocs: MIRROR, inboundDocs: DOCS });
 
@@ -161,6 +163,7 @@ function readBody(req, res, cb) {
     chunks.push(c);
   });
   req.on('end', () => { if (!aborted) cb(Buffer.concat(chunks)); });
+  if (isDeleted(id)) return null;
 }
 // stamp orig_crop (once) so "reset to original" always knows the starting crop
 function setOrigCrop(docDir) {
@@ -181,8 +184,10 @@ function setOrigCrop(docDir) {
 // push after that folds it back into the mirror for every viewer.
 
 function docExists(id) {
-  return fs.existsSync(path.join(BACKUP, 'papier', 'docs', id, 'meta.json'))
-      || fs.existsSync(path.join(DOCS, id, 'meta.json'));
+  return !isDeleted(id) && (
+    fs.existsSync(path.join(BACKUP, 'papier', 'docs', id, 'meta.json'))
+      || fs.existsSync(path.join(DOCS, id, 'meta.json'))
+  );
 }
 
 function writeAtomically(dst, data) {
@@ -197,6 +202,9 @@ function effectiveInkPath(id, file) {
   const overlay = path.join(DOCS, id, 'ink', file);
   if (fs.existsSync(overlay)) return overlay;
   return path.join(MIRROR, id, 'ink', file);
+function deletionMarker(id) { return path.join(DELETIONS, id); }
+function isDeleted(id) { return fs.existsSync(deletionMarker(id)); }
+
 }
 
 // GET /ink?id=&file= — the merged-truth read the iPad uses.
@@ -208,6 +216,82 @@ function handleInkRead(res, id, file) {
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
   fs.createReadStream(p).pipe(res);
 }
+function moveIfExists(src, dst) {
+  if (!fs.existsSync(src)) return;
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  fs.renameSync(src, dst);
+}
+
+function moveFilesStartingWith(srcDir, prefix, dstDir) {
+  for (const name of fs.readdirSync(srcDir)) {
+    if (name.startsWith(prefix)) moveIfExists(path.join(srcDir, name), path.join(dstDir, name));
+  }
+}
+
+// POST /delete?id=<doc> — hide the document immediately and queue a
+// tombstone for the tablet. The tablet moves its local bundle to trash
+// before the next mirror push, then acknowledges the marker. Removing the
+// VM mirror directly would be insufficient: an offline tablet would simply
+// resurrect it on its next push.
+function handleDelete(res, id) {
+  id = safeId(id);
+  if (!id) return json(res, 400, { ok: false, error: 'bad id' });
+  if (isDeleted(id)) return json(res, 200, { ok: true, id, pending: true });
+  if (!docExists(id)) return json(res, 404, { ok: false, error: 'unknown doc' });
+
+  const deletedAt = new Date();
+  const stamp = deletedAt.toISOString().replace(/[:.]/g, '-');
+  const trashId = `${stamp}-${id}-${crypto.randomBytes(3).toString('hex')}`;
+  const trashDir = path.join(TRASH, trashId);
+  const inboundDoc = path.join(DOCS, id);
+  const archivedInbound = path.join(trashDir, 'inbound');
+  let movedInbound = false;
+
+  try {
+    fs.mkdirSync(trashDir, { recursive: true });
+    const mirrorDoc = path.join(MIRROR, id);
+    if (fs.existsSync(mirrorDoc)) fs.cpSync(mirrorDoc, path.join(trashDir, 'mirror'), { recursive: true });
+    if (fs.existsSync(inboundDoc)) {
+      moveIfExists(inboundDoc, archivedInbound);
+      movedInbound = true;
+    }
+    writeAtomically(path.join(trashDir, 'deletion.json'), JSON.stringify({
+      v: 1,
+      id,
+      deleted_at: deletedAt.toISOString(),
+    }));
+    writeAtomically(deletionMarker(id), JSON.stringify({
+      v: 1,
+      id,
+      deleted_at: deletedAt.toISOString(),
+      trash: trashId,
+    }));
+  } catch (e) {
+    if (movedInbound && !fs.existsSync(inboundDoc)) {
+      try { moveIfExists(archivedInbound, inboundDoc); }
+      catch (restoreError) { console.error('document delete restore failed', id, restoreError); }
+    }
+    console.error('document delete archive failed', id, e);
+    return json(res, 500, { ok: false, error: 'could not archive document for deletion' });
+  }
+
+  // Once the mirror copy and tombstone are durable, archive auxiliary assets
+  // opportunistically. Failure leaves an unreachable live copy, never data loss.
+  try { moveIfExists(sourcePdf(id), path.join(trashDir, 'source.pdf')); }
+  catch (e) { console.error('document delete source archive failed', id, e); }
+  try { moveIfExists(path.join(PREVIEWS, id), path.join(trashDir, 'previews')); }
+  catch (e) { console.error('document delete preview archive failed', id, e); }
+  try {
+    moveFilesStartingWith(COVERS, `data-${id}-`, path.join(trashDir, 'covers'));
+    moveFilesStartingWith(COVERS, `inbound-${id}-`, path.join(trashDir, 'covers'));
+  } catch (e) { console.error('document delete cover archive failed', id, e); }
+  try { moveFilesStartingWith(DERIVED, `${id}-`, path.join(trashDir, 'derived')); }
+  catch (e) { console.error('document delete derived archive failed', id, e); }
+
+  console.log('queued document deletion', id, 'trash', trashId);
+  json(res, 200, { ok: true, id, pending: true });
+}
+
 
 // POST /ink?id=<doc>&file=note-0001.json — body is the FULL page ink file
 // (v/next_patch/next_stroke/strokes/patches, libreink-page schema). Papier
@@ -909,3 +993,4 @@ http.createServer((req, res) => {
   if (req.method === 'GET' && p === '/render-status') return handleRenderStatus(res, u.searchParams.get('job'));
   res.writeHead(404); res.end('not found');
 }).listen(PORT, '127.0.0.1', () => console.log(`papier upload/editor service on 127.0.0.1:${PORT}`));
+  if (req.method === 'POST' && p === '/delete') return handleDelete(res, u.searchParams.get('id'));

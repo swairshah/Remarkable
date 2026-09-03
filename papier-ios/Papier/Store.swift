@@ -72,7 +72,7 @@ final class LibraryStore: ObservableObject {
             let syncedAt = Date()
             if let lib {
                 librarySchemaVersion = lib.v
-                docs = sorted(lib.docs)
+                docs = lib.docs
                 generation = lib.generation
                 prunePending(docs: lib.docs)
                 try? offlineLibrary.save(
@@ -121,20 +121,42 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    /// Queue a recoverable deletion on the VM, then remove it from the local
+    /// library only after the server has durably recorded the tombstone.
+    func deleteDocument(_ doc: PapierDoc) async throws {
+        let root = OfflineLibraryCache.normalized(serverRoot)
+        do {
+            try await PapierClient(serverRoot: root).deleteDocument(docId: doc.id)
+            refreshID += 1   // invalidate any library response started before the delete
+            docs.removeAll { $0.id == doc.id }
+            etag = nil
+            let syncedAt = Date()
+            let current = Library(v: librarySchemaVersion, generation: generation, docs: docs)
+            try? offlineLibrary.save(
+                library: current,
+                etag: nil,
+                serverRoot: root,
+                syncedAt: syncedAt
+            )
+            try? FileManager.default.removeItem(
+                at: Self.pendingDir.appendingPathComponent(doc.id, isDirectory: true)
+            )
+            lastSuccessfulSync = syncedAt
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+            throw error
+        }
+    }
+
     private func restoreCachedLibrary(for serverRoot: String) {
         guard let snapshot = offlineLibrary.load(serverRoot: serverRoot) else { return }
         librarySchemaVersion = snapshot.library.v
         etag = snapshot.etag
-        docs = sorted(snapshot.library.docs)
+        docs = snapshot.library.docs
         generation = snapshot.library.generation
         lastSuccessfulSync = snapshot.syncedAt
         prunePending(docs: snapshot.library.docs)
-    }
-
-    private func sorted(_ docs: [PapierDoc]) -> [PapierDoc] {
-        docs.sorted {
-            $0.meta.title.localizedCaseInsensitiveCompare($1.meta.title) == .orderedAscending
-        }
     }
 
     /// Matches the web viewer: poll the ETagged manifest every 60s while
