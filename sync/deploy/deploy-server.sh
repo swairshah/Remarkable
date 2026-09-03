@@ -72,7 +72,9 @@ scp -q "$PAPIER_SERVER"/bin/papier-upload.js "$PAPIER_SERVER"/bin/papier-library
   "$PAPIER_SERVER"/bin/papier-preview-page.py "$PAPIER_SERVER"/bin/papier-render.sh \
   "$PAPIER_SERVER"/bin/papier-compose.sh "$PAPIER_SERVER"/bin/papier-make-pdf.py \
   "$PAPIER_SERVER"/bin/papier-epub.sh "$PAPIER_SERVER"/bin/papier-kindle-cover.py \
-  "$PAPIER_SERVER"/bin/papier-kindle.sh "$HERE/../papier"/tools/mkbook.py "$HOST:bin/"
+  "$PAPIER_SERVER"/bin/papier-kindle.sh "$PAPIER_SERVER"/bin/papier-publish.sh \
+  "$PAPIER_SERVER"/bin/papier-publish-render.py "$PAPIER_SERVER"/bin/papier-publish-site.py \
+  "$HERE/../papier"/tools/mkbook.py "$HOST:bin/"
 
 echo "[deploy-server] ensure papier python venv (pymupdf + numpy + reportlab for PDF output)"
 ssh "$HOST" '
@@ -80,7 +82,7 @@ ssh "$HOST" '
   if [ ! -x ~/papier-venv/bin/python3 ]; then
     python3 -m venv ~/papier-venv
   fi
-  ~/papier-venv/bin/pip install -q pymupdf numpy reportlab
+  ~/papier-venv/bin/pip install -q pymupdf numpy reportlab pillow
 '
 
 echo "[deploy-server] build + ship papier remote-pi (cloud-canvas + session service)"
@@ -94,7 +96,7 @@ scp -q "$PAPIER_SERVER"/bin/papier-pi-sessions.js "$PAPIER_SERVER"/bin/papier-cl
   "$HERE/../papier"/ext/papier-metrics.ts "$HOST:bin/"
 ssh "$HOST" 'chmod +x ~/bin/papier-cloud-canvas'
 scp -q "$PAPIER_SERVER"/web/index.html "$HOST:notes-server/papier/index.html"
-ssh "$HOST" 'chmod +x ~/bin/papier-preview-page.py ~/bin/papier-render.sh ~/bin/papier-compose.sh ~/bin/papier-make-pdf.py ~/bin/papier-epub.sh ~/bin/papier-kindle-cover.py ~/bin/papier-kindle.sh'
+ssh "$HOST" 'chmod +x ~/bin/papier-preview-page.py ~/bin/papier-render.sh ~/bin/papier-compose.sh ~/bin/papier-make-pdf.py ~/bin/papier-epub.sh ~/bin/papier-kindle-cover.py ~/bin/papier-kindle.sh ~/bin/papier-publish.sh ~/bin/papier-publish-render.py ~/bin/papier-publish-site.py'
 
 echo "[deploy-server] ensure runtime deps (node, img2pdf, imagemagick, pandoc, chromium, fonts)"
 ssh "$HOST" '

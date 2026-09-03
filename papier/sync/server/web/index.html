@@ -569,6 +569,53 @@ function openPdfViewer(d) {
   $('pv').classList.add('show');
 }
 function closePdfViewer() { $('pv').classList.remove('show'); $('pv-frame').src = 'about:blank'; }
+/* ⇗ Publish to swair.dev (the fixed `writings` notebook only):
+ * POST /papier/api/publish -> a pi agent
+ * on the VM diffs the pages against the last publish, merges the new ink
+ * into one or more posts, and the swair.dev home page is rebuilt and pushed.
+ * `make(ico, label, on)` builds a button in the caller's style and
+ * returns {btn, set(ico, label)}; returns the buttons to append. */
+function publishControls(d, make) {
+  let url = null;
+  const show = (b, on) => { b.style.display = on ? '' : 'none'; };
+  const pub = make('⇗', 'Publish to swair.dev', () => run(false));
+  const view = make('↗', 'View on swair.dev', () => { if (url) window.open(url, '_blank', 'noopener'); });
+  const un = make('⊘', 'Unpublish', () => { if (confirm('Remove this notebook from swair.dev?')) run(true); });
+  const apply = (info) => {
+    url = info && info.published ? info.url : null;
+    show(view.btn, !!url); show(un.btn, !!url);
+    pub.set('⇗', url ? 'Republish to swair.dev' : 'Publish to swair.dev');
+  };
+  apply(null);
+  fetch(API + 'publish-info?id=' + encodeURIComponent(d.id), { cache: 'no-store' })
+    .then(r => r.ok ? r.json() : null).then(apply).catch(() => {});
+  function run(remove) {
+    if (publishControls._busy) { toast('A publish is already in progress.'); return; }
+    publishControls._busy = true;
+    const idle = (delay) => setTimeout(() => { publishControls._busy = false; apply({ published: !!url, url }); }, delay);
+    const fail = (e) => { pub.set('✕', 'Publish failed: ' + (e && e.message || 'unknown error')); idle(8000); };
+    pub.set('…', remove ? 'Unpublishing…' : 'Publishing…');
+    fetch(API + 'publish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: d.id, remove }) })
+      .then(async r => { const j = await r.json().catch(() => null); if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ('publish ' + r.status)); return j; })
+      .then(j => {
+        const poll = () => fetch(API + 'publish-status?job=' + j.job, { cache: 'no-store' })
+          .then(r => r.json())
+          .then(st => {
+            if (st.status === 'running') { pub.set('…', st.phase || 'working…'); setTimeout(poll, 3000); return; }
+            if (st.status !== 'done') throw new Error(st.error || 'failed');
+            if (st.outcome === 'removed') { url = null; pub.set('✓', 'Removed from swair.dev'); toast('Removed from swair.dev'); idle(4000); return; }
+            if (st.outcome === 'unchanged') { pub.set('=', 'Nothing new since the last publish'); toast('Nothing new since the last publish'); idle(5000); return; }
+            url = st.url || url; show(view.btn, !!url); show(un.btn, !!url);
+            pub.set('✓', 'Published'); toast('Published to swair.dev'); idle(5000);
+          })
+          .catch(fail);
+        poll();
+      })
+      .catch(fail);
+  }
+  return [pub.btn, view.btn, un.btn];
+}
+
 /* Send to Kindle: choose a fixed-layout PDF (with an outgoing-only title
  * sheet) or a reflowable EPUB made from retained Compose markdown. The
  * button doubles as the status display; ink stays in the tablet/web reader. */
@@ -648,6 +695,12 @@ function buildSidebar(d) {
     });
     side.appendChild(kb);
   }
+  if (d.meta.kind === 'notebook' && d.id === 'writings') {
+    publishControls(d, (ico, label, on) => {
+      const b = mk(ico, label, '', on);
+      return { btn: b, set: (i, l) => { b.innerHTML = '<span class="ico">' + i + '</span><span>' + esc(l) + '</span>'; } };
+    }).forEach(b => side.appendChild(b));
+  }
   const ai = mk('✦', 'AI ink', '', null, state.aiBlue);
   ai.onclick = () => { state.aiBlue = !state.aiBlue; ai.classList.toggle('active', state.aiBlue); redrawOpenPages(); };
   side.appendChild(ai);
@@ -681,6 +734,14 @@ async function openDoc(d) {
     kb.textContent = '⇪  Send to Kindle';
     kb.onclick = () => kindleModal(true, d, (ico, label) => { kb.textContent = ico + '  ' + label; });
     bar.appendChild(kb);
+    $view.appendChild(bar);
+  } else if (d.meta.kind === 'notebook' && d.id === 'writings') {
+    const bar = document.createElement('div'); bar.className = 'docbar';
+    publishControls(d, (ico, label, on) => {
+      const b = document.createElement('button'); b.className = 'addbtn';
+      b.textContent = ico + '  ' + label; b.onclick = on;
+      return { btn: b, set: (i, l) => { b.textContent = i + '  ' + l; } };
+    }).forEach(b => bar.appendChild(b));
     $view.appendChild(bar);
   }
   const wrap = document.createElement('div'); wrap.className = 'pages';

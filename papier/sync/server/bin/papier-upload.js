@@ -29,6 +29,13 @@
 //                           address via papier-kindle.sh (EPUB from a
 //                           compose doc's markdown, else source/derived PDF).
 //   GET  /kindle-status?job=  status of a kindle send.
+//   POST /publish  {id, remove?}  publish a notebook to swair.dev: papier-publish.sh
+//                           diffs its pages against the last publish, a pi
+//                           agent merges the new ink into the post's markdown,
+//                           and the swair.dev home page + /posts/ are rebuilt.
+//                           remove:true unpublishes.
+//   GET  /publish-status?job=&trace=1  phase/outcome/url of a publish job.
+//   GET  /publish-info?id=  whether a notebook is currently published (+url).
 //
 // Inbound is a SEPARATE dir from the mirror on purpose: the tablet's outbound
 // rsync uses --delete, so writing straight into the mirror would be wiped on
@@ -55,15 +62,24 @@ const SOURCES = path.join(BACKUP, 'papier-sources');   // retained PDFs: <id>.pd
 const PREVIEWS = path.join(BACKUP, 'papier-previews'); // cached raw pages: <id>/<n>.png
 const COVERS = path.join(BACKUP, 'papier-covers');     // small web covers, keyed by source+doc version
 const COMPOSE = path.join(BACKUP, 'papier-compose');   // compose job workdirs
+const PUBLISH = path.join(BACKUP, 'papier-publish');   // publish: site/ (git repo of posts), out/, jobs/
+const PUBLISH_JOBS = path.join(PUBLISH, 'jobs');
 const DERIVED = path.join(BACKUP, 'papier-derived-pdf'); // PDFs built from bundles (no retained source)
 const RENDER = process.env.PAPIER_RENDER || '/home/exedev/bin/papier-render.sh';
 const MAKE_PDF_PY = '/home/exedev/bin/papier-make-pdf.py';
 const COMPOSE_SH = process.env.PAPIER_COMPOSE || '/home/exedev/bin/papier-compose.sh';
+const PUBLISH_SH = process.env.PAPIER_PUBLISH || '/home/exedev/bin/papier-publish.sh';
+const PUBLISH_SITE_URL = (process.env.PAPIER_PUBLISH_URL || 'https://swair.dev').replace(/\/+$/, '');
+const PUBLISH_DOC_ID = safeId(process.env.PAPIER_PUBLISH_DOC_ID || 'writings') || 'writings';
+const PUBLISH_AUTO = process.env.PAPIER_AUTO_PUBLISH !== '0';
+const PUBLISH_IDLE_MS = Math.max(10, Number(process.env.PAPIER_PUBLISH_IDLE_MS) || 120000);
+const PUBLISH_SCAN_MS = Math.max(10, Number(process.env.PAPIER_PUBLISH_SCAN_MS) || 15000);
 const KINDLE_SH = process.env.PAPIER_KINDLE || '/home/exedev/bin/papier-kindle.sh';
 const PREVIEW_PY = '/home/exedev/bin/papier-preview-page.py';
 const PY = '/home/exedev/papier-venv/bin/python3';
 const PORT = Number(process.env.PAPIER_PORT || 8093);
-[INCOMING, DOCS, DELETIONS, TRASH, SOURCES, PREVIEWS, COVERS, COMPOSE, DERIVED].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+[INCOMING, DOCS, DELETIONS, TRASH, SOURCES, PREVIEWS, COVERS, COMPOSE, DERIVED, PUBLISH_JOBS]
+  .forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
 const piSessions = createPiSessions({ mirrorDocs: MIRROR, inboundDocs: DOCS });
 
@@ -997,6 +1013,189 @@ function handleKindleStatus(res, id) {
   json(res, 200, job);
 }
 
+/* ---- publish to swair.dev ---------------------------------------------- */
+// POST /publish {id, remove?} -> {ok, job}. Same shape as compose: a job dir
+// under papier-publish/jobs/<job>/, a per-job COPY of papier-publish.sh,
+// status.txt polled while it runs, result.json so status survives restarts.
+// The script writes outcome.txt (published|unchanged|removed) + url.txt.
+const publishJobs = new Map();
+const PUBLISH_TIMEOUT = 20 * 60000;
+
+function publishDir(id) { return path.join(PUBLISH_JOBS, id); }
+function readPublishFile(id, name) {
+  try { return fs.readFileSync(path.join(publishDir(id), name), 'utf8').trim().slice(0, 400); } catch (_) { return null; }
+}
+function persistPublishResult(id, job) {
+  try { fs.writeFileSync(path.join(publishDir(id), 'result.json'), JSON.stringify(job)); } catch (_) {}
+}
+function notebookMeta(id) {
+  for (const base of [DOCS, MIRROR]) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(base, id, 'meta.json'), 'utf8'));
+      if (meta && meta.kind === 'notebook') return meta;
+      if (meta) return null;
+    } catch (_) {}
+  }
+  return null;
+}
+function publishInfo(id) {
+  const postsDir = path.join(PUBLISH, 'site', 'posts');
+  const posts = [];
+  try {
+    for (const slug of fs.readdirSync(postsDir)) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(path.join(postsDir, slug, 'meta.json'), 'utf8'));
+        if (meta.source === id || (slug === id && !meta.source)) posts.push(meta);
+      } catch (_) {}
+    }
+  } catch (_) {}
+  if (!posts.length) return { ok: true, id, published: false, url: null };
+  const updated = posts.map((p) => p.updated || p.published || '').sort().pop() || null;
+  return { ok: true, id, published: true, url: `${PUBLISH_SITE_URL}/`, title: `${posts.length} post${posts.length === 1 ? '' : 's'}`, updated };
+}
+
+// Watch only the fixed Writings bundle. A quiet period prevents half-written
+// thoughts from going public while the tablet is sending successive edits.
+function publishSourceFingerprint(id) {
+  const parts = [];
+  for (const [label, base] of [['mirror', MIRROR], ['inbound', DOCS]]) {
+    const dir = path.join(base, id);
+    for (const name of ['meta.json', 'state.json']) {
+      try {
+        const st = fs.statSync(path.join(dir, name));
+        parts.push(`${label}/${name}:${st.size}:${st.mtimeMs}`);
+      } catch (_) {}
+    }
+    try {
+      for (const name of fs.readdirSync(path.join(dir, 'ink')).filter((n) => n.endsWith('.json')).sort()) {
+        const st = fs.statSync(path.join(dir, 'ink', name));
+        parts.push(`${label}/ink/${name}:${st.size}:${st.mtimeMs}`);
+      }
+    } catch (_) {}
+  }
+  return parts.some((p) => p.includes('/meta.json:'))
+    ? crypto.createHash('sha256').update(parts.join('\n')).digest('hex') : null;
+}
+
+let autoPublishFingerprint = null;
+let autoPublishTimer = null;
+async function triggerAutoPublish() {
+  autoPublishTimer = null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${PORT}/publish`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: PUBLISH_DOC_ID }),
+    });
+    if (response.status === 409) {
+      autoPublishTimer = setTimeout(triggerAutoPublish, 30000);
+      return;
+    }
+    if (!response.ok) console.error('auto-publish request failed:', response.status, await response.text());
+  } catch (err) {
+    console.error('auto-publish request failed:', String(err.message || err));
+  }
+}
+function scanAutoPublish() {
+  const next = publishSourceFingerprint(PUBLISH_DOC_ID);
+  if (!next) return;
+  if (next === autoPublishFingerprint) return;
+  autoPublishFingerprint = next;
+  if (autoPublishTimer) clearTimeout(autoPublishTimer);
+  autoPublishTimer = setTimeout(triggerAutoPublish, PUBLISH_IDLE_MS);
+  console.log(`auto-publish scheduled for ${PUBLISH_DOC_ID} after ${PUBLISH_IDLE_MS}ms idle`);
+}
+
+function handlePublish(req, res) {
+  readBody(req, res, (buf) => {
+    let body; try { body = JSON.parse(buf.toString('utf8')); } catch (_) { return json(res, 400, { ok: false, error: 'bad json' }); }
+    const id = safeId(body && body.id);
+    if (!id) return json(res, 400, { ok: false, error: 'bad id' });
+    if (id !== PUBLISH_DOC_ID) return json(res, 404, { ok: false, error: `only the ${PUBLISH_DOC_ID} notebook can be published` });
+    const remove = !!(body && body.remove);
+    if (!remove && !notebookMeta(id)) return json(res, 404, { ok: false, error: `the ${PUBLISH_DOC_ID} notebook does not exist yet` });
+    for (const j of publishJobs.values()) {
+      if (j.doc === id && j.status === 'running') return json(res, 409, { ok: false, error: 'a publish of this notebook is already running', job: j.id });
+    }
+
+    const jobId = crypto.randomBytes(8).toString('hex');
+    const dir = publishDir(jobId);
+    fs.mkdirSync(path.join(dir, 'work'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'doc.txt'), id + '\n');
+    fs.writeFileSync(path.join(dir, 'mode.txt'), (remove ? 'remove' : 'publish') + '\n');
+    fs.writeFileSync(path.join(dir, 'status.txt'), 'starting');
+    fs.writeFileSync(path.join(dir, 'trace.log'), '[publish] starting\n');
+    const job = { id: jobId, ok: true, doc: id, remove, status: 'running', phase: 'starting', updated: Date.now() };
+    publishJobs.set(jobId, job);
+    json(res, 202, { ok: true, job: jobId });
+
+    const script = path.join(dir, 'publish.sh');
+    try { fs.copyFileSync(PUBLISH_SH, script); fs.chmodSync(script, 0o755); } catch (err) {
+      Object.assign(job, { status: 'failed', error: 'publish script unavailable: ' + err.message, updated: Date.now() });
+      persistPublishResult(jobId, job); return;
+    }
+    const child = spawn(script, [dir], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let tail = '';
+    const recordTrace = (chunk) => {
+      const text = chunk.toString();
+      tail = (tail + text).slice(-8000);
+      try { fs.appendFileSync(path.join(dir, 'trace.log'), text); } catch (_) {}
+    };
+    child.stdout.on('data', recordTrace);
+    child.stderr.on('data', recordTrace);
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, PUBLISH_TIMEOUT);
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      Object.assign(job, { status: 'failed', error: String(err.message || err), updated: Date.now() });
+      persistPublishResult(jobId, job);
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (job.status === 'failed') return;
+      if (code !== 0) {
+        const last = (tail.trim().split('\n').pop() || '').replace(/^papier-publish: /, '');
+        const reason = signal === 'SIGKILL' ? 'timed out' : (last || `exited ${code == null ? signal : code}`);
+        console.error('publish failed:', id, reason);
+        Object.assign(job, { status: 'failed', error: reason.slice(0, 400), updated: Date.now() });
+        persistPublishResult(jobId, job); return;
+      }
+      const outcome = readPublishFile(jobId, 'outcome.txt') || 'published';
+      Object.assign(job, {
+        status: 'done', outcome, url: readPublishFile(jobId, 'url.txt'), title: readPublishFile(jobId, 'title.txt'),
+        phase: 'done', updated: Date.now(),
+      });
+      console.log('publish', id, outcome, job.url);
+      persistPublishResult(jobId, job);
+    });
+  });
+}
+
+function handlePublishStatus(res, id, includeTrace) {
+  if (!/^[a-f0-9]{16}$/.test(id || '')) return json(res, 400, { ok: false, error: 'bad job id' });
+  let job = publishJobs.get(id);
+  if (!job) {
+    try { job = JSON.parse(fs.readFileSync(path.join(publishDir(id), 'result.json'), 'utf8')); } catch (_) {}
+    if (!job) {
+      if (fs.existsSync(publishDir(id))) return json(res, 200, { ok: true, id, status: 'failed', error: 'service restarted during publish' });
+      return json(res, 404, { ok: false, error: 'unknown publish job' });
+    }
+  }
+  const phase = job.status === 'running' ? (readPublishFile(id, 'status.txt') || job.phase) : job.phase;
+  const detail = { ...job, phase };
+  if (includeTrace) {
+    res.setHeader('Cache-Control', 'private, no-store');
+    detail.trace = readTraceFile(path.join(publishDir(id), 'trace.log'));
+  }
+  json(res, 200, detail);
+}
+
+function handlePublishInfo(res, id) {
+  id = safeId(id);
+  if (!id) return json(res, 400, { ok: false, error: 'bad id' });
+  if (id !== PUBLISH_DOC_ID) return json(res, 404, { ok: false, error: `only the ${PUBLISH_DOC_ID} notebook can be published` });
+  res.setHeader('Cache-Control', 'no-store');
+  json(res, 200, publishInfo(id));
+}
+
 /* ---- router ----------------------------------------------------------- */
 http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
@@ -1014,6 +1213,9 @@ http.createServer((req, res) => {
   if ((req.method === 'GET' || req.method === 'HEAD') && p === '/compose-download') return handleComposeDownload(req, res, u.searchParams.get('job'), u.searchParams.get('format'));
   if (req.method === 'POST' && p === '/kindle') return handleKindle(req, res);
   if (req.method === 'GET' && p === '/kindle-status') return handleKindleStatus(res, u.searchParams.get('job'));
+  if (req.method === 'POST' && p === '/publish') return handlePublish(req, res);
+  if (req.method === 'GET' && p === '/publish-status') return handlePublishStatus(res, u.searchParams.get('job'), u.searchParams.get('trace') === '1');
+  if (req.method === 'GET' && p === '/publish-info') return handlePublishInfo(res, u.searchParams.get('id'));
   if (piSessions.handle(req, res, p, u)) return;
   if (req.method === 'GET' && p === '/ink') return handleInkRead(res, u.searchParams.get('id'), u.searchParams.get('file'));
   if (req.method === 'POST' && p === '/ink') return handleInkWrite(req, res, u.searchParams.get('id'), u.searchParams.get('file'));
@@ -1029,4 +1231,10 @@ http.createServer((req, res) => {
   if (req.method === 'POST' && p === '/render-job') return handleRenderJob(req, res);
   if (req.method === 'GET' && p === '/render-status') return handleRenderStatus(res, u.searchParams.get('job'));
   res.writeHead(404); res.end('not found');
-}).listen(PORT, '127.0.0.1', () => console.log(`papier upload/editor service on 127.0.0.1:${PORT}`));
+}).listen(PORT, '127.0.0.1', () => {
+  console.log(`papier upload/editor service on 127.0.0.1:${PORT}`);
+  if (PUBLISH_AUTO) {
+    scanAutoPublish();
+    setInterval(scanAutoPublish, PUBLISH_SCAN_MS).unref();
+  }
+});
