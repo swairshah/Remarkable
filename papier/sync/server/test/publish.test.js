@@ -11,7 +11,10 @@ const test = require('node:test');
 const renderScript = path.resolve(__dirname, '../bin/papier-publish-render.py');
 const siteScript = path.resolve(__dirname, '../bin/papier-publish-site.py');
 const publishScript = path.resolve(__dirname, '../bin/papier-publish.sh');
+const saveScript = path.resolve(__dirname, '../bin/papier-publish-save.sh');
 const uploadService = path.resolve(__dirname, '../bin/papier-upload.js');
+const websiteUi = path.resolve(__dirname, '../web/website/index.html');
+const sharedNav = path.resolve(__dirname, '../../../../sync/server/web/nav.js');
 const PY = process.env.PAPIER_PY || 'python3';
 const hasPillow = () => spawnSync(PY, ['-c', 'import PIL'], { encoding: 'utf8' }).status === 0;
 const hasPandoc = () => spawnSync('pandoc', ['--version']).status === 0;
@@ -123,6 +126,72 @@ test('site builder makes swair.dev root the post index and copies only chosen as
   assert.ok(fs.existsSync(path.join(out, 'posts', 'thoughts-and-notes', 'assets', 'flow.svg')));
   assert.ok(fs.existsSync(path.join(out, 'writing.css')));
   assert.ok(!fs.existsSync(path.join(out, 'posts', 'stale')));
+});
+
+test('website save script publishes the exact editor revision and preserves post metadata', (t) => {
+  if (!hasPandoc()) return t.skip('pandoc is not installed');
+  if (!hasGit()) return t.skip('git is not installed');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'papier-website-save-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const backup = path.join(root, 'backup');
+  const repo = path.join(backup, 'papier-publish', 'site');
+  const postDir = path.join(repo, 'posts', 'field-notes');
+  fs.mkdirSync(path.join(postDir, 'assets'), { recursive: true });
+  fs.writeFileSync(path.join(postDir, 'post.md'), '---\ntitle: "Field Notes"\ndescription: kept\n---\n\nOriginal body.\n');
+  writeJson(path.join(postDir, 'meta.json'), {
+    id: 'field-notes', source: 'writings', title: 'Field Notes',
+    published: '2026-09-01T10:00:00Z', updated: '2026-09-02T10:00:00Z', pages: [1, 3],
+  });
+  fs.writeFileSync(path.join(postDir, 'assets', 'diagram.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h10"/></svg>');
+  assert.equal(spawnSync('git', ['init', '-q', repo]).status, 0);
+  assert.equal(spawnSync('git', ['-C', repo, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'add', '-A']).status, 0);
+  assert.equal(spawnSync('git', ['-C', repo, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'init']).status, 0);
+
+  const env = {
+    ...process.env, HOME: root, PAPIER_BACKUP: backup, PAPIER_PY: PY,
+    PUBLISH_NO_PUSH: '1', PUBLISH_SITE_URL: 'https://example.test',
+  };
+  const run = (name, markdown) => {
+    const job = path.join(root, name); fs.mkdirSync(job, { recursive: true });
+    fs.writeFileSync(path.join(job, 'slug.txt'), 'field-notes\n');
+    fs.writeFileSync(path.join(job, 'post.md'), markdown);
+    const result = spawnSync('/bin/bash', [saveScript, job], { encoding: 'utf8', env });
+    return { job, ...result };
+  };
+  const edited = '---\ntitle: "Better Field Notes"\ndescription: kept\n---\n\nThe exact **edited** body.\n';
+  const first = run('job1', edited);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(fs.readFileSync(path.join(first.job, 'outcome.txt'), 'utf8'), 'published');
+  assert.equal(fs.readFileSync(path.join(first.job, 'url.txt'), 'utf8'), 'https://example.test/posts/field-notes/');
+  assert.equal(fs.readFileSync(path.join(postDir, 'post.md'), 'utf8'), edited);
+  assert.ok(fs.existsSync(path.join(postDir, 'assets', 'diagram.svg')));
+  const meta = JSON.parse(fs.readFileSync(path.join(postDir, 'meta.json'), 'utf8'));
+  assert.equal(meta.title, 'Better Field Notes');
+  assert.equal(meta.description, undefined);
+  assert.equal(meta.source, 'writings');
+  assert.equal(meta.published, '2026-09-01T10:00:00Z');
+  assert.deepEqual(meta.pages, [1, 3]);
+  assert.notEqual(meta.updated, '2026-09-02T10:00:00Z');
+  assert.match(fs.readFileSync(path.join(backup, 'papier-publish', 'out', 'posts', 'field-notes', 'index.html'), 'utf8'), /The exact <strong>edited<\/strong> body/);
+  assert.equal(Number(spawnSync('git', ['-C', repo, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).stdout.trim()), 2);
+
+  const second = run('job2', edited);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(fs.readFileSync(path.join(second.job, 'outcome.txt'), 'utf8'), 'unchanged');
+  assert.equal(Number(spawnSync('git', ['-C', repo, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).stdout.trim()), 2);
+});
+
+test('website editor is linked in the shared header and supports preview plus save', () => {
+  const ui = fs.readFileSync(websiteUi, 'utf8');
+  const nav = fs.readFileSync(sharedNav, 'utf8');
+  assert.match(nav, /\['website', '\/website\/'\]/);
+  assert.match(ui, /id="title"/);
+  assert.match(ui, /id="body"/);
+  assert.match(ui, /id="preview"/);
+  assert.match(ui, /website-preview/);
+  assert.match(ui, /website-save/);
+  assert.match(ui, /X-Papier-Editor/);
+  assert.match(ui, /metaKey \|\| e\.ctrlKey/);
 });
 
 test('publish script lets the agent create/update/delete posts and preserves notebook snapshots', (t) => {
@@ -329,6 +398,90 @@ fs.writeFileSync(path.join(job, 'status.txt'), 'done');
   assert.equal(info.title, '1 post');
   const removal = await submit({ id: 'writings', remove: true });
   assert.equal((await settle(removal.json.job)).outcome, 'removed');
+});
+
+test('website API previews Markdown, rejects stale edits, and publishes a save', async (t) => {
+  if (!hasPandoc()) return t.skip('pandoc is not installed');
+  if (!hasGit()) return t.skip('git is not installed');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'papier-website-api-'));
+  const backup = path.join(root, 'backup');
+  const repo = path.join(backup, 'papier-publish', 'site');
+  const postDir = path.join(repo, 'posts', 'first-topic');
+  const port = await freePort();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(postDir, { recursive: true });
+  fs.writeFileSync(path.join(postDir, 'post.md'), '---\ntitle: "First Topic"\nsummary: preserve me\n---\n\nOriginal.\n');
+  writeJson(path.join(postDir, 'meta.json'), {
+    id: 'first-topic', source: 'writings', title: 'First Topic',
+    published: '2026-09-01T00:00:00Z', updated: '2026-09-02T00:00:00Z', pages: [1],
+  });
+  assert.equal(spawnSync('git', ['init', '-q', repo]).status, 0);
+  assert.equal(spawnSync('git', ['-C', repo, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'add', '-A']).status, 0);
+  assert.equal(spawnSync('git', ['-C', repo, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'init']).status, 0);
+
+  const service = spawn(process.execPath, [uploadService], {
+    env: {
+      ...process.env, HOME: root, PAPIER_BACKUP: backup, PAPIER_PORT: String(port),
+      PAPIER_AUTO_PUBLISH: '0', PAPIER_PUBLISH_SAVE: saveScript,
+      PAPIER_PUBLISH_URL: 'https://example.test', PUBLISH_SITE_URL: 'https://example.test',
+      PUBLISH_SITE: siteScript, PUBLISH_NO_PUSH: '1', PAPIER_PY: PY,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let serviceErr = '';
+  service.stderr.on('data', (chunk) => { serviceErr += chunk.toString(); });
+  t.after(() => service.kill('SIGTERM'));
+  await waitForService(service, port, () => serviceErr);
+  const api = `http://127.0.0.1:${port}`;
+  const headers = { 'Content-Type': 'application/json', 'X-Papier-Editor': '1' };
+
+  const list = await fetch(`${api}/website-posts`).then((r) => r.json());
+  assert.deepEqual(list.posts.map((p) => [p.slug, p.title]), [['first-topic', 'First Topic']]);
+  const opened = await fetch(`${api}/website-post?slug=first-topic`).then((r) => r.json());
+  assert.equal(opened.body, 'Original.\n');
+  assert.match(opened.revision, /^[a-f0-9]{64}$/);
+  assert.equal(opened.url, 'https://example.test/posts/first-topic/');
+
+  const forbidden = await fetch(`${api}/website-preview`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: '**hello**' }),
+  });
+  assert.equal(forbidden.status, 403);
+  const preview = await fetch(`${api}/website-preview`, {
+    method: 'POST', headers, body: JSON.stringify({ body: '**hello**' }),
+  }).then((r) => r.json());
+  assert.match(preview.html, /<strong>hello<\/strong>/);
+
+  const startedResponse = await fetch(`${api}/website-save`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ slug: 'first-topic', title: 'Edited Topic', body: 'Saved from the **website**.\n', revision: opened.revision }),
+  });
+  assert.equal(startedResponse.status, 202);
+  const started = await startedResponse.json();
+  let done;
+  for (let i = 0; i < 200; i++) {
+    done = await fetch(`${api}/website-save-status?job=${started.job}`).then((r) => r.json());
+    if (done.status !== 'running') break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(done.status, 'done', serviceErr + '\n' + JSON.stringify(done));
+  assert.equal(done.outcome, 'published');
+  assert.equal(done.url, 'https://example.test/posts/first-topic/');
+  assert.match(done.revision, /^[a-f0-9]{64}$/);
+  assert.equal(done.title, 'Edited Topic');
+  assert.ok(done.postUpdated);
+
+  const saved = await fetch(`${api}/website-post?slug=first-topic`).then((r) => r.json());
+  assert.equal(saved.title, 'Edited Topic');
+  assert.equal(saved.body, 'Saved from the **website**.\n');
+  assert.match(fs.readFileSync(path.join(postDir, 'post.md'), 'utf8'), /summary: preserve me/);
+  assert.match(fs.readFileSync(path.join(backup, 'papier-publish', 'out', 'posts', 'first-topic', 'index.html'), 'utf8'), /Saved from the <strong>website<\/strong>/);
+
+  const stale = await fetch(`${api}/website-save`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ slug: 'first-topic', title: 'Stale', body: 'No.', revision: opened.revision }),
+  });
+  assert.equal(stale.status, 409);
+  assert.match((await stale.json()).error, /changed since you opened/);
 });
 
 test('Writings changes auto-publish after idle; other notebooks do not', async (t) => {

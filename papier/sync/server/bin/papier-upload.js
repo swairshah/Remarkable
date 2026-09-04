@@ -36,6 +36,10 @@
 //                           remove:true unpublishes.
 //   GET  /publish-status?job=&trace=1  phase/outcome/url of a publish job.
 //   GET  /publish-info?id=  whether a notebook is currently published (+url).
+//   GET  /website-posts and /website-post?slug=  list/read published posts.
+//   POST /website-preview {body}  render an unsaved Markdown preview.
+//   POST /website-save {slug,title,body,revision}  save and publish an edit.
+//   GET  /website-save-status?job=  phase/outcome/url of an editor save.
 //
 // Inbound is a SEPARATE dir from the mirror on purpose: the tablet's outbound
 // rsync uses --delete, so writing straight into the mirror would be wiped on
@@ -64,11 +68,13 @@ const COVERS = path.join(BACKUP, 'papier-covers');     // small web covers, keye
 const COMPOSE = path.join(BACKUP, 'papier-compose');   // compose job workdirs
 const PUBLISH = path.join(BACKUP, 'papier-publish');   // publish: site/ (git repo of posts), out/, jobs/
 const PUBLISH_JOBS = path.join(PUBLISH, 'jobs');
+const WEBSITE_JOBS = path.join(PUBLISH, 'website-jobs');
 const DERIVED = path.join(BACKUP, 'papier-derived-pdf'); // PDFs built from bundles (no retained source)
 const RENDER = process.env.PAPIER_RENDER || '/home/exedev/bin/papier-render.sh';
 const MAKE_PDF_PY = '/home/exedev/bin/papier-make-pdf.py';
 const COMPOSE_SH = process.env.PAPIER_COMPOSE || '/home/exedev/bin/papier-compose.sh';
 const PUBLISH_SH = process.env.PAPIER_PUBLISH || '/home/exedev/bin/papier-publish.sh';
+const PUBLISH_SAVE_SH = process.env.PAPIER_PUBLISH_SAVE || '/home/exedev/bin/papier-publish-save.sh';
 const PUBLISH_SITE_URL = (process.env.PAPIER_PUBLISH_URL || 'https://swair.dev').replace(/\/+$/, '');
 const PUBLISH_DOC_ID = safeId(process.env.PAPIER_PUBLISH_DOC_ID || 'writings') || 'writings';
 const PUBLISH_AUTO = process.env.PAPIER_AUTO_PUBLISH !== '0';
@@ -78,7 +84,7 @@ const KINDLE_SH = process.env.PAPIER_KINDLE || '/home/exedev/bin/papier-kindle.s
 const PREVIEW_PY = '/home/exedev/bin/papier-preview-page.py';
 const PY = '/home/exedev/papier-venv/bin/python3';
 const PORT = Number(process.env.PAPIER_PORT || 8093);
-[INCOMING, DOCS, DELETIONS, TRASH, SOURCES, PREVIEWS, COVERS, COMPOSE, DERIVED, PUBLISH_JOBS]
+[INCOMING, DOCS, DELETIONS, TRASH, SOURCES, PREVIEWS, COVERS, COMPOSE, DERIVED, PUBLISH_JOBS, WEBSITE_JOBS]
   .forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
 const piSessions = createPiSessions({ mirrorDocs: MIRROR, inboundDocs: DOCS });
@@ -1019,7 +1025,9 @@ function handleKindleStatus(res, id) {
 // status.txt polled while it runs, result.json so status survives restarts.
 // The script writes outcome.txt (published|unchanged|removed) + url.txt.
 const publishJobs = new Map();
+const websiteSaveJobs = new Map();
 const PUBLISH_TIMEOUT = 20 * 60000;
+const WEBSITE_SAVE_TIMEOUT = 5 * 60000;
 
 function publishDir(id) { return path.join(PUBLISH_JOBS, id); }
 function readPublishFile(id, name) {
@@ -1116,6 +1124,9 @@ function handlePublish(req, res) {
     for (const j of publishJobs.values()) {
       if (j.doc === id && j.status === 'running') return json(res, 409, { ok: false, error: 'a publish of this notebook is already running', job: j.id });
     }
+    for (const j of websiteSaveJobs.values()) {
+      if (j.status === 'running') return json(res, 409, { ok: false, error: 'a website edit is being published', job: j.id });
+    }
 
     const jobId = crypto.randomBytes(8).toString('hex');
     const dir = publishDir(jobId);
@@ -1196,6 +1207,191 @@ function handlePublishInfo(res, id) {
   json(res, 200, publishInfo(id));
 }
 
+/* ---- website editor --------------------------------------------------- */
+// /website/ is behind exe.dev login at the edge. Mutations also require a
+// non-simple request header so another site cannot submit edits via CSRF.
+const POST_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$/;
+function editorRequest(req) { return req.headers['x-papier-editor'] === '1'; }
+function websiteJobDir(id) { return path.join(WEBSITE_JOBS, id); }
+function postRevision(text) { return crypto.createHash('sha256').update(text).digest('hex'); }
+function decodeTitle(raw) {
+  raw = String(raw || '').trim();
+  if (raw.startsWith('"')) { try { return JSON.parse(raw); } catch (_) {} }
+  if (raw.startsWith("'") && raw.endsWith("'")) return raw.slice(1, -1).replace(/''/g, "'");
+  return raw.replace(/^['"]|['"]$/g, '');
+}
+function readWebsitePost(slug) {
+  if (!POST_SLUG.test(slug || '')) return null;
+  const dir = path.join(PUBLISH, 'site', 'posts', slug);
+  let text, meta = {};
+  try { text = fs.readFileSync(path.join(dir, 'post.md'), 'utf8'); } catch (_) { return null; }
+  try { meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8')); } catch (_) {}
+  const front = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!front) return null;
+  const titleLine = front[1].match(/^title:\s*(.*?)\s*$/m);
+  const title = titleLine ? decodeTitle(titleLine[1]) : (meta.title || slug);
+  return {
+    ok: true, slug, title, body: text.slice(front[0].length).replace(/^\r?\n/, ''), revision: postRevision(text),
+    published: meta.published || null, updated: meta.updated || null,
+    url: `${PUBLISH_SITE_URL}/posts/${encodeURIComponent(slug)}/`,
+  };
+}
+function websitePostList() {
+  const root = path.join(PUBLISH, 'site', 'posts');
+  let slugs = [];
+  try { slugs = fs.readdirSync(root); } catch (_) {}
+  return slugs.map(readWebsitePost).filter(Boolean)
+    .map(({ slug, title, published, updated, url }) => ({ slug, title, published, updated, url }))
+    .sort((a, b) => String(b.updated || b.published || '').localeCompare(String(a.updated || a.published || '')) || a.slug.localeCompare(b.slug));
+}
+function websiteMarkdown(current, title, body) {
+  const front = current.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!front) throw new Error('post has invalid frontmatter');
+  let metadata = front[1];
+  const encodedTitle = JSON.stringify(title);
+  if (/^title:.*$/m.test(metadata)) metadata = metadata.replace(/^title:.*$/m, `title: ${encodedTitle}`);
+  else metadata = `title: ${encodedTitle}\n${metadata}`;
+  body = body.replace(/\r\n?/g, '\n');
+  return `---\n${metadata}\n---\n${body.startsWith('\n') ? '' : '\n'}${body}`;
+}
+function persistWebsiteResult(id, job) {
+  try { fs.writeFileSync(path.join(websiteJobDir(id), 'result.json'), JSON.stringify(job)); } catch (_) {}
+}
+function handleWebsitePosts(res) {
+  res.setHeader('Cache-Control', 'no-store');
+  json(res, 200, { ok: true, posts: websitePostList() });
+}
+function handleWebsitePost(res, slug) {
+  const post = readWebsitePost(slug);
+  if (!post) return json(res, 404, { ok: false, error: 'unknown post' });
+  res.setHeader('Cache-Control', 'no-store');
+  json(res, 200, post);
+}
+function readEditorBody(req, res, cb) {
+  if (!editorRequest(req)) return json(res, 403, { ok: false, error: 'editor request required' });
+  readBody(req, res, (buf) => {
+    if (buf.length > 1000000) return json(res, 413, { ok: false, error: 'editor request is too large' });
+    let body; try { body = JSON.parse(buf.toString('utf8')); }
+    catch (_) { return json(res, 400, { ok: false, error: 'bad json' }); }
+    cb(body || {});
+  });
+}
+function handleWebsitePreview(req, res) {
+  readEditorBody(req, res, (body) => {
+    const markdown = typeof body.body === 'string' ? body.body : null;
+    if (markdown == null) return json(res, 400, { ok: false, error: 'body is required' });
+    if (Buffer.byteLength(markdown) > 750000) return json(res, 413, { ok: false, error: 'post is too large' });
+    const args = ['--from', 'markdown+smart+tex_math_dollars+tex_math_single_backslash+tex_math_double_backslash',
+      '--to', 'html5', '--mathml', '--wrap=none'];
+    const child = spawn('pandoc', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '', settled = false;
+    const finish = (code, message) => {
+      if (settled) return; settled = true;
+      json(res, code, code === 200 ? { ok: true, html: stdout } : { ok: false, error: message });
+    };
+    const timer = setTimeout(() => { child.kill('SIGKILL'); finish(504, 'preview timed out'); }, 15000);
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+      if (stdout.length > 3000000) { child.kill('SIGKILL'); finish(413, 'preview is too large'); }
+    });
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-1000); });
+    child.on('error', (err) => { clearTimeout(timer); finish(500, String(err.message || err)); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (!settled) finish(code === 0 ? 200 : 400, stderr.trim() || 'could not render Markdown');
+    });
+    child.stdin.end(markdown);
+  });
+}
+function handleWebsiteSave(req, res) {
+  readEditorBody(req, res, (body) => {
+    const slug = typeof body.slug === 'string' ? body.slug : '';
+    const title = typeof body.title === 'string' ? body.title.trim() : '';
+    const markdownBody = typeof body.body === 'string' ? body.body : null;
+    const revision = typeof body.revision === 'string' ? body.revision : '';
+    if (!POST_SLUG.test(slug)) return json(res, 400, { ok: false, error: 'bad post slug' });
+    if (!title || title.length > 200 || /[\r\n]/.test(title)) return json(res, 400, { ok: false, error: 'title must be 1–200 characters' });
+    if (markdownBody == null) return json(res, 400, { ok: false, error: 'body is required' });
+    if (Buffer.byteLength(markdownBody) > 750000) return json(res, 413, { ok: false, error: 'post is too large' });
+    const current = readWebsitePost(slug);
+    if (!current) return json(res, 404, { ok: false, error: 'unknown post' });
+    if (!/^[a-f0-9]{64}$/.test(revision) || revision !== current.revision) {
+      return json(res, 409, { ok: false, error: 'This post changed since you opened it. Reload it before saving.' });
+    }
+    for (const job of publishJobs.values()) {
+      if (job.status === 'running') return json(res, 409, { ok: false, error: 'The notebook is publishing. Try again when it finishes.' });
+    }
+    for (const job of websiteSaveJobs.values()) {
+      if (job.status === 'running') return json(res, 409, { ok: false, error: 'Another website edit is being published.' });
+    }
+
+    let next;
+    try {
+      const file = fs.readFileSync(path.join(PUBLISH, 'site', 'posts', slug, 'post.md'), 'utf8');
+      next = websiteMarkdown(file, title, markdownBody);
+    } catch (err) { return json(res, 500, { ok: false, error: String(err.message || err) }); }
+
+    const id = crypto.randomBytes(8).toString('hex');
+    const dir = websiteJobDir(id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'slug.txt'), slug + '\n');
+    fs.writeFileSync(path.join(dir, 'post.md'), next);
+    fs.writeFileSync(path.join(dir, 'status.txt'), 'starting');
+    const job = { id, ok: true, slug, status: 'running', phase: 'starting', updated: Date.now() };
+    websiteSaveJobs.set(id, job);
+    json(res, 202, { ok: true, job: id });
+
+    const script = path.join(dir, 'save.sh');
+    try { fs.copyFileSync(PUBLISH_SAVE_SH, script); fs.chmodSync(script, 0o755); }
+    catch (err) {
+      Object.assign(job, { status: 'failed', error: 'website save script unavailable: ' + err.message, updated: Date.now() });
+      persistWebsiteResult(id, job); return;
+    }
+    const child = spawn(script, [dir], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let tail = '';
+    child.stdout.on('data', (chunk) => { tail = (tail + chunk.toString()).slice(-4000); });
+    child.stderr.on('data', (chunk) => { tail = (tail + chunk.toString()).slice(-4000); });
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, WEBSITE_SAVE_TIMEOUT);
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      Object.assign(job, { status: 'failed', error: String(err.message || err), updated: Date.now() });
+      persistWebsiteResult(id, job);
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (job.status === 'failed') return;
+      if (code !== 0) {
+        const last = (tail.trim().split('\n').pop() || '').replace(/^papier-website: /, '');
+        const reason = signal === 'SIGKILL' ? 'timed out' : (last || `exited ${code == null ? signal : code}`);
+        Object.assign(job, { status: 'failed', error: reason.slice(0, 400), updated: Date.now() });
+      } else {
+        const saved = readWebsitePost(slug);
+        let outcome = 'published', url = saved && saved.url;
+        try { outcome = fs.readFileSync(path.join(dir, 'outcome.txt'), 'utf8').trim() || outcome; } catch (_) {}
+        try { url = fs.readFileSync(path.join(dir, 'url.txt'), 'utf8').trim() || url; } catch (_) {}
+        Object.assign(job, {
+          status: 'done', phase: 'done', outcome, url,
+          revision: saved && saved.revision, title: saved && saved.title,
+          published: saved && saved.published, postUpdated: saved && saved.updated,
+          updated: Date.now(),
+        });
+      }
+      persistWebsiteResult(id, job);
+    });
+  });
+}
+function handleWebsiteSaveStatus(res, id) {
+  if (!/^[a-f0-9]{16}$/.test(id || '')) return json(res, 400, { ok: false, error: 'bad job id' });
+  let job = websiteSaveJobs.get(id);
+  if (!job) { try { job = JSON.parse(fs.readFileSync(path.join(websiteJobDir(id), 'result.json'), 'utf8')); } catch (_) {} }
+  if (!job) return json(res, 404, { ok: false, error: 'unknown website save' });
+  if (job.status === 'running') {
+    try { job = { ...job, phase: fs.readFileSync(path.join(websiteJobDir(id), 'status.txt'), 'utf8').trim().slice(0, 200) || job.phase }; } catch (_) {}
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  json(res, 200, job);
+}
+
 /* ---- router ----------------------------------------------------------- */
 http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
@@ -1216,6 +1412,11 @@ http.createServer((req, res) => {
   if (req.method === 'POST' && p === '/publish') return handlePublish(req, res);
   if (req.method === 'GET' && p === '/publish-status') return handlePublishStatus(res, u.searchParams.get('job'), u.searchParams.get('trace') === '1');
   if (req.method === 'GET' && p === '/publish-info') return handlePublishInfo(res, u.searchParams.get('id'));
+  if (req.method === 'GET' && p === '/website-posts') return handleWebsitePosts(res);
+  if (req.method === 'GET' && p === '/website-post') return handleWebsitePost(res, u.searchParams.get('slug'));
+  if (req.method === 'POST' && p === '/website-preview') return handleWebsitePreview(req, res);
+  if (req.method === 'POST' && p === '/website-save') return handleWebsiteSave(req, res);
+  if (req.method === 'GET' && p === '/website-save-status') return handleWebsiteSaveStatus(res, u.searchParams.get('job'));
   if (piSessions.handle(req, res, p, u)) return;
   if (req.method === 'GET' && p === '/ink') return handleInkRead(res, u.searchParams.get('id'), u.searchParams.get('file'));
   if (req.method === 'POST' && p === '/ink') return handleInkWrite(req, res, u.searchParams.get('id'), u.searchParams.get('file'));

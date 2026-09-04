@@ -9,7 +9,7 @@
 #
 # Files shipped:
 #   server/bin/*.sh + built remarkable-activity-agent.js -> ~/bin/
-#   ../papier/sync/server/{bin,web,systemd} -> Papier viewer + service
+#   ../papier/sync/server/{bin,web,systemd} -> Papier viewer, website editor + service
 #   server/nginx/default.conf -> ~/notes-server/default.conf
 #                                -> /etc/nginx/sites-enabled/remarkable
 #   server/web/raw/index.html -> ~/notes-server/raw/index.html
@@ -59,7 +59,7 @@ ssh "$HOST" '
   rm -f ~/bin/alt-ui-upload.js ~/bin/alt-ui-library.js ~/bin/alt-ui-preview-page.py ~/bin/alt-ui-render.sh ~/bin/alt-ui-compose.sh ~/bin/alt-ui-make-pdf.py ~/notes-server/alt-ui-upload.service
 '
 
-ssh "$HOST" 'mkdir -p ~/bin ~/notes-server/raw ~/notes-server/notebook ~/notes-server/papier ~/notes/updates ~/notes/notes ~/remarkable-backup/xochitl ~/remarkable-backup/notebook-app ~/remarkable-backup/papier ~/remarkable-backup/papier-inbound ~/remarkable-exports/notes-pdf'
+ssh "$HOST" 'mkdir -p ~/bin ~/notes-server/raw ~/notes-server/notebook ~/notes-server/papier ~/notes-server/website ~/notes/updates ~/notes/notes ~/remarkable-backup/xochitl ~/remarkable-backup/notebook-app ~/remarkable-backup/papier ~/remarkable-backup/papier-inbound ~/remarkable-exports/notes-pdf'
 
 echo "[deploy-server] scp server/bin scripts + agent bundle"
 scp -q "$HERE"/server/bin/*.sh "$HERE"/server/bin/notebook-live-relay.js "$BUILD_DIR/remarkable-activity-agent.js" "$HOST:bin/"
@@ -73,8 +73,8 @@ scp -q "$PAPIER_SERVER"/bin/papier-upload.js "$PAPIER_SERVER"/bin/papier-library
   "$PAPIER_SERVER"/bin/papier-compose.sh "$PAPIER_SERVER"/bin/papier-make-pdf.py \
   "$PAPIER_SERVER"/bin/papier-epub.sh "$PAPIER_SERVER"/bin/papier-kindle-cover.py \
   "$PAPIER_SERVER"/bin/papier-kindle.sh "$PAPIER_SERVER"/bin/papier-publish.sh \
-  "$PAPIER_SERVER"/bin/papier-publish-render.py "$PAPIER_SERVER"/bin/papier-publish-site.py \
-  "$HERE/../papier"/tools/mkbook.py "$HOST:bin/"
+  "$PAPIER_SERVER"/bin/papier-publish-save.sh "$PAPIER_SERVER"/bin/papier-publish-render.py \
+  "$PAPIER_SERVER"/bin/papier-publish-site.py "$HERE/../papier"/tools/mkbook.py "$HOST:bin/"
 
 echo "[deploy-server] ensure papier python venv (pymupdf + numpy + reportlab for PDF output)"
 ssh "$HOST" '
@@ -96,7 +96,8 @@ scp -q "$PAPIER_SERVER"/bin/papier-pi-sessions.js "$PAPIER_SERVER"/bin/papier-cl
   "$HERE/../papier"/ext/papier-metrics.ts "$HOST:bin/"
 ssh "$HOST" 'chmod +x ~/bin/papier-cloud-canvas'
 scp -q "$PAPIER_SERVER"/web/index.html "$HOST:notes-server/papier/index.html"
-ssh "$HOST" 'chmod +x ~/bin/papier-preview-page.py ~/bin/papier-render.sh ~/bin/papier-compose.sh ~/bin/papier-make-pdf.py ~/bin/papier-epub.sh ~/bin/papier-kindle-cover.py ~/bin/papier-kindle.sh ~/bin/papier-publish.sh ~/bin/papier-publish-render.py ~/bin/papier-publish-site.py'
+scp -q "$PAPIER_SERVER"/web/website/index.html "$HOST:notes-server/website/index.html"
+ssh "$HOST" 'chmod +x ~/bin/papier-preview-page.py ~/bin/papier-render.sh ~/bin/papier-compose.sh ~/bin/papier-make-pdf.py ~/bin/papier-epub.sh ~/bin/papier-kindle-cover.py ~/bin/papier-kindle.sh ~/bin/papier-publish.sh ~/bin/papier-publish-save.sh ~/bin/papier-publish-render.py ~/bin/papier-publish-site.py'
 
 echo "[deploy-server] ensure runtime deps (node, img2pdf, imagemagick, pandoc, chromium, fonts)"
 ssh "$HOST" '

@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="darkreader-lock">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Website editor · remarkable</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;500;600&amp;family=Google+Sans+Code:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#efefed; --panel:#fafaf8; --surface:#fff; --ink:#1b1b19;
+    --muted:#74746e; --line:rgba(20,20,18,.12); --accent:#b86212;
+    --shadow:0 1px 2px rgba(0,0,0,.05),0 12px 34px rgba(0,0,0,.07);
+  }
+  html[data-theme=dark] {
+    --bg:#161615; --panel:#1d1d1b; --surface:#242422; --ink:#f1f0eb;
+    --muted:#a09f98; --line:rgba(255,255,255,.11); --accent:#f0a04b;
+    --shadow:0 1px 2px rgba(0,0,0,.32),0 18px 46px rgba(0,0,0,.25);
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; background:var(--bg); color:var(--ink); }
+  body { font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; }
+  button,input,textarea { font:inherit; }
+  button { color:inherit; }
+  .app { min-height:calc(100vh - 43px); display:flex; flex-direction:column; }
+  .workspace-bar {
+    position:sticky; top:0; z-index:9; min-height:58px; display:flex; align-items:center; gap:14px;
+    padding:9px 16px; background:color-mix(in srgb,var(--panel) 93%,transparent);
+    border-bottom:1px solid var(--line); backdrop-filter:blur(16px);
+  }
+  .workspace-title { min-width:0; }
+  .workspace-title strong { display:block; font:600 21px/1.05 "EB Garamond",Garamond,serif; text-wrap:balance; }
+  .workspace-title span { display:block; margin-top:3px; color:var(--muted); font-size:11px; }
+  .bar-spacer { flex:1; }
+  .status { min-width:0; color:var(--muted); font-size:12px; text-align:right; font-variant-numeric:tabular-nums; }
+  .status.error { color:#c74736; }
+  .status.good { color:#3a875e; }
+  .button {
+    min-height:40px; display:inline-flex; align-items:center; justify-content:center; gap:7px;
+    padding:0 14px; border:0; border-radius:9px; background:var(--surface); color:var(--ink);
+    box-shadow:inset 0 0 0 1px var(--line),0 1px 2px rgba(0,0,0,.05);
+    text-decoration:none; cursor:pointer;
+    transition:scale 120ms ease,background-color 140ms ease,box-shadow 140ms ease,opacity 140ms ease;
+  }
+  .button:hover { box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ink) 28%,transparent),0 3px 10px rgba(0,0,0,.08); }
+  .button:active { scale:.96; }
+  .button.primary { background:var(--ink); color:var(--surface); box-shadow:0 3px 10px rgba(0,0,0,.16); font-weight:600; }
+  .button:disabled { cursor:default; opacity:.48; scale:1; }
+  .button-icon { font-size:16px; line-height:1; }
+  .mobile-posts { display:none; }
+  .workspace { flex:1; min-height:0; display:grid; grid-template-columns:240px minmax(320px,.9fr) minmax(380px,1.1fr); }
+  .post-panel { min-width:0; padding:14px 10px; background:var(--panel); border-right:1px solid var(--line); }
+  .panel-label { padding:0 9px 8px; color:var(--muted); font-size:10px; font-weight:600; letter-spacing:.09em; text-transform:uppercase; }
+  .post-list { display:flex; flex-direction:column; gap:3px; }
+  .post-item {
+    width:100%; min-height:52px; padding:8px 9px; border:0; border-radius:8px; background:transparent;
+    text-align:left; cursor:pointer; transition:background-color 130ms ease,scale 100ms ease;
+  }
+  .post-item:hover { background:color-mix(in srgb,var(--ink) 6%,transparent); }
+  .post-item:active { scale:.98; }
+  .post-item.active { background:var(--surface); box-shadow:var(--shadow); }
+  .post-item strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:600 15px/1.25 "EB Garamond",Garamond,serif; }
+  .post-item span { display:block; margin-top:3px; color:var(--muted); font-size:10px; font-variant-numeric:tabular-nums; }
+  .empty-posts { padding:28px 12px; color:var(--muted); text-align:center; }
+  .editor-pane,.preview-pane { min-width:0; min-height:0; display:flex; flex-direction:column; }
+  .editor-pane { background:var(--surface); border-right:1px solid var(--line); }
+  .preview-pane { background:var(--bg); }
+  .pane-head { min-height:48px; display:flex; align-items:center; gap:10px; padding:6px 14px; border-bottom:1px solid var(--line); }
+  .pane-head strong { font-size:11px; letter-spacing:.07em; text-transform:uppercase; }
+  .pane-head span { margin-left:auto; color:var(--muted); font-size:10px; }
+  .title-field {
+    width:100%; padding:17px 18px 12px; border:0; border-bottom:1px solid var(--line);
+    outline:0; background:transparent; color:var(--ink); font:600 28px/1.12 "EB Garamond",Garamond,serif;
+    text-wrap:balance;
+  }
+  .title-field::placeholder { color:var(--muted); }
+  .markdown {
+    flex:1; min-height:420px; width:100%; resize:none; padding:17px 18px 60px; border:0; outline:0;
+    background:transparent; color:var(--ink); caret-color:var(--accent);
+    font:13px/1.65 "Google Sans Code",ui-monospace,SFMono-Regular,Menlo,monospace;
+    tab-size:2; white-space:pre-wrap;
+  }
+  .markdown::selection,.title-field::selection { background:color-mix(in srgb,var(--accent) 28%,transparent); }
+  .preview-frame { flex:1; width:100%; min-height:480px; border:0; background:#fbfbf9; }
+  .loading { display:grid; flex:1; place-items:center; padding:30px; color:var(--muted); text-align:center; }
+  .mobile-tabs { display:none; }
+  @media(max-width:980px) {
+    .workspace { grid-template-columns:210px minmax(300px,1fr) minmax(340px,1fr); }
+  }
+  @media(max-width:760px) {
+    .workspace-bar { padding:8px 10px; gap:8px; }
+    .workspace-title span,.status { display:none; }
+    .workspace-title strong { font-size:18px; }
+    .button { min-height:42px; padding:0 11px; }
+    .button .wide-label { display:none; }
+    .mobile-posts { display:inline-flex; }
+    .workspace { display:block; }
+    .post-panel {
+      position:fixed; inset:0; z-index:20; display:none; padding:18px 12px; overflow:auto;
+      border:0; background:var(--panel);
+    }
+    .post-panel.open { display:block; }
+    .post-panel .panel-label { display:flex; align-items:center; justify-content:space-between; min-height:44px; }
+    .post-panel .panel-label::after { content:"Close"; color:var(--accent); font-size:12px; letter-spacing:0; text-transform:none; }
+    .post-item { min-height:58px; }
+    .mobile-tabs { display:flex; gap:4px; padding:5px; background:var(--panel); border-bottom:1px solid var(--line); }
+    .mobile-tabs button { flex:1; min-height:40px; border:0; border-radius:7px; background:transparent; cursor:pointer; }
+    .mobile-tabs button.active { background:var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.09); font-weight:600; }
+    .editor-pane,.preview-pane { min-height:calc(100vh - 148px); }
+    .preview-pane { display:none; }
+    body.show-preview .editor-pane { display:none; }
+    body.show-preview .preview-pane { display:flex; }
+    .pane-head { display:none; }
+    .title-field { padding-top:20px; }
+    .markdown { min-height:calc(100vh - 250px); resize:none; }
+    .preview-frame { min-height:calc(100vh - 148px); }
+  }
+  @media(prefers-reduced-motion:reduce) { .button,.post-item { transition:none; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="workspace-bar">
+    <button class="button mobile-posts" id="posts-button" aria-label="Choose a post"><span class="button-icon">☰</span></button>
+    <div class="workspace-title"><strong>Website editor</strong><span>Changes publish to swair.dev</span></div>
+    <span class="bar-spacer"></span>
+    <span class="status" id="status">Loading posts…</span>
+    <a class="button" id="live-link" href="https://swair.dev/" target="_blank" rel="noopener"><span class="button-icon">↗</span><span class="wide-label">View live</span></a>
+    <button class="button primary" id="save" disabled><span class="button-icon">↑</span><span>Save</span></button>
+  </header>
+  <div class="mobile-tabs" role="tablist" aria-label="Editor view">
+    <button class="active" id="edit-tab" role="tab" aria-selected="true">Edit</button>
+    <button id="preview-tab" role="tab" aria-selected="false">Preview</button>
+  </div>
+  <main class="workspace">
+    <aside class="post-panel" id="post-panel">
+      <div class="panel-label">Published posts</div>
+      <div class="post-list" id="post-list"><div class="empty-posts">Loading…</div></div>
+    </aside>
+    <section class="editor-pane" id="editor-pane">
+      <div class="pane-head"><strong>Markdown</strong><span>⌘S to save</span></div>
+      <input class="title-field" id="title" maxlength="200" placeholder="Post title" disabled>
+      <textarea class="markdown" id="body" spellcheck="true" aria-label="Post Markdown" disabled></textarea>
+    </section>
+    <section class="preview-pane" id="preview-pane">
+      <div class="pane-head"><strong>Preview</strong><span id="preview-status">Exact blog styles</span></div>
+      <div class="loading" id="preview-empty">Choose a post to preview.</div>
+      <iframe class="preview-frame" id="preview" title="Post preview" sandbox="allow-popups" hidden></iframe>
+    </section>
+  </main>
+</div>
+<script>
+'use strict';
+const API = '/papier/api/';
+const SITE = 'https://swair.dev';
+const $ = (id) => document.getElementById(id);
+const state = { posts:[], slug:null, revision:null, originalTitle:'', originalBody:'', saving:false, previewTimer:null, previewSeq:0 };
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>\"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
+const dirty = () => !!state.slug && ($('title').value !== state.originalTitle || $('body').value !== state.originalBody);
+
+function setStatus(text, kind) {
+  const el = $('status'); el.textContent = text; el.className = 'status' + (kind ? ' ' + kind : '');
+}
+function updateSave() {
+  $('save').disabled = !state.slug || !dirty() || state.saving || !$('title').value.trim();
+  if (!state.saving) setStatus(dirty() ? 'Unsaved changes' : (state.slug ? 'Published' : 'No post selected'));
+}
+function fmtDate(iso) {
+  if (!iso) return 'Published';
+  const d = new Date(iso); return Number.isNaN(d.valueOf()) ? iso.slice(0,10) : d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});
+}
+function renderPosts() {
+  const list = $('post-list'); list.innerHTML = '';
+  if (!state.posts.length) { list.innerHTML = '<div class="empty-posts">Nothing has been published yet.</div>'; return; }
+  state.posts.forEach((post) => {
+    const b = document.createElement('button'); b.className = 'post-item' + (post.slug === state.slug ? ' active' : '');
+    b.innerHTML = '<strong>' + esc(post.title) + '</strong><span>' + esc(fmtDate(post.updated || post.published)) + '</span>';
+    b.onclick = () => selectPost(post.slug); list.appendChild(b);
+  });
+}
+async function loadPosts(preferred) {
+  try {
+    const r = await fetch(API + 'website-posts', {cache:'no-store'});
+    const j = await r.json(); if (!r.ok || !j.ok) throw new Error(j.error || 'Could not load posts');
+    state.posts = j.posts || []; renderPosts();
+    const slug = preferred || (state.posts[0] && state.posts[0].slug);
+    if (slug) await selectPost(slug, true); else setStatus('Nothing published yet');
+  } catch (err) { setStatus(err.message, 'error'); $('post-list').innerHTML = '<div class="empty-posts">Could not load the published posts.</div>'; }
+}
+async function selectPost(slug, force) {
+  if (!force && slug === state.slug) { closePosts(); return; }
+  if (!force && dirty() && !confirm('Discard your unsaved changes?')) return;
+  setStatus('Loading…');
+  try {
+    const r = await fetch(API + 'website-post?slug=' + encodeURIComponent(slug), {cache:'no-store'});
+    const post = await r.json(); if (!r.ok || !post.ok) throw new Error(post.error || 'Could not load post');
+    state.slug = post.slug; state.revision = post.revision;
+    state.originalTitle = post.title || ''; state.originalBody = post.body || '';
+    $('title').value = state.originalTitle; $('body').value = state.originalBody;
+    $('title').disabled = $('body').disabled = false;
+    $('live-link').href = post.url; renderPosts(); updateSave(); schedulePreview(true); closePosts();
+  } catch (err) { setStatus(err.message, 'error'); }
+}
+function previewDocument(fragment) {
+  const title = $('title').value.trim() || 'Untitled';
+  const updated = (state.posts.find((p) => p.slug === state.slug) || {}).updated || '';
+  const base = SITE + '/posts/' + encodeURIComponent(state.slug) + '/';
+  const theme = document.documentElement.getAttribute('data-theme') || 'light';
+  return '<!doctype html><html lang="en" data-theme="' + esc(theme) + '"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><base href="' + esc(base) + '">' +
+    '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>' +
+    '<link href="https://fonts.googleapis.com/css2?family=Alegreya:ital,wght@0,400..900;1,400..900&amp;family=Alegreya+SC:wght@400;500&amp;family=Google+Sans+Code:wght@400;500;600&amp;display=swap" rel="stylesheet">' +
+    '<link rel="stylesheet" href="' + SITE + '/styles.css"><link rel="stylesheet" href="' + SITE + '/writing.css"></head><body>' +
+    '<main class="container"><header class="profile-header page-header"><h1>' + esc(title) + '</h1></header>' +
+    '<p class="post-dates">Updated ' + esc(fmtDate(updated)) + '</p><article class="post-body">' + fragment + '</article></main></body></html>';
+}
+function schedulePreview(now) {
+  clearTimeout(state.previewTimer);
+  state.previewTimer = setTimeout(renderPreview, now ? 0 : 320);
+}
+async function renderPreview() {
+  if (!state.slug) return;
+  const seq = ++state.previewSeq; $('preview-status').textContent = 'Rendering…';
+  try {
+    const r = await fetch(API + 'website-preview', {
+      method:'POST', headers:{'Content-Type':'application/json','X-Papier-Editor':'1'},
+      body:JSON.stringify({body:$('body').value})
+    });
+    const j = await r.json(); if (!r.ok || !j.ok) throw new Error(j.error || 'Preview failed');
+    if (seq !== state.previewSeq) return;
+    $('preview').srcdoc = previewDocument(j.html); $('preview').hidden = false; $('preview-empty').hidden = true;
+    $('preview-status').textContent = 'Exact blog styles';
+  } catch (err) {
+    if (seq !== state.previewSeq) return;
+    $('preview-status').textContent = 'Preview unavailable';
+    $('preview').srcdoc = '<p style="font-family:sans-serif;padding:24px">' + esc(err.message) + '</p>';
+    $('preview').hidden = false; $('preview-empty').hidden = true;
+  }
+}
+async function savePost() {
+  if (!state.slug || !dirty() || state.saving) return;
+  const submitted = {slug:state.slug,title:$('title').value.trim(),body:$('body').value,revision:state.revision};
+  if (!submitted.title) { setStatus('A title is required', 'error'); return; }
+  state.saving = true; updateSave(); setStatus('Saving…'); $('save').querySelector('span:last-child').textContent = 'Saving';
+  try {
+    const r = await fetch(API + 'website-save', {
+      method:'POST', headers:{'Content-Type':'application/json','X-Papier-Editor':'1'}, body:JSON.stringify(submitted)
+    });
+    const j = await r.json(); if (!r.ok || !j.ok) throw new Error(j.error || ('Save ' + r.status));
+    await watchSave(j.job, submitted);
+  } catch (err) { state.saving = false; updateSave(); setStatus(err.message, 'error'); }
+  $('save').querySelector('span:last-child').textContent = 'Save';
+}
+async function watchSave(job, submitted) {
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const r = await fetch(API + 'website-save-status?job=' + encodeURIComponent(job), {cache:'no-store'});
+    const j = await r.json(); if (!r.ok || !j.ok) throw new Error(j.error || 'Could not finish save');
+    if (j.status === 'running') { setStatus(j.phase || 'Publishing…'); continue; }
+    if (j.status !== 'done') throw new Error(j.error || 'Publish failed');
+    state.saving = false;
+    if (state.slug === submitted.slug) {
+      state.revision = j.revision || state.revision;
+      state.originalTitle = submitted.title; state.originalBody = submitted.body;
+      $('live-link').href = j.url || $('live-link').href;
+    }
+    const p = state.posts.find((item) => item.slug === submitted.slug);
+    if (p) { p.title = submitted.title; p.updated = j.postUpdated || new Date().toISOString(); }
+    renderPosts(); updateSave();
+    setStatus(j.outcome === 'unchanged' ? 'No changes to publish' : 'Published to swair.dev', 'good');
+    if (state.slug === submitted.slug) schedulePreview(true);
+    setTimeout(() => { if (!dirty() && !state.saving) setStatus('Published'); }, 3500);
+    return;
+  }
+}
+function showTab(preview) {
+  document.body.classList.toggle('show-preview', preview);
+  $('edit-tab').classList.toggle('active', !preview); $('preview-tab').classList.toggle('active', preview);
+  $('edit-tab').setAttribute('aria-selected', String(!preview)); $('preview-tab').setAttribute('aria-selected', String(preview));
+}
+function closePosts() { $('post-panel').classList.remove('open'); }
+$('posts-button').onclick = () => $('post-panel').classList.add('open');
+$('post-panel').onclick = (e) => { if (e.target === $('post-panel') || e.target.classList.contains('panel-label')) closePosts(); };
+$('edit-tab').onclick = () => showTab(false); $('preview-tab').onclick = () => showTab(true);
+$('title').addEventListener('input', () => { updateSave(); schedulePreview(); });
+$('body').addEventListener('input', () => { updateSave(); schedulePreview(); });
+$('save').onclick = savePost;
+window.addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); savePost(); } });
+window.addEventListener('beforeunload', (e) => { if (dirty()) { e.preventDefault(); e.returnValue = ''; } });
+new MutationObserver(() => { if (state.slug) schedulePreview(true); }).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+loadPosts();
+</script>
+</body>
+</html>

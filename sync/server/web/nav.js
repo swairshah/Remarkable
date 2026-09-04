@@ -3,7 +3,7 @@
 // Injected into every HTML response by nginx (sub_filter '</body>' — see
 // server/nginx/default.conf), so the independently-generated sections
 // (Shelley's /notes/, the digest agent's /updates/, the /notebook/ SPA,
-// even bare autoindex listings) share one nav without any generator
+// the /website/ editor, even bare autoindex listings) share one nav without any generator
 // having to know about it.
 //
 // Every page gets the same slim static bar prepended to <body>. Static,
@@ -72,6 +72,7 @@
     ['updates', '/updates/'],
     ['notebook', '/notebook/'],
     ['papier', '/papier/'],
+    ['website', '/website/'],
   ];
   var path = location.pathname;
 
