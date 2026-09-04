@@ -188,6 +188,8 @@ test('website editor is linked in the shared header and supports preview plus sa
   assert.match(ui, /id="title"/);
   assert.match(ui, /id="body"/);
   assert.match(ui, /id="preview"/);
+  assert.match(ui, /\.loading\[hidden\] \{ display:none; \}/);
+  assert.doesNotMatch(ui, /Exact blog styles/);
   assert.match(ui, /website-preview/);
   assert.match(ui, /website-save/);
   assert.match(ui, /X-Papier-Editor/);
