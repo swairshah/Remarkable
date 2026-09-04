@@ -214,7 +214,7 @@ function previewDocument(fragment) {
     '<link href="https://fonts.googleapis.com/css2?family=Alegreya:ital,wght@0,400..900;1,400..900&amp;family=Alegreya+SC:wght@400;500&amp;family=Google+Sans+Code:wght@400;500;600&amp;display=swap" rel="stylesheet">' +
     '<link rel="stylesheet" href="' + SITE + '/styles.css"><link rel="stylesheet" href="' + SITE + '/writing.css"></head><body>' +
     '<main class="container"><header class="profile-header page-header"><h1>' + esc(title) + '</h1></header>' +
-    '<p class="post-dates">Updated ' + esc(fmtDate(updated)) + '</p><article class="post-body">' + fragment + '</article></main></body></html>';
+    '<p class="post-dates">Updated ' + esc(fmtDate(updated)) + '</p><article class="post-body">' + fragment + '</article></main>';
 }
 function schedulePreview(now) {
   clearTimeout(state.previewTimer);
