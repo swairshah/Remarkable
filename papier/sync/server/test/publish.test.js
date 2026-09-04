@@ -189,6 +189,9 @@ test('website editor is linked in the shared header and supports preview plus sa
   assert.match(ui, /id="title"/);
   assert.match(ui, /id="body"/);
   assert.match(ui, /id="preview"/);
+  assert.doesNotMatch(ui, /class="pane-head"/);
+  assert.match(ui, /min-height:48px/);
+  assert.match(ui, /font:600 18px\/1 "EB Garamond"/);
   assert.match(ui, /\.loading\[hidden\] \{ display:none; \}/);
   assert.doesNotMatch(ui, /Exact blog styles/);
   assert.match(ui, /sandbox="allow-same-origin allow-popups"/);

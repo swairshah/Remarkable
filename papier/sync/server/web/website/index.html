@@ -26,13 +26,13 @@
   button { color:inherit; }
   .app { min-height:calc(100vh - 43px); display:flex; flex-direction:column; }
   .workspace-bar {
-    position:sticky; top:0; z-index:9; min-height:58px; display:flex; align-items:center; gap:14px;
-    padding:9px 16px; background:color-mix(in srgb,var(--panel) 93%,transparent);
+    position:sticky; top:0; z-index:9; min-height:48px; display:flex; align-items:center; gap:10px;
+    padding:4px 12px; background:color-mix(in srgb,var(--panel) 93%,transparent);
     border-bottom:1px solid var(--line); backdrop-filter:blur(16px);
   }
   .workspace-title { min-width:0; }
-  .workspace-title strong { display:block; font:600 21px/1.05 "EB Garamond",Garamond,serif; text-wrap:balance; }
-  .workspace-title span { display:block; margin-top:3px; color:var(--muted); font-size:11px; }
+  .workspace-title strong { display:block; font:600 18px/1 "EB Garamond",Garamond,serif; text-wrap:balance; }
+  .workspace-title span { display:block; margin-top:2px; color:var(--muted); font-size:10px; line-height:1; }
   .bar-spacer { flex:1; }
   .status { min-width:0; color:var(--muted); font-size:12px; text-align:right; font-variant-numeric:tabular-nums; }
   .status.error { color:#c74736; }
@@ -75,9 +75,6 @@
   .editor-pane,.preview-pane { min-width:0; min-height:0; display:flex; flex-direction:column; }
   .editor-pane { background:var(--surface); border-right:1px solid var(--line); }
   .preview-pane { background:var(--bg); }
-  .pane-head { min-height:48px; display:flex; align-items:center; gap:10px; padding:6px 14px; border-bottom:1px solid var(--line); }
-  .pane-head strong { font-size:11px; letter-spacing:.07em; text-transform:uppercase; }
-  .pane-head span { margin-left:auto; color:var(--muted); font-size:10px; }
   .title-field {
     width:100%; padding:17px 18px 12px; border:0; border-bottom:1px solid var(--line);
     outline:0; background:transparent; color:var(--ink); font:600 28px/1.12 "EB Garamond",Garamond,serif;
@@ -124,7 +121,6 @@
     .preview-pane { display:none; }
     body.show-preview .editor-pane { display:none; }
     body.show-preview .preview-pane { display:flex; }
-    .pane-head { display:none; }
     .title-field { padding-top:20px; }
     .markdown { min-height:calc(100vh - 250px); resize:none; }
     .preview-frame { min-height:calc(100vh - 148px); }
@@ -152,12 +148,10 @@
       <div class="post-list" id="post-list"><div class="empty-posts">Loading…</div></div>
     </aside>
     <section class="editor-pane" id="editor-pane">
-      <div class="pane-head"><strong>Markdown</strong><span>⌘S to save</span></div>
       <input class="title-field" id="title" maxlength="200" placeholder="Post title" disabled>
       <textarea class="markdown" id="body" spellcheck="true" aria-label="Post Markdown" disabled></textarea>
     </section>
     <section class="preview-pane" id="preview-pane">
-      <div class="pane-head"><strong>Preview</strong></div>
       <div class="loading" id="preview-empty">Choose a post to preview.</div>
       <iframe class="preview-frame" id="preview" title="Post preview" sandbox="allow-same-origin allow-popups" hidden></iframe>
     </section>
