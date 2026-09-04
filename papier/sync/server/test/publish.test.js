@@ -190,6 +190,10 @@ test('website editor is linked in the shared header and supports preview plus sa
   assert.match(ui, /id="preview"/);
   assert.match(ui, /\.loading\[hidden\] \{ display:none; \}/);
   assert.doesNotMatch(ui, /Exact blog styles/);
+  assert.match(ui, /sandbox="allow-same-origin allow-popups"/);
+  assert.match(ui, /getElementById\('preview-body'\)\.innerHTML = state\.previewHtml/);
+  assert.equal((ui.match(/\.srcdoc = previewDocument\(\)/g) || []).length, 1, 'preview document mounts once');
+  assert.doesNotMatch(ui, /srcdoc = previewDocument\(j\.html\)/);
   assert.match(ui, /website-preview/);
   assert.match(ui, /website-save/);
   assert.match(ui, /X-Papier-Editor/);

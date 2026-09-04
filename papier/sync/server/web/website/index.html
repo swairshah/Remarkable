@@ -159,7 +159,7 @@
     <section class="preview-pane" id="preview-pane">
       <div class="pane-head"><strong>Preview</strong></div>
       <div class="loading" id="preview-empty">Choose a post to preview.</div>
-      <iframe class="preview-frame" id="preview" title="Post preview" sandbox="allow-popups" hidden></iframe>
+      <iframe class="preview-frame" id="preview" title="Post preview" sandbox="allow-same-origin allow-popups" hidden></iframe>
     </section>
   </main>
 </div>
@@ -168,7 +168,10 @@
 const API = '/papier/api/';
 const SITE = 'https://swair.dev';
 const $ = (id) => document.getElementById(id);
-const state = { posts:[], slug:null, revision:null, originalTitle:'', originalBody:'', saving:false, previewTimer:null, previewSeq:0 };
+const state = {
+  posts:[], slug:null, revision:null, originalTitle:'', originalBody:'', saving:false,
+  previewTimer:null, previewSeq:0, previewHtml:'', previewReady:false,
+};
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>\"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
 const dirty = () => !!state.slug && ($('title').value !== state.originalTitle || $('body').value !== state.originalBody);
 
@@ -215,18 +218,38 @@ async function selectPost(slug, force) {
     $('live-link').href = post.url; renderPosts(); updateSave(); schedulePreview(true); closePosts();
   } catch (err) { setStatus(err.message, 'error'); }
 }
-function previewDocument(fragment) {
-  const title = $('title').value.trim() || 'Untitled';
-  const updated = (state.posts.find((p) => p.slug === state.slug) || {}).updated || '';
-  const base = SITE + '/posts/' + encodeURIComponent(state.slug) + '/';
+function previewDocument() {
   const theme = document.documentElement.getAttribute('data-theme') || 'light';
   return '<!doctype html><html lang="en" data-theme="' + esc(theme) + '"><head><meta charset="utf-8">' +
-    '<meta name="viewport" content="width=device-width,initial-scale=1"><base href="' + esc(base) + '">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><base id="preview-base" href="' + SITE + '/">' +
     '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>' +
     '<link href="https://fonts.googleapis.com/css2?family=Alegreya:ital,wght@0,400..900;1,400..900&amp;family=Alegreya+SC:wght@400;500&amp;family=Google+Sans+Code:wght@400;500;600&amp;display=swap" rel="stylesheet">' +
     '<link rel="stylesheet" href="' + SITE + '/styles.css"><link rel="stylesheet" href="' + SITE + '/writing.css"></head><body>' +
-    '<main class="container"><header class="profile-header page-header"><h1>' + esc(title) + '</h1></header>' +
-    '<p class="post-dates">Updated ' + esc(fmtDate(updated)) + '</p><article class="post-body">' + fragment + '</article></main>';
+    '<main class="container"><header class="profile-header page-header"><h1 id="preview-title"></h1></header>' +
+    '<p class="post-dates" id="preview-date"></p><article class="post-body" id="preview-body"></article></main>';
+}
+function syncPreview(fragment) {
+  const replaceBody = fragment != null;
+  if (replaceBody) state.previewHtml = fragment;
+  const frame = $('preview'), doc = frame.contentDocument;
+  if (!state.previewReady || !doc || !doc.getElementById('preview-body')) return;
+  const updated = (state.posts.find((p) => p.slug === state.slug) || {}).updated || '';
+  const view = doc.defaultView, scrollY = view ? view.scrollY : 0;
+  doc.documentElement.setAttribute('data-theme', document.documentElement.getAttribute('data-theme') || 'light');
+  doc.getElementById('preview-base').href = SITE + '/posts/' + encodeURIComponent(state.slug) + '/';
+  doc.getElementById('preview-title').textContent = $('title').value.trim() || 'Untitled';
+  doc.getElementById('preview-date').textContent = 'Updated ' + fmtDate(updated);
+  if (replaceBody) doc.getElementById('preview-body').innerHTML = state.previewHtml;
+  if (view && replaceBody) requestAnimationFrame(() => view.scrollTo(0, scrollY));
+}
+function showPreview(fragment) {
+  state.previewHtml = fragment;
+  const frame = $('preview');
+  frame.hidden = false; $('preview-empty').hidden = true;
+  if (state.previewReady) { syncPreview(fragment); return; }
+  if (frame.srcdoc) return;
+  frame.addEventListener('load', () => { state.previewReady = true; syncPreview(state.previewHtml); }, { once:true });
+  frame.srcdoc = previewDocument();
 }
 function schedulePreview(now) {
   clearTimeout(state.previewTimer);
@@ -242,11 +265,10 @@ async function renderPreview() {
     });
     const j = await r.json(); if (!r.ok || !j.ok) throw new Error(j.error || 'Preview failed');
     if (seq !== state.previewSeq) return;
-    $('preview').srcdoc = previewDocument(j.html); $('preview').hidden = false; $('preview-empty').hidden = true;
+    showPreview(j.html);
   } catch (err) {
     if (seq !== state.previewSeq) return;
-    $('preview').srcdoc = '<p style="font-family:sans-serif;padding:24px">' + esc(err.message) + '</p>';
-    $('preview').hidden = false; $('preview-empty').hidden = true;
+    showPreview('<p>' + esc(err.message) + '</p>');
   }
 }
 async function savePost() {
@@ -315,7 +337,7 @@ try { if (localStorage.getItem(SIDEBAR_KEY) === 'hidden') document.body.classLis
 $('posts-button').onclick = toggleSidebar;
 $('post-panel').onclick = (e) => { if (mobileSidebar() && (e.target === $('post-panel') || e.target.classList.contains('panel-label'))) closePosts(); };
 $('edit-tab').onclick = () => showTab(false); $('preview-tab').onclick = () => showTab(true);
-$('title').addEventListener('input', () => { updateSave(); schedulePreview(); });
+$('title').addEventListener('input', () => { updateSave(); syncPreview(); });
 $('body').addEventListener('input', () => { updateSave(); schedulePreview(); });
 $('save').onclick = savePost;
 window.addEventListener('keydown', (e) => {
@@ -328,7 +350,7 @@ window.addEventListener('resize', () => {
   updateSidebarButton();
 });
 window.addEventListener('beforeunload', (e) => { if (dirty()) { e.preventDefault(); e.returnValue = ''; } });
-new MutationObserver(() => { if (state.slug) schedulePreview(true); }).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+new MutationObserver(() => { if (state.slug) syncPreview(); }).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
 updateSidebarButton();
 loadPosts();
 </script>
