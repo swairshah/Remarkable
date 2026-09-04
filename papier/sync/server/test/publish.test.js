@@ -191,6 +191,9 @@ test('website editor is linked in the shared header and supports preview plus sa
   assert.match(ui, /website-preview/);
   assert.match(ui, /website-save/);
   assert.match(ui, /X-Papier-Editor/);
+  assert.match(ui, /aria-controls="post-panel"/);
+  assert.match(ui, /sidebar-hidden/);
+  assert.match(ui, /e\.key\.toLowerCase\(\) === 'b'/);
   assert.match(ui, /metaKey \|\| e\.ctrlKey/);
   assert.equal((ui.match(/<\/body>/g) || []).length, 1, 'nginx nav injection must only match the real closing body');
 });

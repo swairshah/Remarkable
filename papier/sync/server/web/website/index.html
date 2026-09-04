@@ -49,9 +49,17 @@
   .button.primary { background:var(--ink); color:var(--surface); box-shadow:0 3px 10px rgba(0,0,0,.16); font-weight:600; }
   .button:disabled { cursor:default; opacity:.48; scale:1; }
   .button-icon { font-size:16px; line-height:1; }
-  .mobile-posts { display:none; }
-  .workspace { flex:1; min-height:0; display:grid; grid-template-columns:240px minmax(320px,.9fr) minmax(380px,1.1fr); }
-  .post-panel { min-width:0; padding:14px 10px; background:var(--panel); border-right:1px solid var(--line); }
+  .sidebar-toggle { flex:0 0 40px; width:40px; padding:0; }
+  .workspace {
+    --sidebar-width:240px; flex:1; min-height:0; display:grid;
+    grid-template-columns:var(--sidebar-width) minmax(320px,.9fr) minmax(380px,1.1fr);
+    transition:grid-template-columns 180ms cubic-bezier(.2,0,0,1);
+  }
+  .post-panel {
+    min-width:0; padding:14px 10px; overflow:hidden; opacity:1;
+    background:var(--panel); border-right:1px solid var(--line);
+    transition:padding 180ms cubic-bezier(.2,0,0,1),opacity 120ms ease,border-color 180ms ease;
+  }
   .panel-label { padding:0 9px 8px; color:var(--muted); font-size:10px; font-weight:600; letter-spacing:.09em; text-transform:uppercase; }
   .post-list { display:flex; flex-direction:column; gap:3px; }
   .post-item {
@@ -87,7 +95,11 @@
   .loading { display:grid; flex:1; place-items:center; padding:30px; color:var(--muted); text-align:center; }
   .mobile-tabs { display:none; }
   @media(max-width:980px) {
-    .workspace { grid-template-columns:210px minmax(300px,1fr) minmax(340px,1fr); }
+    .workspace { --sidebar-width:210px; grid-template-columns:var(--sidebar-width) minmax(300px,1fr) minmax(340px,1fr); }
+  }
+  @media(min-width:761px) {
+    body.sidebar-hidden .workspace { --sidebar-width:0px; }
+    body.sidebar-hidden .post-panel { padding-left:0; padding-right:0; opacity:0; border-right-color:transparent; pointer-events:none; }
   }
   @media(max-width:760px) {
     .workspace-bar { padding:8px 10px; gap:8px; }
@@ -95,7 +107,6 @@
     .workspace-title strong { font-size:18px; }
     .button { min-height:42px; padding:0 11px; }
     .button .wide-label { display:none; }
-    .mobile-posts { display:inline-flex; }
     .workspace { display:block; }
     .post-panel {
       position:fixed; inset:0; z-index:20; display:none; padding:18px 12px; overflow:auto;
@@ -123,7 +134,7 @@
 <body>
 <div class="app">
   <header class="workspace-bar">
-    <button class="button mobile-posts" id="posts-button" aria-label="Choose a post"><span class="button-icon">☰</span></button>
+    <button class="button sidebar-toggle" id="posts-button" aria-label="Hide published posts" aria-controls="post-panel" aria-expanded="true" title="Hide sidebar (⌘B)"><span class="button-icon" aria-hidden="true">☰</span></button>
     <div class="workspace-title"><strong>Website editor</strong><span>Changes publish to swair.dev</span></div>
     <span class="bar-spacer"></span>
     <span class="status" id="status">Loading posts…</span>
@@ -280,16 +291,46 @@ function showTab(preview) {
   $('edit-tab').classList.toggle('active', !preview); $('preview-tab').classList.toggle('active', preview);
   $('edit-tab').setAttribute('aria-selected', String(!preview)); $('preview-tab').setAttribute('aria-selected', String(preview));
 }
-function closePosts() { $('post-panel').classList.remove('open'); }
-$('posts-button').onclick = () => $('post-panel').classList.add('open');
-$('post-panel').onclick = (e) => { if (e.target === $('post-panel') || e.target.classList.contains('panel-label')) closePosts(); };
+const SIDEBAR_KEY = 'papier-website-sidebar';
+const mobileSidebar = () => matchMedia('(max-width:760px)').matches;
+function updateSidebarButton() {
+  const open = mobileSidebar() ? $('post-panel').classList.contains('open') : !document.body.classList.contains('sidebar-hidden');
+  const action = open ? 'Hide' : 'Show';
+  $('posts-button').setAttribute('aria-expanded', String(open));
+  $('posts-button').setAttribute('aria-label', action + ' published posts');
+  $('posts-button').title = action + ' sidebar (⌘B)';
+}
+function toggleSidebar() {
+  if (mobileSidebar()) $('post-panel').classList.toggle('open');
+  else {
+    document.body.classList.toggle('sidebar-hidden');
+    try { localStorage.setItem(SIDEBAR_KEY, document.body.classList.contains('sidebar-hidden') ? 'hidden' : 'shown'); } catch (_) {}
+  }
+  updateSidebarButton();
+}
+function closePosts() {
+  if (mobileSidebar()) $('post-panel').classList.remove('open');
+  updateSidebarButton();
+}
+try { if (localStorage.getItem(SIDEBAR_KEY) === 'hidden') document.body.classList.add('sidebar-hidden'); } catch (_) {}
+$('posts-button').onclick = toggleSidebar;
+$('post-panel').onclick = (e) => { if (mobileSidebar() && (e.target === $('post-panel') || e.target.classList.contains('panel-label'))) closePosts(); };
 $('edit-tab').onclick = () => showTab(false); $('preview-tab').onclick = () => showTab(true);
 $('title').addEventListener('input', () => { updateSave(); schedulePreview(); });
 $('body').addEventListener('input', () => { updateSave(); schedulePreview(); });
 $('save').onclick = savePost;
-window.addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); savePost(); } });
+window.addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey)) return;
+  if (e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); }
+  else if (e.key.toLowerCase() === 's') { e.preventDefault(); savePost(); }
+});
+window.addEventListener('resize', () => {
+  if (!mobileSidebar()) $('post-panel').classList.remove('open');
+  updateSidebarButton();
+});
 window.addEventListener('beforeunload', (e) => { if (dirty()) { e.preventDefault(); e.returnValue = ''; } });
 new MutationObserver(() => { if (state.slug) schedulePreview(true); }).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+updateSidebarButton();
 loadPosts();
 </script>
 </body>
