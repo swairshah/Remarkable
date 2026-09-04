@@ -27,5 +27,16 @@ sync/server/bin/remarkable-activity-agent.js
 # magazine-skill output (generated reading artifacts)
 .magazines/
 
+# Local diff-analysis state
+.diffsplain/
+.semanticdiff/
+
+# Generated document exports and temporary renders
+/output/
+/tmp/
+
+# Apple debug symbol bundles
+papier-ios/build/**/*.dSYM/
+
 # Python bytecode
 __pycache__/
