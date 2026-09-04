@@ -96,7 +96,7 @@ scp -q "$PAPIER_SERVER"/bin/papier-pi-sessions.js "$PAPIER_SERVER"/bin/papier-cl
   "$HERE/../papier"/ext/papier-metrics.ts "$HOST:bin/"
 ssh "$HOST" 'chmod +x ~/bin/papier-cloud-canvas'
 scp -q "$PAPIER_SERVER"/web/index.html "$HOST:notes-server/papier/index.html"
-scp -q "$PAPIER_SERVER"/web/website/index.html "$HOST:notes-server/website/index.html"
+scp -q "$PAPIER_SERVER"/web/website/index.html "$PAPIER_SERVER"/web/website/marked.js "$HOST:notes-server/website/"
 ssh "$HOST" 'chmod +x ~/bin/papier-preview-page.py ~/bin/papier-render.sh ~/bin/papier-compose.sh ~/bin/papier-make-pdf.py ~/bin/papier-epub.sh ~/bin/papier-kindle-cover.py ~/bin/papier-kindle.sh ~/bin/papier-publish.sh ~/bin/papier-publish-save.sh ~/bin/papier-publish-render.py ~/bin/papier-publish-site.py'
 
 echo "[deploy-server] ensure runtime deps (node, img2pdf, imagemagick, pandoc, chromium, fonts)"

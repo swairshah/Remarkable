@@ -163,6 +163,7 @@
     </section>
   </main>
 </div>
+<script src="/website/marked.js"></script>
 <script>
 'use strict';
 const API = '/papier/api/';
@@ -215,7 +216,7 @@ async function selectPost(slug, force) {
     state.originalTitle = post.title || ''; state.originalBody = post.body || '';
     $('title').value = state.originalTitle; $('body').value = state.originalBody;
     $('title').disabled = $('body').disabled = false;
-    $('live-link').href = post.url; renderPosts(); updateSave(); schedulePreview(true); closePosts();
+    $('live-link').href = post.url; renderPosts(); updateSave(); updatePreview(true); closePosts();
   } catch (err) { setStatus(err.message, 'error'); }
 }
 function previewDocument() {
@@ -251,24 +252,28 @@ function showPreview(fragment) {
   frame.addEventListener('load', () => { state.previewReady = true; syncPreview(state.previewHtml); }, { once:true });
   frame.srcdoc = previewDocument();
 }
-function schedulePreview(now) {
-  clearTimeout(state.previewTimer);
-  state.previewTimer = setTimeout(renderPreview, now ? 0 : 320);
-}
-async function renderPreview() {
+function updatePreview(exactNow) {
   if (!state.slug) return;
+  const markdown = $('body').value;
   const seq = ++state.previewSeq;
+  let localRendered = false;
+  try {
+    showPreview(window.marked.parse(markdown, { gfm:true }));
+    localRendered = true;
+  } catch (_) {}
+  clearTimeout(state.previewTimer);
+  state.previewTimer = setTimeout(() => renderExactPreview(seq, markdown, localRendered), exactNow ? 0 : 900);
+}
+async function renderExactPreview(seq, markdown, localRendered) {
   try {
     const r = await fetch(API + 'website-preview', {
       method:'POST', headers:{'Content-Type':'application/json','X-Papier-Editor':'1'},
-      body:JSON.stringify({body:$('body').value})
+      body:JSON.stringify({body:markdown})
     });
     const j = await r.json(); if (!r.ok || !j.ok) throw new Error(j.error || 'Preview failed');
-    if (seq !== state.previewSeq) return;
-    showPreview(j.html);
+    if (seq === state.previewSeq) showPreview(j.html);
   } catch (err) {
-    if (seq !== state.previewSeq) return;
-    showPreview('<p>' + esc(err.message) + '</p>');
+    if (!localRendered && seq === state.previewSeq) showPreview('<p>' + esc(err.message) + '</p>');
   }
 }
 async function savePost() {
@@ -302,7 +307,7 @@ async function watchSave(job, submitted) {
     if (p) { p.title = submitted.title; p.updated = j.postUpdated || new Date().toISOString(); }
     renderPosts(); updateSave();
     setStatus(j.outcome === 'unchanged' ? 'No changes to publish' : 'Published to swair.dev', 'good');
-    if (state.slug === submitted.slug) schedulePreview(true);
+    if (state.slug === submitted.slug) updatePreview(true);
     setTimeout(() => { if (!dirty() && !state.saving) setStatus('Published'); }, 3500);
     return;
   }
@@ -338,7 +343,7 @@ $('posts-button').onclick = toggleSidebar;
 $('post-panel').onclick = (e) => { if (mobileSidebar() && (e.target === $('post-panel') || e.target.classList.contains('panel-label'))) closePosts(); };
 $('edit-tab').onclick = () => showTab(false); $('preview-tab').onclick = () => showTab(true);
 $('title').addEventListener('input', () => { updateSave(); syncPreview(); });
-$('body').addEventListener('input', () => { updateSave(); schedulePreview(); });
+$('body').addEventListener('input', () => { updateSave(); updatePreview(false); });
 $('save').onclick = savePost;
 window.addEventListener('keydown', (e) => {
   if (!(e.metaKey || e.ctrlKey)) return;
