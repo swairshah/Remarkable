@@ -31,6 +31,6 @@ The supplied `/tmp/bb-claude-sketch.mp4` shows sparse paper, handwritten prompts
 
 There are two layers: persistent user writing and a structured agent board. The agent can revise its board without erasing handwriting. Updates wait while the user is writing. Local ink changes are measured against the last acknowledged user layer, so an agent redraw cannot cause an observation loop.
 
-The implemented board is deliberately bounded to nine grid nodes and short text. Extending it to arbitrary agent drawing, selected-region reasoning, multiple pages, and on-tablet permission answers requires additional interaction and device testing. Those capabilities are not claimed as implemented.
+The revised drawing surface uses the same SVG-to-ink converter as Papier. The model supplies independent sections with local coordinates, including handwriting, curves, charts, annotations, and code. [The layout module](src/layout.rs) reserves user stroke bounds plus a margin; [the compositor](src/scene.rs) places and clips complete sections in remaining space. Overflow has separate read-only reply pages. Existing grid responses are preserved as text, while new agent tools accept the freeform SVG schema in [protocol.ts](bb-plugin-ink/protocol.ts). Selected-region editing, synchronized multi-device canvases, and on-tablet permission answers remain outside the implemented scope.
 
 See [[bb-ink/README]] for setup, verification, and current limits.
