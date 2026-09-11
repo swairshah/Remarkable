@@ -24,7 +24,7 @@ make test
 make preview
 ```
 
-The preview opens at [localhost:5188](http://127.0.0.1:5188). It renders the actual Rust tablet UI, overlays browser ink, and reports automatic observations without starting an agent. `make render` also writes map, review, and thread-picker PNGs to `build/`.
+The preview opens at [localhost:5188](http://127.0.0.1:5188). It renders the actual Rust tablet UI, overlays browser ink, and reports automatic observations without starting an agent. `make render` also writes canvas and thread-picker PNGs to `build/`. The old `--review` rendering flag is accepted for compatibility and now shows the same writable document. For an offline scroll specimen, pass `--scroll 1200` to the native renderer.
 
 ```sh
 make install-plugin
