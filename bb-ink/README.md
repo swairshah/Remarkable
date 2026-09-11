@@ -67,4 +67,6 @@ Verified on the host: ARM static build, native renderer, bridge typecheck, Rust 
 
 The scrolling update is installed with bridge plugin 0.4.0. All 35 current Rust, JavaScript, and bridge tests pass. Browser checks covered scrolling, writing below the initial viewport, returning, and restoring ink after reload. The tablet restarted with all 93 saved strokes and its pending receipt unchanged; its native connection check succeeded. Finger and pen feel on physical hardware still need a hands-on check.
 
+The pencil lettering update is installed with bridge plugin 0.4.2. All 41 Rust, JavaScript, and bridge tests passed, including literal monospace pixels, visible alphabet trajectories, measured line wrapping, and identical lettering after repaint or viewport translation. The tablet's live framebuffer shows the new lettering beneath the existing question; all 117 saved strokes, their baseline, answer anchors, pending delivery, revision 8, and scroll position 1286 were preserved through restart. The tablet connection check returned protocol 2, 15 projects, and 40 threads. Visual resemblance and physical panel contrast still need user evaluation. See [device-pencil-lettering.png](build/device-pencil-lettering.png) for the captured framebuffer.
+
 The [source study](STUDY.md) records the plugin patterns, Papier behavior, and visual reference behind these decisions.
