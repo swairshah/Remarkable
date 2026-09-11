@@ -37,7 +37,7 @@ This machine's bb application is version 0.42.1; its bundled CLI is used by the 
 
 ## Install on reMarkable 2
 
-Requires the existing Xovi/AppLoad setup, curl, and the same rm2fb integration used by Coder. Build tools require the Rust `armv7-unknown-linux-musleabihf` target. The default target is configured in `.cargo/config.toml`.
+Requires the existing Xovi/AppLoad setup and the same rm2fb integration used by Coder. The USB tunnel uses built-in loopback HTTP and requires no curl on the tablet. Direct HTTPS connections still require curl. Build tools require the Rust `armv7-unknown-linux-musleabihf` target. The default target is configured in `.cargo/config.toml`.
 
 ```sh
 make vendor
