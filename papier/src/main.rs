@@ -15,6 +15,7 @@
 //!   pen/touch/power              raw input (from collab)
 //!   ink.rs      the ink overlay: user strokes + AI patches, vector-first
 //!   doc.rs      the unified document: book bundles + growing notebooks
+//!   highlight.rs the highlighter nib: level grey bands, line-snapped
 //!   store.rs    the document store: scan, folders, import
 //!   home.rs     the home grid; thumbs.rs its thumbnail cache
 //!   statusbar.rs the top bar: clock, wifi, battery
@@ -47,6 +48,7 @@ pub use libreink_page as ink;
 
 #[allow(dead_code)] /* words/snapshot/underline wire in with pi (M5) */
 mod doc;
+mod highlight;
 mod home;
 mod kb;
 #[allow(dead_code)] /* wired in with pi (M5) */
@@ -62,6 +64,7 @@ use display::{Display, Wave};
 use doc::{Doc, Entry};
 use draw::{text_width, BLACK, GRAY, WHITE};
 use fb::{Framebuffer, SCREEN_H as FB_H, SCREEN_W as FB_W};
+use highlight::Nib;
 use home::HomeView;
 use svg_ink::PiFont;
 use ink::{Page, Pt, Rect, Stroke};
@@ -216,7 +219,7 @@ fn settings_path() -> String {
     format!("{}/settings.json", store::data_dir())
 }
 
-fn load_settings() -> (String, home::Sort, Tool, PiFont, bool, EraserMode) {
+fn load_settings() -> (String, home::Sort, Tool, PiFont, bool, EraserMode, Nib) {
     match store::read_json(&settings_path()) {
         Some(v) => (
             v["last_doc"].as_str().unwrap_or("").to_string(),
@@ -231,10 +234,17 @@ fn load_settings() -> (String, home::Sort, Tool, PiFont, bool, EraserMode) {
                 .unwrap_or(PiFont::Serif),
             v["quiet"].as_bool().unwrap_or(false),
             EraserMode::from_key(v["eraser"].as_str().unwrap_or("object")),
+            Nib::from_key(v["nib"].as_str().unwrap_or("pen")),
         ),
-        None => {
-            (String::new(), home::Sort::Opened, Tool::Pen, PiFont::Serif, false, EraserMode::Object)
-        }
+        None => (
+            String::new(),
+            home::Sort::Opened,
+            Tool::Pen,
+            PiFont::Serif,
+            false,
+            EraserMode::Object,
+            Nib::Pen,
+        ),
     }
 }
 
@@ -245,6 +255,7 @@ fn save_settings(
     pi_font: PiFont,
     quiet: bool,
     eraser: EraserMode,
+    nib: Nib,
 ) {
     let p = settings_path();
     if let Some(dir) = std::path::Path::new(&p).parent() {
@@ -257,6 +268,7 @@ fn save_settings(
         "pi_font": pi_font.key(),
         "quiet": quiet,
         "eraser": eraser.key(),
+        "nib": nib.key(),
     });
     let _ = std::fs::write(&p, serde_json::to_vec(&doc).unwrap_or_default());
 }
@@ -302,6 +314,9 @@ struct DocView {
 
     /* live pen ink */
     cur_stroke: Option<Stroke>,
+    /// The highlighter's (center y, half-height) for the contact in
+    /// progress — fixed at press so the band cannot wobble mid-sweep.
+    hl_band: Option<(f32, f32)>,
     ink_dirty: Option<Rect>,
     contact_changed: bool,
     page_changed: bool,
@@ -337,6 +352,7 @@ impl DocView {
             drag_moved_at: Instant::now(),
             drag_dirty: false,
             cur_stroke: None,
+            hl_band: None,
             ink_dirty: None,
             contact_changed: false,
             page_changed: false,
@@ -413,6 +429,7 @@ struct App {
     pi_font: PiFont, /* pi's default writing font, persisted */
     quiet: bool, /* pi OFF: pauses don't send pages (persisted); NUDGE still does */
     eraser: EraserMode, /* what erasing does: object/pixel/region (persisted) */
+    nib: Nib, /* what the Pen tool draws: ink or a highlighter band (persisted) */
     nudged: bool, /* a NUDGE is in flight — overrides quiet until the page sends */
     flips_since_flash: u32, /* partial-GC16 turns; GC16 flash every FLIP_DEGHOST_EVERY */
 
@@ -446,7 +463,7 @@ impl App {
         if let Screen::Doc(dv) = &mut self.screen {
             dv.doc.save_all();
         }
-        save_settings("", self.sort, self.tool, self.pi_font, self.quiet, self.eraser);
+        save_settings("", self.sort, self.tool, self.pi_font, self.quiet, self.eraser, self.nib);
         self.screen = Screen::Home(HomeView::build(folder, self.sort));
         self.render_home(true);
         if edited {
@@ -548,7 +565,7 @@ impl App {
                 home::Sort::Opened => home::Sort::Title,
                 home::Sort::Title => home::Sort::Opened,
             };
-            save_settings("", self.sort, self.tool, self.pi_font, self.quiet, self.eraser);
+            save_settings("", self.sort, self.tool, self.pi_font, self.quiet, self.eraser, self.nib);
             self.rebuild_home();
             self.render_home(false);
             return;
@@ -617,7 +634,7 @@ impl App {
                     d.count(),
                     d.current + 1
                 );
-                save_settings(id, self.sort, self.tool, self.pi_font, self.quiet, self.eraser);
+                save_settings(id, self.sort, self.tool, self.pi_font, self.quiet, self.eraser, self.nib);
                 self.dialog = None;
                 self.screen = Screen::Doc(DocView::new(d, self.tool));
                 self.flips_since_flash = 0;
@@ -666,7 +683,7 @@ impl App {
              * full render, so a hard binary wave would shred them thin */
             let gray = dv.doc.page.patches.iter().any(|p| {
                 !p.texts.is_empty() || p.strokes.iter().any(|s| s.gray != ink::USER_GRAY)
-            });
+            }) || dv.doc.page.strokes.iter().any(|s| highlight::is_highlight(s.gray));
             (dv.doc.has_raster(), gray)
         };
         self.blit_toolbar();
@@ -705,8 +722,7 @@ impl App {
         if self.bar_until.is_some() && r.y0 < BAR_H {
             self.paint_top_bar();
         }
-        if let Screen::Doc(dv) = &self.screen {
-            let t = dv.tb.rect();
+        if let Some(t) = self.tb_chrome_rect() {
             if r.x1 >= t.x0 && r.x0 <= t.x1 && r.y1 >= t.y0 && r.y0 <= t.y1 {
                 self.paint_toolbar();
             }
@@ -869,13 +885,32 @@ impl App {
         /* the toolbar swallows presses only — a stroke that started on the
          * canvas may finish under it (chrome repaints over the ink) */
         if phase == PenPhase::Press {
-            let Screen::Doc(dv) = &self.screen else { return };
-            if dv.cur_stroke.is_none() {
-                if let Some(a) = dv.tb.hit(x, y) {
+            let chrome = {
+                let Screen::Doc(dv) = &self.screen else { return };
+                if dv.cur_stroke.is_none() {
+                    match dv.tb.hit(x, y) {
+                        Some(a) => Some(Some(a)),
+                        None if self.hl_cell_shown() && highlight::hit(dv.tb.rect(), x, y) => {
+                            Some(None)
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                }
+            };
+            match chrome {
+                Some(Some(a)) => {
                     self.pen_swallow = true; /* swallow this tap's Move/Release */
                     self.toolbar_action(a);
                     return;
                 }
+                Some(None) => {
+                    self.pen_swallow = true;
+                    self.arm_highlighter();
+                    return;
+                }
+                None => {}
             }
         }
         let tool = match &self.screen {
@@ -907,7 +942,11 @@ impl App {
                         self.erase_pass(x as f32, y as f32);
                     }
                 } else if tool == Tool::Pen {
-                    self.ink_pass(phase, x, y, pressure);
+                    if self.nib == Nib::Highlighter {
+                        self.highlight_pass(phase, x, y);
+                    } else {
+                        self.ink_pass(phase, x, y, pressure);
+                    }
                 } else {
                     self.lasso_pen(phase, x, y);
                 }
@@ -1241,6 +1280,7 @@ impl App {
     /// Land the in-progress stroke in the page model (one undoable op).
     fn commit_open_stroke(&mut self) {
         let Screen::Doc(dv) = &mut self.screen else { return };
+        dv.hl_band = None;
         let Some(s) = dv.cur_stroke.take() else { return };
         if s.pts.is_empty() {
             return;
@@ -1395,6 +1435,72 @@ impl App {
         }
     }
 
+    /// The highlighter cell: arm the Pen with the marker nib, or put the
+    /// ink nib back when the marker is already armed.
+    fn arm_highlighter(&mut self) {
+        self.commit_open_stroke();
+        self.cancel_lasso();
+        self.dismiss_selection();
+        let armed = self.tool == Tool::Pen && self.nib == Nib::Highlighter;
+        self.nib = if armed { Nib::Pen } else { Nib::Highlighter };
+        if let Screen::Doc(dv) = &mut self.screen {
+            dv.tool = Tool::Pen;
+        }
+        self.tool = Tool::Pen;
+        save_settings(&self.doc_id(), self.sort, self.tool, self.pi_font, self.quiet, self.eraser, self.nib);
+        self.paint_toolbar();
+    }
+
+    /// One highlighter sweep. The band's y and height are decided at press
+    /// (snapped to the line of print under the nib, where there is one) and
+    /// then held, so the pen's own wobble never bends the band. The grey
+    /// goes down at HL_GRAY, which darkest-wins stamping keeps UNDER the
+    /// print and under ink, and which always needs a GL16 settle — DU
+    /// speckles a mid-grey whatever is beneath it.
+    fn highlight_pass(&mut self, phase: PenPhase, x: i32, y: i32) {
+        let band = {
+            let Screen::Doc(dv) = &self.screen else { return };
+            match dv.hl_band {
+                Some(b) if dv.cur_stroke.is_some() => b,
+                _ => highlight::band_for(&highlight::page_words(&dv.doc), y),
+            }
+        };
+        let Screen::Doc(dv) = &mut self.screen else { return };
+        dv.hl_band = Some(band);
+        let (cy, r) = band;
+        let p = Pt { x: x as f32, y: cy, r };
+        let prev = match (&mut dv.cur_stroke, phase) {
+            (Some(s), PenPhase::Move) => {
+                let prev = *s.pts.last().unwrap();
+                if (p.x - prev.x).abs() >= highlight::HL_STEP {
+                    s.pts.push(p);
+                }
+                prev
+            }
+            _ => {
+                dv.cur_stroke = Some(Stroke { id: 0, pts: vec![p], gray: highlight::HL_GRAY });
+                p
+            }
+        };
+        ink::stamp_segment(&mut self.fb, prev, p, highlight::HL_GRAY);
+        let seg = Rect {
+            x0: (prev.x.min(p.x) - r) as i32,
+            y0: (cy - r) as i32,
+            x1: (prev.x.max(p.x) + r).ceil() as i32,
+            y1: (cy + r).ceil() as i32,
+        };
+        dv.ink_dirty = Some(match dv.ink_dirty {
+            None => seg,
+            Some(d) => d.union(seg),
+        });
+        let heal = seg.pad(6);
+        dv.ink_settle = Some(match dv.ink_settle {
+            None => heal,
+            Some(s) => s.union(heal),
+        });
+        dv.ink_settle_at = Some(Instant::now() + Duration::from_millis(800));
+    }
+
     fn erase_pass(&mut self, x: f32, y: f32) {
         /* a Garamond run is typeset, not stroke geometry — the rubber
          * removes its whole patch (one undoable ErasePatch), like pi's own
@@ -1523,23 +1629,45 @@ impl App {
             ..Default::default()
         };
         dv.tb.draw(&mut self.fb, &st);
+        if self.hl_cell_shown() {
+            let armed = self.nib == Nib::Highlighter;
+            let strip = match &self.screen {
+                Screen::Doc(dv) => dv.tb.rect(),
+                _ => return,
+            };
+            highlight::draw(&mut self.fb, strip, armed);
+        }
     }
 
     fn paint_toolbar(&mut self) {
         self.blit_toolbar();
-        let Screen::Doc(dv) = &self.screen else { return };
-        let r = dv.tb.rect();
+        let Some(r) = self.tb_chrome_rect() else { return };
         self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
+    }
+
+    /// Everything the right-edge chrome paints: libreink's strip plus
+    /// papier's own highlighter cell under it.
+    fn tb_chrome_rect(&self) -> Option<Rect> {
+        let Screen::Doc(dv) = &self.screen else { return None };
+        let strip = dv.tb.rect();
+        Some(if self.hl_cell_shown() { strip.union(highlight::cell(strip)) } else { strip })
+    }
+
+    /// The cell is part of the unfolded strip: hidden when the toolbar is
+    /// collapsed, and skipped outright on a strip too long to sit above it.
+    fn hl_cell_shown(&self) -> bool {
+        let Screen::Doc(dv) = &self.screen else { return false };
+        dv.tb.open && highlight::fits(dv.tb.rect())
     }
 
     fn toolbar_action(&mut self, a: Action) {
         match a {
             Action::Toggle => {
                 let collapsed = {
+                    let r = self.tb_chrome_rect(); /* full strip while still open */
                     let Screen::Doc(dv) = &mut self.screen else { return };
-                    let r = dv.tb.rect(); /* full strip while still open */
                     dv.tb.open = !dv.tb.open;
-                    (!dv.tb.open).then_some(r)
+                    (!dv.tb.open).then_some(r).flatten()
                 };
                 if let Some(r) = collapsed {
                     /* collapsing: re-render the strip area from the model */
@@ -1551,6 +1679,10 @@ impl App {
                 if t == Tool::Eraser && self.tool == Tool::Eraser {
                     /* second tap on the armed eraser: cycle its mode */
                     self.eraser = self.eraser.next();
+                } else if t == Tool::Pen && self.tool == Tool::Pen {
+                    /* and on the armed pen: flip ink <-> highlighter */
+                    self.commit_open_stroke();
+                    self.nib = self.nib.toggled();
                 } else {
                     self.cancel_lasso();
                     self.dismiss_selection();
@@ -1559,7 +1691,7 @@ impl App {
                     }
                     self.tool = t;
                 }
-                save_settings(&self.doc_id(), self.sort, t, self.pi_font, self.quiet, self.eraser);
+                save_settings(&self.doc_id(), self.sort, t, self.pi_font, self.quiet, self.eraser, self.nib);
                 self.paint_toolbar();
             }
             Action::Undo => self.undo_action(false),
@@ -1583,7 +1715,7 @@ impl App {
             }
             Action::PiMode => {
                 self.quiet = !self.quiet;
-                save_settings(&self.doc_id(), self.sort, self.tool, self.pi_font, self.quiet, self.eraser);
+                save_settings(&self.doc_id(), self.sort, self.tool, self.pi_font, self.quiet, self.eraser, self.nib);
                 self.paint_toolbar();
             }
             Action::PagePrev => self.flip(-1),
@@ -1664,11 +1796,27 @@ impl App {
                     return;
                 }
                 /* finger taps work the toolbar too */
-                if let Screen::Doc(dv) = &self.screen {
-                    if let Some(a) = dv.tb.hit(x, y) {
+                let cell = if let Screen::Doc(dv) = &self.screen {
+                    match dv.tb.hit(x, y) {
+                        Some(a) => Some(Some(a)),
+                        None if self.hl_cell_shown() && highlight::hit(dv.tb.rect(), x, y) => {
+                            Some(None)
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                match cell {
+                    Some(Some(a)) => {
                         self.toolbar_action(a);
                         return;
                     }
+                    Some(None) => {
+                        self.arm_highlighter();
+                        return;
+                    }
+                    None => {}
                 }
                 self.touch_start = Some((x, y));
                 self.touch_t0 = Some(Instant::now());
@@ -1994,7 +2142,7 @@ impl App {
         match dialog_row_at(n, x, y) {
             Some(i) if i < PiFont::ALL.len() => {
                 self.pi_font = PiFont::ALL[i];
-                save_settings(&self.doc_id(), self.sort, self.tool, self.pi_font, self.quiet, self.eraser);
+                save_settings(&self.doc_id(), self.sort, self.tool, self.pi_font, self.quiet, self.eraser, self.nib);
                 println!("papier: pi font -> {}", self.pi_font.key());
                 self.dialog = None;
                 self.dismiss_font_dialog(n);
@@ -3346,7 +3494,7 @@ fn main() -> std::process::ExitCode {
         .and_then(|s| s.parse::<u64>().ok())
         .map_or(Duration::from_secs(180), Duration::from_secs);
 
-    let (last_doc, sort, tool, pi_font, quiet, eraser) = load_settings();
+    let (last_doc, sort, tool, pi_font, quiet, eraser, nib) = load_settings();
     let now = Instant::now();
     let mut app = App {
         fb,
@@ -3373,6 +3521,7 @@ fn main() -> std::process::ExitCode {
         pi_font,
         quiet,
         eraser,
+        nib,
         nudged: false,
         flips_since_flash: 0,
         ink_flush: if takeover { INK_FLUSH_TAKEOVER } else { INK_FLUSH_QTFB },

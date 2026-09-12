@@ -1,7 +1,7 @@
 // DocumentView.swift — a document open full-screen: page-curl (or arrow) page
 // navigation over the doc's seq, a papier-style floating right-edge tool
-// rail (pencil / eraser / finger / undo / redo), page counter, add-page
-// for notebooks. Books show the pre-rendered raster under the ink.
+// rail (pencil / highlighter / eraser / finger / undo / redo), page counter,
+// add-page for notebooks. Books show the pre-rendered raster under the ink.
 //
 // Page turning is CurlPager — the UIKit .pageCurl deck. The paper bends
 // under the finger like Apple Books; commit/cancel physics, backside
@@ -479,6 +479,11 @@ struct DocumentView: View {
     private func railControls(vertical: Bool) -> some View {
         railButton("pencil", active: tool == .pencil) { tool = .pencil }
             .accessibilityIdentifier("rail-pencil")
+        // highlighter: the tablet's HL cell — a pale band that marks words
+        // without covering them (PencilBridge.highlighterTool)
+        railButton("highlighter", active: tool == .highlighter) { tool = .highlighter }
+            .accessibilityIdentifier("rail-highlighter")
+            .accessibilityLabel("Highlighter")
         // eraser: tap to select; tap again to cycle Object -> Pixel -> Region
         railButton(tool == .eraser ? eraserMode.symbol : "eraser", active: tool == .eraser) {
             if tool == .eraser { eraserMode = eraserMode.next } else { tool = .eraser }

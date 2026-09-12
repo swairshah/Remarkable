@@ -18,7 +18,16 @@ A xochitl-like **home grid** opens two kinds of documents:
 
 On top of the canvas: a **top status bar** (battery, wifi, clock), a
 **right-edge toolbar** (pen / eraser / lasso / undo / redo / page nav /
-home), **lasso selection** with move + delete/cut, and full **undo/redo**.
+home / **HL**), **lasso selection** with move + delete/cut, and full
+**undo/redo**.
+
+The **HL** cell arms the highlighter: a wide pale-grey band that goes
+*under* the print and under ink (darkest-wins stamping), level for the
+whole sweep, and snapped to the line of print under the nib on book
+pages. Re-tapping the armed pen flips between ink and marker as well. A
+highlight is an ordinary stroke with a pale `gray` — no page-format
+change, so erase, lasso, undo, thumbnails, the web publish render and the
+iPad app all handle it with no special case.
 
 Built on the takeover stack from `reader`/`notebook`/`collab`: it stops
 xochitl, hosts the panel with a vendored rm2fb server, reads raw
@@ -45,6 +54,7 @@ make deploy HOST=root@<ip>    # push to the tablet (needs make fetch-server once
 | `m4`      | lasso select (user + AI ink), drag-move, delete/cut, undo |
 | `m5-book` | pi margin companion: underline + margin note + inserted note page |
 | `m5-nb`   | pi co-writer + pause suppression while a selection is active |
+| `hl`      | the highlighter: line-snapped band on a book page, pale-grey stroke persisted |
 
 The preview harness runs an **arm64** container (native python + a single
 qemu layer for the armv7 binary); an amd64 container on an Apple-silicon

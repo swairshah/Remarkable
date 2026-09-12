@@ -14,6 +14,8 @@ PAPIER_SCENARIO picks the scripted session (one per milestone):
   m1    doc model: book open/ink/flip/persist, notebook quick-sheets grow,
         ink persistence across an app restart (three app sessions), and
         CLOSE returning from a document to the Papier library
+  hl    the highlighter cell: a level, line-snapped grey band on a book
+        page, then the same cell toggling back to black ink
 """
 import json
 import math
@@ -311,7 +313,9 @@ TB_TOGGLE = (W - 52, 96)
 # cell-center y per feature: strip top = cy + BTN_R + GAP = 136, CELL_H = 104
 TB_BTN = {"pen": 188, "eraser": 292, "lasso": 396, "undo": 500, "redo": 604,
           "pi": 708, "nudge": 812,
-          "prev": 916, "goto": 1020, "next": 1124, "add": 1228, "font": 1332, "home": 1436}
+          "prev": 916, "goto": 1020, "next": 1124, "add": 1228, "font": 1332, "home": 1436,
+          # papier's own 14th cell, flush under the strip (src/highlight.rs)
+          "hl": 1540}
 
 
 def pen_tap(s, x, y):
@@ -912,6 +916,93 @@ def scenario_erasemodes(h, out_png):
     print("fake-qtfb: erasemodes assertions passed")
 
 
+def hl_band(words, y):
+    """src/highlight.rs band_for() mirror: (center, half-height) in page px."""
+    boxes = [b for b in words if b[3] > b[1]]
+    if not boxes:
+        return (float(y), 13.0)
+    near = min(boxes, key=lambda b: abs((b[1] + b[3]) // 2 - y))
+    h = near[3] - near[1]
+    if abs((near[1] + near[3]) // 2 - y) > max(h, 20):
+        return (float(y), 13.0)
+    tol = max(h // 2, 6)
+    line = [b for b in boxes
+            if abs((b[1] + b[3]) // 2 - (near[1] + near[3]) // 2) <= tol]
+    y0, y1 = min(b[1] for b in line), max(b[3] for b in line)
+    return ((y0 + y1) / 2, min(max((y1 - y0) / 2 + 3, 8), 26))
+
+
+def scenario_hl(h, out_png):
+    """The highlighter: a level, line-snapped grey band under the print."""
+    def shot(tag):
+        write_png(out_png.replace(".png", f"-{tag}.png"))
+
+    subprocess.run(["rm", "-rf", DATA_DIR], check=False)
+    os.makedirs(f"{DATA_DIR}/docs", exist_ok=True)
+    copy_tree(os.path.join(h.here, "..", "build", "testbook", "docs", "demo-paper"),
+              f"{DATA_DIR}/docs/demo-paper")
+
+    # Sweep a real line of print: the widest line of page 1, so the band has
+    # words under it for its whole length.
+    words = [b[:4] for b in json.load(
+        open(f"{DATA_DIR}/docs/demo-paper/text/0001.json"))["words"]]
+    groups = {}
+    for box in words:
+        groups.setdefault((box[1], box[3]), []).append(box)
+    line = max(groups.values(),
+               key=lambda g: max(b[2] for b in g) - min(b[0] for b in g))
+    line_x0, line_x1 = min(b[0] for b in line), max(b[2] for b in line)
+    nib_y = (line[0][1] + line[0][3]) // 2
+    want_cy, want_r = hl_band(words, nib_y)
+
+    s = h.launch(PAPIER_OPEN="demo-paper", PAPIER_FAKE_SYS="1")
+    s.drain(2.2)
+
+    pen_tap(s, *TB_TOGGLE)              # expand the toolbar
+    s.drain(0.6)
+    pen_tap(s, TB_CX, TB_BTN["hl"])     # arm the marker
+    s.drain(0.8)
+    shot("armed")
+
+    # Sweep the line with a deliberate vertical wobble: the band must come
+    # out level anyway, and must not start above the nib's own line.
+    s.pen(PEN_PRESS, line_x0 + 6, nib_y)
+    steps = 30
+    for i in range(1, steps + 1):
+        x = line_x0 + 6 + (line_x1 - line_x0 - 12) * i // steps
+        s.pen(PEN_UPDATE, x, nib_y + (8 if i % 2 else -8))
+        time.sleep(0.012)
+    s.pen(PEN_RELEASE, line_x1 - 6, nib_y)
+    s.drain(2.0)
+    shot("band")
+
+    pen_tap(s, TB_CX, TB_BTN["hl"])     # the cell toggles the ink nib back
+    s.drain(0.8)
+    s.squiggle(240, 1700, n=30)         # ordinary ink in the bottom margin
+    s.drain(1.5)
+    shot("ink-again")
+
+    s.terminate_clean()
+
+    ink = json.load(open(f"{DATA_DIR}/docs/demo-paper/ink/pdf-0001.json"))
+    assert len(ink["strokes"]) == 2, f"band + ink expected: {len(ink['strokes'])}"
+    band, ink_stroke = ink["strokes"][0], ink["strokes"][1]
+    assert band["g"] >= 150, f"the band must be highlighter grey, got {band['g']}"
+    assert ink_stroke["g"] == 0, f"the nib must go back to black ink, got {ink_stroke['g']}"
+
+    pts = band["p"]
+    ys = [pts[i + 1] for i in range(0, len(pts), 3)]
+    assert max(ys) == min(ys), f"the band wobbled with the pen: {min(ys)}..{max(ys)}"
+    assert abs(ys[0] / 10 - want_cy) <= 0.15, \
+        f"band centered on {ys[0] / 10}, the line sits at {want_cy}"
+    rs = sorted({p / 10 for p in pts[2::3]})
+    assert len(rs) == 1 and abs(rs[0] - want_r) <= 0.15, \
+        f"band half-height {rs}, expected {want_r}"
+    xs = [pts[i] for i in range(0, len(pts), 3)]
+    assert max(xs) - min(xs) > (line_x1 - line_x0 - 40) * 10, "the band did not cover the line"
+    print("fake-qtfb: hl assertions passed")
+
+
 SCENARIOS = {
     "m0": scenario_m0,
     "m1": scenario_m1,
@@ -922,6 +1013,7 @@ SCENARIOS = {
     "m5-nb": scenario_m5_nb,
     "redobug": scenario_redobug,
     "erasemodes": scenario_erasemodes,
+    "hl": scenario_hl,
     "fontflip": scenario_fontflip,
     "garamond": scenario_garamond,
     "agent": scenario_agent,
