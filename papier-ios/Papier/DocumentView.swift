@@ -32,6 +32,7 @@ struct DocumentView: View {
     @StateObject private var models = PageModelCache()
     @StateObject private var hub = CanvasHub()
     @StateObject private var pi: PiSession
+    @ObservedObject private var clipboard = InkClipboard.shared
 
     init(doc: PapierDoc) {
         self.doc = doc
@@ -351,8 +352,29 @@ struct DocumentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
+
+                // The paste bar: the clipboard is armed (cut/copy). It
+                // rides page turns — tap the page to place, Done ends it.
+                if clipboard.armed {
+                    HStack(spacing: 12) {
+                        Image(systemName: "doc.on.clipboard")
+                            .font(.system(size: 14, weight: .medium))
+                        Text("In clipboard — tap the page to place")
+                            .font(.callout)
+                        Button("Done") { clipboard.armed = false }
+                            .font(.callout.weight(.semibold))
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
+                    .padding(.top, pi.toast == nil ? 8 : 56)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .accessibilityIdentifier("paste-bar")
+                }
             }
             .animation(.spring(duration: 0.35), value: pi.toast)
+            .animation(.spring(duration: 0.35), value: clipboard.armed)
             .coordinateSpace(name: "desk")
         }
         // The nav bar is gone — the paper owns the screen; chrome floats.
@@ -658,6 +680,10 @@ private struct PageScreen: View {
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("paperTone") private var paperToneRaw = PaperTone.paper.rawValue
     @State private var selection: InkSelection?
+    @ObservedObject private var clipboard = InkClipboard.shared
+    /// The live selection came from a PASTE (not a lasso): it stays alive
+    /// after a drag, and ending the paste flow dismisses it.
+    @State private var pastedSelection = false
 
     private var paper: Color {
         (PaperTone(rawValue: paperToneRaw) ?? .paper).color(dark: colorScheme == .dark)
@@ -665,7 +691,8 @@ private struct PageScreen: View {
 
     /// A capture overlay owns the touches while lassoing or region-erasing.
     private var capturing: Bool {
-        active && ((tool == .lasso && selection == nil) || (tool == .eraser && eraserMode == .region))
+        active && !clipboard.armed
+            && ((tool == .lasso && selection == nil) || (tool == .eraser && eraserMode == .region))
     }
 
     var body: some View {
@@ -695,6 +722,21 @@ private struct PageScreen: View {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier(active ? "page-surface" : "neighbor-page")
             .onChange(of: tool) { _, _ in selection = nil }
+            .onChange(of: active) { _, isActive in
+                // a page turn drops this page's selection; in the paste
+                // flow the bar stays armed so the ink can land elsewhere
+                if !isActive {
+                    selection = nil
+                    pastedSelection = false
+                }
+            }
+            .onChange(of: clipboard.armed) { _, armed in
+                // DONE in the paste bar dismisses the placed box
+                if !armed && pastedSelection {
+                    selection = nil
+                    pastedSelection = false
+                }
+            }
         }
     }
 
@@ -721,7 +763,8 @@ private struct PageScreen: View {
                            tool: tool,
                            eraserMode: eraserMode,
                            fingerDraws: fingerDraws,
-                           interactionEnabled: active && !capturing && selection == nil,
+                           interactionEnabled: active && !capturing && selection == nil
+                               && !clipboard.armed,
                            isActive: active,
                            hub: hub,
                            onChanged: { model.drawingChanged($0) },
@@ -736,6 +779,23 @@ private struct PageScreen: View {
                 CaptureView(dashed: true) { poly in
                     if tool == .lasso { lassoCompleted(poly) } else { regionErase(poly) }
                 }
+            }
+            if active, clipboard.armed, !clipboard.isEmpty, selection == nil {
+                // paste mode: a tap places the clipboard centered there
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(SpatialTapGesture().onEnded { v in paste(at: v.location, fit: fit) })
+                    .accessibilityIdentifier("paste-catcher")
+            }
+            if selection != nil {
+                // a tap outside the box dismisses it — and ends the paste flow
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(SpatialTapGesture().onEnded { _ in
+                        selection = nil
+                        pastedSelection = false
+                        if clipboard.armed { clipboard.armed = false }
+                    })
             }
             if let sel = selection {
                 selectionOverlay(sel)
@@ -778,9 +838,18 @@ private struct PageScreen: View {
                         .onEnded { v in applyMove(v.translation) }
                 )
             HStack(spacing: 10) {
+                Button { copySelection() } label: {
+                    Image(systemName: "doc.on.doc").font(.system(size: 15, weight: .medium))
+                }
+                .accessibilityLabel("Copy")
+                Button { cutSelection() } label: {
+                    Image(systemName: "scissors").font(.system(size: 15, weight: .medium))
+                }
+                .accessibilityLabel("Cut")
                 Button { deleteSelection() } label: {
                     Image(systemName: "trash").font(.system(size: 15, weight: .medium))
                 }
+                .accessibilityLabel("Delete")
                 Button { selection = nil } label: {
                     Image(systemName: "xmark").font(.system(size: 15, weight: .medium))
                 }
@@ -802,7 +871,14 @@ private struct PageScreen: View {
             model.setDrawing(PKDrawing(strokes: strokes))
         }
         model.movePatches(ids: sel.patchIds, by: delta)
-        selection = nil
+        if clipboard.armed {
+            // paste flow: the box stays live at its new spot until DONE
+            // or a tap outside
+            selection = InkSelection(strokeIndices: sel.strokeIndices, patchIds: sel.patchIds,
+                                     bbox: sel.bbox.offsetBy(dx: delta.width, dy: delta.height))
+        } else {
+            selection = nil
+        }
     }
 
     private func deleteSelection() {
@@ -815,5 +891,55 @@ private struct PageScreen: View {
         }
         model.erasePatches(ids: sel.patchIds)
         selection = nil
+        pastedSelection = false
+    }
+
+    // MARK: - clipboard (cut / copy / paste)
+
+    /// The selection's strokes as display-space PKStrokes: user ink plus
+    /// pi-patch ink (converted — pastes back as user ink).
+    private func stashSelection(_ sel: InkSelection) {
+        var grabbed: [PKStroke] = []
+        let strokes = model.currentDrawing.strokes
+        for i in sel.strokeIndices where i < strokes.count { grabbed.append(strokes[i]) }
+        for patch in model.patches where sel.patchIds.contains(patch.id) {
+            grabbed.append(contentsOf: PencilBridge.strokes(fromPatch: patch, scale: model.scale))
+        }
+        clipboard.stash(grabbed)
+    }
+
+    private func copySelection() {
+        guard let sel = selection else { return }
+        stashSelection(sel)
+    }
+
+    private func cutSelection() {
+        guard let sel = selection else { return }
+        stashSelection(sel)
+        deleteSelection()
+    }
+
+    /// Land the clipboard centered at the tap (clamped on the page) and
+    /// select it so it can be dragged into place.
+    private func paste(at point: CGPoint, fit: CGSize) {
+        let clip = clipboard.strokes
+        guard !clip.isEmpty else { return }
+        let b = clipboard.bounds
+        let ox = min(max(point.x - b.width / 2, 8), max(fit.width - b.width - 8, 8))
+        let oy = min(max(point.y - b.height / 2, 8), max(fit.height - b.height - 8, 8))
+        let t = CGAffineTransform(translationX: ox - b.minX, y: oy - b.minY)
+        let placed = clip.map { s in
+            var s = s
+            s.transform = s.transform.concatenating(t)
+            return s
+        }
+        var strokes = model.currentDrawing.strokes
+        let first = strokes.count
+        strokes.append(contentsOf: placed)
+        model.setDrawing(PKDrawing(strokes: strokes))
+        selection = InkSelection(strokeIndices: Array(first..<strokes.count), patchIds: [],
+                                 bbox: CGRect(x: ox, y: oy, width: b.width, height: b.height)
+                                     .insetBy(dx: -10, dy: -10))
+        pastedSelection = true
     }
 }

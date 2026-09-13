@@ -52,6 +52,13 @@ enum PencilBridge {
         return PKStroke(ink: ink, path: PKStrokePath(controlPoints: points, creationDate: Date()))
     }
 
+    /// A pi patch's strokes as display-space PKStrokes — for the clipboard:
+    /// cut/copied pi ink travels as plain strokes and pastes as user ink
+    /// (texts don't convert; same limitation as the tablet).
+    static func strokes(fromPatch patch: InkPatch, scale: CGFloat) -> [PKStroke] {
+        patch.strokes.map { stroke(from: $0, scale: scale) }
+    }
+
     // MARK: PencilKit -> papier (page space)
 
     /// Convert the canvas drawing back to papier user strokes. Ids are

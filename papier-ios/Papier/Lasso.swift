@@ -72,6 +72,44 @@ enum InkGeometry {
     }
 }
 
+// MARK: - clipboard
+
+/// The app-wide ink clipboard: strokes stashed by CUT/COPY (display
+/// space, normalized to their union origin). `armed` shows the paste bar
+/// in DocumentView; it survives page turns so ink can travel to another
+/// page — tap to place, drag to position, Done (or a tap outside the
+/// box) ends the flow.
+final class InkClipboard: ObservableObject {
+    static let shared = InkClipboard()
+    @Published var strokes: [PKStroke] = []
+    @Published var armed = false
+
+    var isEmpty: Bool { strokes.isEmpty }
+
+    /// Stash display-space strokes, normalized so their union bounds
+    /// starts at the origin, and arm the paste bar.
+    func stash(_ new: [PKStroke]) {
+        guard !new.isEmpty else { return }
+        var bounds = new[0].renderBounds
+        for s in new.dropFirst() { bounds = bounds.union(s.renderBounds) }
+        let t = CGAffineTransform(translationX: -bounds.minX, y: -bounds.minY)
+        strokes = new.map { s in
+            var s = s
+            s.transform = s.transform.concatenating(t)
+            return s
+        }
+        armed = true
+    }
+
+    /// The stash's union bounds (origin ≈ .zero after normalization).
+    var bounds: CGRect {
+        guard let first = strokes.first else { return .zero }
+        var b = first.renderBounds
+        for s in strokes.dropFirst() { b = b.union(s.renderBounds) }
+        return b
+    }
+}
+
 // MARK: - selection state
 
 struct InkSelection {
