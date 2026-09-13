@@ -130,8 +130,8 @@ test('site builder makes swair.dev root the post index and copies only chosen as
   assert.match(writingCss, /\.post-body li \+ li \{ margin-top:/);
   assert.match(writingCss, /\.post-body blockquote \{[^}]*font-size: 0\.9rem/);
   assert.match(writingCss, /\.post-body a:link, \.post-body a:visited \{ color: var\(--link-color\); text-decoration: none; \}/);
-  assert.match(writingCss, /--link-color: #4d4d4d/);
-  assert.match(writingCss, /--link-color: #a8a49c/);
+  assert.match(writingCss, /--link-color: #6b6b6b/);
+  assert.match(writingCss, /--link-color: #8f8b82/);
   assert.match(writingCss, /\.theme-toggle \{[^}]*border: 0;[^}]*opacity: 0\.6/);
   assert.match(writingCss, /--font-family-code: "Google Sans Code"/);
   assert.match(writingCss, /math\[display="block"\]/);
