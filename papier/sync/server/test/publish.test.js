@@ -121,7 +121,10 @@ test('site builder makes swair.dev root the post index and copies only chosen as
   assert.match(writingCss, /:root \{ font-size: 26px;/);
   assert.match(writingCss, /\.site-nav \{ margin: calc\(var\(--line-height\) \/ 2\) 0 var\(--line-height\); \}/);
   assert.match(writingCss, /a:link, a:visited \{ text-decoration: none; \}/);
-  assert.match(writingCss, /\.post-body p \{ text-align: justify;[^}]*hyphens: auto/);
+  assert.match(writingCss, /\.post-body p \{ text-align: justify;[^}]*hyphens: auto;[^}]*hyphenate-limit-chars: 6 3 3/);
+  assert.doesNotMatch(writingCss, /word-break: break-word/);
+  assert.match(writingCss, /--line-height: 1\.25rem/);
+  assert.match(writingCss, /\.page-header h1, \.post-body h2, \.post-body h3 \{ text-wrap: balance; \}/);
   assert.match(writingCss, /\.post-body p \+ p, \.post-body p \+ aside \+ p \{ margin-top: 0; text-indent: 3ch; \}/);
   assert.match(writingCss, /\.post-body a:link, \.post-body a:visited \{ color: var\(--link-color\); text-decoration: none; \}/);
   assert.match(writingCss, /--link-color: #7a5f40/);
