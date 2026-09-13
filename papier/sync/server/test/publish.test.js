@@ -118,7 +118,8 @@ test('site builder makes swair.dev root the post index and copies only chosen as
   assert.match(post, /<aside>\s*<p>A useful side note\.<\/p>\s*<\/aside>/);
   assert.doesNotMatch(post, /Handwritten pages/);
   const writingCss = fs.readFileSync(path.join(out, 'writing.css'), 'utf8');
-  assert.doesNotMatch(writingCss, /font-size: 20px/, 'must inherit the site 16px\/1.2rem rhythm');
+  assert.match(writingCss, /:root \{ font-size: 32px;/);
+  assert.match(writingCss, /a:link, a:visited \{ text-decoration: none; \}/);
   assert.match(writingCss, /\.post-body p \{ text-align: justify;[^}]*hyphens: auto/);
   assert.match(writingCss, /\.post-body p \+ p, \.post-body p \+ aside \+ p \{ margin-top: 0; text-indent: 3ch; \}/);
   assert.match(writingCss, /\.post-body a:link, \.post-body a:visited \{ color: var\(--link-color\); text-decoration: none; \}/);
