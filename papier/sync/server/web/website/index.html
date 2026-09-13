@@ -91,6 +91,40 @@
   .preview-frame { flex:1; width:100%; min-height:480px; border:0; background:#fbfbf9; }
   .preview-frame[hidden],.loading[hidden] { display:none; }
   .loading { display:grid; flex:1; place-items:center; padding:30px; color:var(--muted); text-align:center; }
+  .history-overlay { position:fixed; inset:0; z-index:30; display:none; background:color-mix(in srgb,var(--ink) 26%,transparent); }
+  .history-overlay.open { display:block; }
+  .history-drawer {
+    position:absolute; top:0; right:0; bottom:0; width:min(700px,100vw); display:flex; flex-direction:column;
+    background:var(--panel); box-shadow:-1px 0 0 var(--line),-18px 0 48px rgba(0,0,0,.18);
+  }
+  .history-head { display:flex; align-items:center; gap:10px; min-height:52px; padding:6px 16px; border-bottom:1px solid var(--line); }
+  .history-head strong { font:600 18px/1 "EB Garamond",Garamond,serif; }
+  .history-head span { color:var(--muted); font-size:11px; }
+  .history-head .button { margin-left:auto; }
+  .history-list { flex:1; overflow:auto; padding:10px 16px 24px; overscroll-behavior:contain; }
+  .history-run { padding:12px 2px; border-bottom:1px solid var(--line); }
+  .history-row { display:flex; align-items:baseline; gap:9px; width:100%; padding:2px 0; border:0; background:none; text-align:left; cursor:pointer; }
+  .history-row time { font-size:12.5px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .history-row .pages-count { color:var(--muted); font-size:11px; }
+  .history-row .caret { margin-left:auto; color:var(--muted); transition:rotate 160ms ease; }
+  .history-run.expanded .caret { rotate:90deg; }
+  .badge { padding:2px 8px; border-radius:99px; font-size:10px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; background:color-mix(in srgb,var(--muted) 16%,transparent); color:var(--muted); }
+  .badge.published { background:color-mix(in srgb,#3a875e 15%,transparent); color:#3a875e; }
+  .badge.failed { background:color-mix(in srgb,#c74736 14%,transparent); color:#c74736; }
+  .badge.running { background:color-mix(in srgb,var(--accent) 16%,transparent); color:var(--accent); }
+  .history-changes { display:flex; flex-wrap:wrap; gap:5px; margin-top:7px; }
+  .change-chip { padding:2px 9px; border-radius:6px; background:var(--surface); box-shadow:inset 0 0 0 1px var(--line); font-size:11px; font-variant-numeric:tabular-nums; }
+  .change-chip.delete { text-decoration:line-through; opacity:.72; }
+  .history-detail { display:none; margin-top:11px; }
+  .history-run.expanded .history-detail { display:block; }
+  .history-phase { margin:0 0 9px; color:var(--muted); font-size:12px; }
+  .diff-strip { display:flex; gap:9px; overflow-x:auto; padding-bottom:6px; }
+  .diff-strip a { flex:0 0 auto; }
+  .diff-strip img { display:block; height:210px; border-radius:6px; background:#fff; outline:1px solid rgba(0,0,0,.1); }
+  html[data-theme=dark] .diff-strip img { outline-color:rgba(255,255,255,.1); }
+  .diff-legend { margin:5px 0 0; color:var(--muted); font-size:10.5px; }
+  .agent-log { margin:10px 0 0; max-height:240px; overflow:auto; padding:10px 12px; border-radius:8px; background:var(--surface); box-shadow:inset 0 0 0 1px var(--line); color:var(--muted); font:11px/1.5 "Google Sans Code",ui-monospace,monospace; white-space:pre-wrap; overflow-wrap:anywhere; overscroll-behavior:contain; }
+  @media(max-width:760px) { .diff-strip img { height:160px; } .agent-log { max-height:32vh; } }
   .mobile-tabs { display:none; }
   @media(max-width:980px) {
     .workspace { --sidebar-width:210px; grid-template-columns:var(--sidebar-width) minmax(300px,1fr) minmax(340px,1fr); }
@@ -135,6 +169,7 @@
     <div class="workspace-title"><strong>Website editor</strong><span>Changes publish to swair.dev</span></div>
     <span class="bar-spacer"></span>
     <span class="status" id="status">Loading posts…</span>
+    <button class="button" id="history-button" aria-haspopup="dialog"><span class="button-icon">⧖</span><span class="wide-label">History</span></button>
     <a class="button" id="live-link" href="https://swair.dev/" target="_blank" rel="noopener"><span class="button-icon">↗</span><span class="wide-label">View live</span></a>
     <button class="button primary" id="save" disabled><span class="button-icon">↑</span><span>Save</span></button>
   </header>
@@ -156,6 +191,16 @@
       <iframe class="preview-frame" id="preview" title="Post preview" sandbox="allow-same-origin allow-popups" hidden></iframe>
     </section>
   </main>
+</div>
+<div class="history-overlay" id="history" role="dialog" aria-modal="true" aria-label="Publish history">
+  <div class="history-drawer">
+    <div class="history-head">
+      <strong>Publish history</strong>
+      <span>What each notebook publish sent to the agent, and what it decided</span>
+      <button class="button" id="history-close">Close</button>
+    </div>
+    <div class="history-list" id="history-list"><div class="empty-posts">Loading…</div></div>
+  </div>
 </div>
 <script src="/website/marked.js"></script>
 <script>
@@ -311,6 +356,89 @@ function showTab(preview) {
   $('edit-tab').classList.toggle('active', !preview); $('preview-tab').classList.toggle('active', preview);
   $('edit-tab').setAttribute('aria-selected', String(!preview)); $('preview-tab').setAttribute('aria-selected', String(preview));
 }
+/* ---- publish history: what each run sent to the agent + what it decided ---- */
+const hist = { open:false, timer:null, expanded:null, jobs:[], details:{} };
+function fmtRunTime(ms) {
+  const d = new Date(ms);
+  return d.toLocaleDateString(undefined,{month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+}
+function runBadge(run) {
+  if (run.status === 'running') return ['running','running'];
+  if (run.status === 'failed') return ['failed','failed'];
+  if (run.outcome === 'published' || run.outcome === 'removed') return ['published', run.outcome];
+  return ['', run.outcome || 'unchanged'];
+}
+function changeChips(changes) {
+  if (!changes || !changes.length) return '';
+  return '<div class="history-changes">' + changes.map((c) =>
+    '<span class="change-chip' + (c.action === 'delete' ? ' delete' : '') + '">' + esc(c.action) + ' ' + esc(c.slug) +
+    (c.pages && c.pages.length ? ' · p.' + c.pages.map(Number).join(',') : '') + '</span>').join('') + '</div>';
+}
+function historyDetailHtml(run, detail) {
+  const img = (p) => API + 'website-history-image?job=' + run.job + '&page=' + p;
+  const imgs = (run.pages || []).map((p) =>
+    '<a href="' + img(p) + '" target="_blank" rel="noopener"><img loading="lazy" alt="Diff of changed page ' + Number(p) + '" src="' + img(p) + '"></a>').join('');
+  return (run.status === 'running' && run.phase ? '<p class="history-phase">' + esc(run.phase) + '…</p>' : '') +
+    (detail && detail.error ? '<p class="history-phase">' + esc(detail.error) + '</p>' : '') +
+    (imgs ? '<div class="diff-strip">' + imgs + '</div><p class="diff-legend">Diff pages sent to the agent — grey: already published · black: new ink · red: erased · blue: AI ink.</p>'
+          : '<p class="history-phase">No changed pages were recorded for this run.</p>') +
+    (detail && detail.agentLog ? '<pre class="agent-log">' + esc(detail.agentLog) + '</pre>' : '');
+}
+async function loadHistoryDetail(job) {
+  try {
+    const r = await fetch(API + 'website-history-job?job=' + encodeURIComponent(job), {cache:'no-store'});
+    const j = await r.json(); if (r.ok && j.ok) hist.details[job] = j;
+  } catch (_) {}
+}
+async function refreshHistory() {
+  try {
+    const r = await fetch(API + 'website-history', {cache:'no-store'});
+    const j = await r.json(); if (!r.ok || !j.ok) throw new Error(j.error || 'Could not load history');
+    hist.jobs = j.jobs || [];
+    if (hist.expanded) await loadHistoryDetail(hist.expanded);
+    renderHistory();
+  } catch (err) { $('history-list').innerHTML = '<div class="empty-posts">' + esc(err.message) + '</div>'; }
+}
+function renderHistory() {
+  const list = $('history-list');
+  if (!hist.jobs.length) { list.innerHTML = '<div class="empty-posts">No publish runs yet.</div>'; return; }
+  list.innerHTML = '';
+  hist.jobs.forEach((run) => {
+    const expanded = hist.expanded === run.job;
+    const item = document.createElement('div');
+    item.className = 'history-run' + (expanded ? ' expanded' : '');
+    const badge = runBadge(run);
+    item.innerHTML = '<button class="history-row" aria-expanded="' + expanded + '">' +
+      '<time>' + esc(fmtRunTime(run.started)) + '</time>' +
+      '<span class="badge ' + badge[0] + '">' + esc(badge[1]) + '</span>' +
+      '<span class="pages-count">' + (run.mode === 'remove' ? 'unpublish' : run.pages.length + ' page' + (run.pages.length === 1 ? '' : 's')) + '</span>' +
+      '<span class="caret">›</span></button>' +
+      changeChips(run.changes) +
+      '<div class="history-detail">' + (expanded ? historyDetailHtml(run, hist.details[run.job]) : '') + '</div>';
+    item.querySelector('.history-row').onclick = async () => {
+      hist.expanded = expanded ? null : run.job;
+      if (hist.expanded && !hist.details[run.job]) await loadHistoryDetail(run.job);
+      renderHistory();
+    };
+    list.appendChild(item);
+  });
+}
+function historyOpen(open) {
+  hist.open = open;
+  $('history').classList.toggle('open', open);
+  clearInterval(hist.timer); hist.timer = null;
+  if (!open) return;
+  $('history-list').innerHTML = '<div class="empty-posts">Loading…</div>';
+  hist.details = {};
+  refreshHistory();
+  hist.timer = setInterval(() => {
+    if (hist.jobs.some((run) => run.status === 'running')) refreshHistory();
+  }, 4000);
+}
+$('history-button').onclick = () => historyOpen(true);
+$('history-close').onclick = () => historyOpen(false);
+$('history').addEventListener('click', (e) => { if (e.target === $('history')) historyOpen(false); });
+
 const SIDEBAR_KEY = 'papier-website-sidebar';
 const mobileSidebar = () => matchMedia('(max-width:760px)').matches;
 function updateSidebarButton() {
@@ -340,6 +468,7 @@ $('title').addEventListener('input', () => { updateSave(); syncPreview(); });
 $('body').addEventListener('input', () => { updateSave(); updatePreview(false); });
 $('save').onclick = savePost;
 window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && hist.open) { historyOpen(false); return; }
   if (!(e.metaKey || e.ctrlKey)) return;
   if (e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); }
   else if (e.key.toLowerCase() === 's') { e.preventDefault(); savePost(); }

@@ -40,6 +40,9 @@
 //   POST /website-preview {body}  render an unsaved Markdown preview.
 //   POST /website-save {slug,title,body,revision}  save and publish an edit.
 //   GET  /website-save-status?job=  phase/outcome/url of an editor save.
+//   GET  /website-history  every notebook publish run, newest first.
+//   GET  /website-history-job?job=  one run: decision, agent trace, pages.
+//   GET  /website-history-image?job=&page=NN  a diff page sent to the agent.
 //
 // Inbound is a SEPARATE dir from the mirror on purpose: the tablet's outbound
 // rsync uses --delete, so writing straight into the mirror would be wiped on
@@ -1380,6 +1383,69 @@ function handleWebsiteSave(req, res) {
     });
   });
 }
+// The publish job dirs double as the editorial record: every run keeps the
+// diff pages the agent saw, its decision.json, and the agent's own log.
+function readJobFile(dir, name, max = 400) {
+  try { return fs.readFileSync(path.join(dir, name), 'utf8').trim().slice(0, max); } catch (_) { return null; }
+}
+function websiteHistoryEntry(id, detailed) {
+  const dir = publishDir(id);
+  let started = 0;
+  try { started = fs.statSync(path.join(dir, 'doc.txt')).mtimeMs; } catch (_) { return null; }
+  let updated = started;
+  try { updated = fs.statSync(path.join(dir, 'status.txt')).mtimeMs; } catch (_) {}
+  const phase = readJobFile(dir, 'status.txt') || '';
+  const outcome = readJobFile(dir, 'outcome.txt');
+  const mem = publishJobs.get(id);
+  const status = outcome ? 'done'
+    : (mem && mem.status === 'running') ? 'running'
+    : phase.startsWith('failed') ? 'failed'
+    : (Date.now() - updated < PUBLISH_TIMEOUT) ? 'running' : 'failed';
+  let changes = null;
+  try { changes = JSON.parse(fs.readFileSync(path.join(dir, 'work', 'decision.json'), 'utf8')).changes || null; } catch (_) {}
+  let pages = [];
+  try {
+    pages = fs.readdirSync(path.join(dir, 'work', 'pages'))
+      .map((f) => (f.match(/^page-(\d{2})\.png$/) || [])[1]).filter(Boolean).sort();
+  } catch (_) {}
+  const entry = {
+    job: id, started, updated, status, phase,
+    mode: readJobFile(dir, 'mode.txt') || 'publish',
+    outcome, title: readJobFile(dir, 'title.txt'), url: readJobFile(dir, 'url.txt'),
+    pages, changes,
+  };
+  if (detailed) {
+    entry.agentLog = readTraceFile(path.join(dir, 'agent.stderr.log')) || readTraceFile(path.join(dir, 'trace.log'));
+    entry.error = phase.startsWith('failed') ? phase : null;
+  }
+  return entry;
+}
+function handleWebsiteHistory(res) {
+  let ids = [];
+  try { ids = fs.readdirSync(PUBLISH_JOBS).filter((d) => /^[a-f0-9]{16}$/.test(d)); } catch (_) {}
+  const jobs = ids.map((id) => websiteHistoryEntry(id, false)).filter(Boolean)
+    .sort((a, b) => b.started - a.started).slice(0, 60);
+  res.setHeader('Cache-Control', 'no-store');
+  json(res, 200, { ok: true, jobs });
+}
+function handleWebsiteHistoryJob(res, id) {
+  if (!/^[a-f0-9]{16}$/.test(id || '')) return json(res, 400, { ok: false, error: 'bad job id' });
+  const entry = websiteHistoryEntry(id, true);
+  if (!entry) return json(res, 404, { ok: false, error: 'unknown publish job' });
+  res.setHeader('Cache-Control', 'no-store');
+  json(res, 200, { ok: true, ...entry });
+}
+function handleWebsiteHistoryImage(req, res, id, page) {
+  if (!/^[a-f0-9]{16}$/.test(id || '') || !/^\d{2}$/.test(page || '')) { res.writeHead(400); res.end('bad request'); return; }
+  const file = path.join(publishDir(id), 'work', 'pages', `page-${page}.png`);
+  fs.stat(file, (err, st) => {
+    if (err) { res.writeHead(404); res.end('no page image'); return; }
+    const headers = { 'Content-Type': 'image/png', 'Content-Length': st.size, 'Cache-Control': 'private, max-age=3600' };
+    if (req.method === 'HEAD') { res.writeHead(200, headers); res.end(); return; }
+    res.writeHead(200, headers);
+    fs.createReadStream(file).pipe(res);
+  });
+}
 function handleWebsiteSaveStatus(res, id) {
   if (!/^[a-f0-9]{16}$/.test(id || '')) return json(res, 400, { ok: false, error: 'bad job id' });
   let job = websiteSaveJobs.get(id);
@@ -1417,6 +1483,9 @@ http.createServer((req, res) => {
   if (req.method === 'POST' && p === '/website-preview') return handleWebsitePreview(req, res);
   if (req.method === 'POST' && p === '/website-save') return handleWebsiteSave(req, res);
   if (req.method === 'GET' && p === '/website-save-status') return handleWebsiteSaveStatus(res, u.searchParams.get('job'));
+  if (req.method === 'GET' && p === '/website-history') return handleWebsiteHistory(res);
+  if (req.method === 'GET' && p === '/website-history-job') return handleWebsiteHistoryJob(res, u.searchParams.get('job'));
+  if ((req.method === 'GET' || req.method === 'HEAD') && p === '/website-history-image') return handleWebsiteHistoryImage(req, res, u.searchParams.get('job'), u.searchParams.get('page'));
   if (piSessions.handle(req, res, p, u)) return;
   if (req.method === 'GET' && p === '/ink') return handleInkRead(res, u.searchParams.get('id'), u.searchParams.get('file'));
   if (req.method === 'POST' && p === '/ink') return handleInkWrite(req, res, u.searchParams.get('id'), u.searchParams.get('file'));

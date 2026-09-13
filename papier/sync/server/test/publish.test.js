@@ -206,6 +206,10 @@ test('website editor is linked in the shared header and supports preview plus sa
   assert.match(ui, /website-preview/);
   assert.match(ui, /website-save/);
   assert.match(ui, /X-Papier-Editor/);
+  assert.match(ui, /id="history-button"/);
+  assert.match(ui, /website-history-job/);
+  assert.match(ui, /website-history-image/);
+  assert.match(ui, /grey: already published · black: new ink · red: erased/);
   assert.match(ui, /aria-controls="post-panel"/);
   assert.match(ui, /sidebar-hidden/);
   assert.match(ui, /e\.key\.toLowerCase\(\) === 'b'/);
@@ -501,6 +505,35 @@ test('website API previews Markdown, rejects stale edits, and publishes a save',
   });
   assert.equal(stale.status, 409);
   assert.match((await stale.json()).error, /changed since you opened/);
+
+  // History reads straight from the notebook-publish job dirs.
+  const jobDir = path.join(backup, 'papier-publish', 'jobs', 'aaaa1111bbbb2222');
+  fs.mkdirSync(path.join(jobDir, 'work', 'pages'), { recursive: true });
+  fs.writeFileSync(path.join(jobDir, 'doc.txt'), 'writings\n');
+  fs.writeFileSync(path.join(jobDir, 'mode.txt'), 'publish\n');
+  fs.writeFileSync(path.join(jobDir, 'status.txt'), 'done');
+  fs.writeFileSync(path.join(jobDir, 'outcome.txt'), 'published');
+  fs.writeFileSync(path.join(jobDir, 'agent.stderr.log'), 'transcribed two pages\nPUBLISHED\n');
+  writeJson(path.join(jobDir, 'work', 'decision.json'), { changes: [{ slug: 'first-topic', action: 'update', pages: [1, 2] }] });
+  const png = Buffer.from('89504e470d0a1a0a', 'hex');
+  fs.writeFileSync(path.join(jobDir, 'work', 'pages', 'page-01.png'), png);
+
+  const historyList = await fetch(`${api}/website-history`).then((r) => r.json());
+  assert.equal(historyList.ok, true);
+  const run = historyList.jobs.find((j) => j.job === 'aaaa1111bbbb2222');
+  assert.equal(run.status, 'done');
+  assert.equal(run.outcome, 'published');
+  assert.deepEqual(run.pages, ['01']);
+  assert.deepEqual(run.changes, [{ slug: 'first-topic', action: 'update', pages: [1, 2] }]);
+
+  const runDetail = await fetch(`${api}/website-history-job?job=aaaa1111bbbb2222`).then((r) => r.json());
+  assert.match(runDetail.agentLog, /transcribed two pages/);
+  const image = await fetch(`${api}/website-history-image?job=aaaa1111bbbb2222&page=01`);
+  assert.equal(image.status, 200);
+  assert.equal(image.headers.get('content-type'), 'image/png');
+  assert.deepEqual(Buffer.from(await image.arrayBuffer()), png);
+  assert.equal((await fetch(`${api}/website-history-image?job=aaaa1111bbbb2222&page=../01`)).status, 400);
+  assert.equal((await fetch(`${api}/website-history-job?job=deadbeefdeadbeef`)).status, 404);
 });
 
 test('Writings changes auto-publish after idle; other notebooks do not', async (t) => {
