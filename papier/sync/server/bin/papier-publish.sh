@@ -289,6 +289,42 @@ posts are listed in existing-posts.txt and live at posts/<slug>/post.md.
   code blocks with a language identifier (for example, ```python) so syntax
   highlighting and Google Sans Code render correctly.
 
+## Typeset for the web, not for the page
+
+The published post is a typeset essay, so paragraphing is YOUR editorial
+responsibility — ink breaks where the pen or page stopped, not where the
+argument does.
+
+- Merge fragments and short adjacent paragraphs into flowing prose; break
+  where the argument turns. Prefer paragraphs of several sentences. A
+  one-sentence paragraph is allowed only as deliberate emphasis.
+- Prefer prose over bullets. Keep a list only for truly parallel enumerable
+  items, keep items short and parallel, and never nest deeper than one level.
+  A numbered list whose items are long multi-sentence arguments reads better
+  as paragraphs ("First, …", "Second, …") — convert it.
+- Set quoted prompts, instructions, or verbatim material as a Markdown
+  blockquote WITHOUT surrounding quotation marks.
+- Use at most a handful of ## sections per post, each holding at least two
+  paragraphs. A stray thought is an <aside> or folds into a neighbour, not a
+  new section.
+
+## The user's proofreading marks
+
+Interpret these handwritten marks as typesetting commands, never as prose to
+transcribe:
+
+- `¶` before a line: force a paragraph break exactly there.
+- A curved connecting line between two blocks: run them together into one
+  paragraph.
+- A double-underlined line: a post title.
+- A single-underlined short line (or a line starting with ##): a ## section
+  heading.
+- A line starting with `>`: a blockquote.
+- Boxed text, or text marked [aside]: an <aside> sidenote.
+- [polish] at the start of a page or section: you may smooth the grammar and
+  flow of that material while preserving its meaning and voice. Everywhere
+  else the transcription rules above stay verbatim.
+
 ## In-place [do: ...] directives
 
 - Treat any handwritten `[do: instruction]` (case-insensitive) as a direct
