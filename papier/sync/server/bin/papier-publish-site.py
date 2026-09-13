@@ -58,11 +58,11 @@ body { padding-top: calc(var(--line-height) / 2); }
 .post-list li { display: flex; margin: 0 0 var(--line-height); flex-wrap: wrap; align-items: baseline; gap: 0.25rem 1.25rem; }
 .post-list time, .post-dates { font-family: var(--font-family-display); font-variant: all-small-caps; letter-spacing: 0.05em; opacity: 0.7; }
 .post-dates { margin: calc(var(--line-height) * -1.5) 0 calc(var(--line-height) * 1.5); }
-.post-body { max-width: var(--body-inner-width); hanging-punctuation: first last; }
+.post-body { max-width: 60ch; hanging-punctuation: first last; }
 .post-body > * { margin: 0; }
 .post-body > * + * { margin-top: var(--line-height); }
-.post-body p { text-align: justify; text-wrap: pretty; overflow-wrap: break-word; -webkit-hyphens: auto; hyphens: auto; hyphenate-limit-chars: 6 3 3; -webkit-hyphenate-limit-before: 3; -webkit-hyphenate-limit-after: 3; -webkit-hyphenate-limit-lines: 2; }
-.post-body p + p, .post-body p + aside + p { margin-top: 0; text-indent: 3ch; }
+.post-body p { text-align: left; text-wrap: pretty; overflow-wrap: break-word; -webkit-hyphens: none; hyphens: none; }
+.post-body p + p, .post-body p + aside + p { margin-top: calc(var(--line-height) * 0.65); text-indent: 0; }
 .post-body h2 + p, .post-body h3 + p, .post-body hr + p { text-indent: 0; }
 .post-body a:link, .post-body a:visited { color: var(--link-color); text-decoration: none; }
 .post-body a:hover { color: var(--text-color); }
@@ -71,10 +71,11 @@ body { padding-top: calc(var(--line-height) / 2); }
 .post-body h3 { font-size: 1.125rem; font-weight: 500; letter-spacing: 0.075em; }
 .page-header h1, .post-body h2, .post-body h3 { text-wrap: balance; }
 .post-body ul, .post-body ol { padding-left: 3ch; }
-.post-body li { text-wrap: pretty; hyphens: auto; }
-.post-body blockquote { padding-left: 2ch; border-left: var(--border-thickness) solid var(--text-color); }
+.post-body li { text-wrap: pretty; hyphens: none; }
+.post-body li + li { margin-top: calc(var(--line-height) * 0.3); }
+.post-body blockquote { padding: calc(var(--line-height) * 0.6) 1.5ch; background: var(--code-background); border-left: var(--border-thickness) solid var(--code-border); font-size: 0.9rem; }
 .post-body blockquote p { margin: 0; text-indent: 0; }
-.post-body blockquote p + p { text-indent: 3ch; }
+.post-body blockquote p + p { margin-top: calc(var(--line-height) * 0.5); }
 .post-body code, .post-body pre { font-family: var(--font-family-code); font-size: 0.8125rem; font-variant-ligatures: none; font-variant-numeric: lining-nums tabular-nums; }
 .post-body :not(pre) > code { padding: 0.08em 0.3em; background: var(--code-background); border: 1px solid var(--code-border); border-radius: 0.2em; }
 .post-body pre { margin: 0; padding: calc(var(--line-height) / 2) 1.5ch; overflow-x: auto; background: var(--code-background); border: 1px solid var(--code-border); border-radius: 0.25rem; line-height: 1.35; tab-size: 4; }
@@ -91,7 +92,7 @@ body { padding-top: calc(var(--line-height) / 2); }
 .post-body sup, .post-body sub { line-height: 0; }
 .post-body math { font-size: 1.08em; }
 .post-body math[display="block"] { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; text-align: center; }
-.post-body aside { clear: both; font-size: 0.875rem; line-height: 1.25; text-align: left; }
+.post-body aside { clear: both; font-size: 0.825rem; line-height: 1.3; text-align: left; opacity: 0.76; }
 .post-body aside > p { margin: 0; text-indent: 0; }
 .post-body aside > p:first-child { display: inline; }
 .post-body aside > p + p { display: block; margin-top: 0.55rem; }
