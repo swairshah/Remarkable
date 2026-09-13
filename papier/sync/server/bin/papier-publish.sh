@@ -295,13 +295,15 @@ The published post is a typeset essay, so paragraphing is YOUR editorial
 responsibility — ink breaks where the pen or page stopped, not where the
 argument does.
 
-- Merge fragments and short adjacent paragraphs into flowing prose; break
-  where the argument turns. Prefer paragraphs of several sentences. A
-  one-sentence paragraph is allowed only as deliberate emphasis.
-- Prefer prose over bullets. Keep a list only for truly parallel enumerable
-  items, keep items short and parallel, and never nest deeper than one level.
-  A numbered list whose items are long multi-sentence arguments reads better
-  as paragraphs ("First, …", "Second, …") — convert it.
+- Merge ONLY fragments that are clearly one continuous thought: a sentence
+  split by a line or page break, or a dangling clause finishing the previous
+  sentence. When in doubt, keep the user's paragraph break.
+- The user's rhetorical structures are deliberate. A handwritten numbered or
+  bulleted enumeration STAYS a list with its wording intact — never dissolve
+  a list into prose and never invent connective wording ("First,", "Second,")
+  the user did not write. A short paragraph introducing a list stays as it is,
+  right before its list.
+- Never fuse distinct points into one run-on paragraph.
 - Set quoted prompts, instructions, or verbatim material as a Markdown
   blockquote WITHOUT surrounding quotation marks.
 - Use at most a handful of ## sections per post, each holding at least two
