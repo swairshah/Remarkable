@@ -152,6 +152,14 @@ const FILES_X0: i32 = 16; /* MY FILES moves to the left edge now CLOSE is right 
 const FILES_BTN_W: i32 = 260;
 const BAR_TTL: Duration = Duration::from_secs(4);
 
+/* the paste bar: pinned at the top while the clipboard is armed (cut/copy);
+ * survives page turns so the ink can travel to another page */
+const PASTE_H: i32 = 72;
+const PASTE_DONE_W: i32 = 150;
+const PASTE_DONE_H: i32 = 48;
+const PASTE_DONE_X0: i32 = FB_W - PASTE_DONE_W - 20;
+const PASTE_DONE_Y0: i32 = (PASTE_H - PASTE_DONE_H) / 2;
+
 /* page-flip / scroll gesture: mostly-straight finger travel */
 const FLIP_DX: i32 = 260;
 const FLIP_DY_MAX: i32 = 240;
@@ -419,8 +427,12 @@ struct App {
     ink_flush: Duration,
     last_ink_flush: Instant,
 
-    /// Cut strokes, normalized to their bbox origin (paste comes later).
+    /// Cut/copied strokes, normalized to their bbox origin.
     clipboard: Option<Vec<Stroke>>,
+    /// The paste flow is live: a bar at the top says the clipboard is
+    /// armed; a tap on the page places it as a fresh selection (drag to
+    /// position); DONE — or a tap outside the placed box — ends the flow.
+    paste_bar: bool,
 
     /* cross-cutting input state */
     palm: palm::PalmGuard,
@@ -442,6 +454,7 @@ impl App {
     /* -- home ---------------------------------------------------------- */
 
     fn go_home(&mut self, folder: Option<String>) {
+        self.paste_bar = false; /* the flow is doc-scoped; the clipboard survives */
         let edited = matches!(&self.screen, Screen::Doc(_));
         if let Screen::Doc(dv) = &mut self.screen {
             dv.doc.save_all();
@@ -670,6 +683,9 @@ impl App {
             (dv.doc.has_raster(), gray)
         };
         self.blit_toolbar();
+        if self.paste_bar {
+            self.blit_paste_bar(); /* the bar rides page turns in the same pass */
+        }
         if flash {
             self.disp.full_refresh();
         } else {
@@ -704,6 +720,8 @@ impl App {
     fn restore_chrome_over(&mut self, r: Rect) {
         if self.bar_until.is_some() && r.y0 < BAR_H {
             self.paint_top_bar();
+        } else if self.paste_bar && r.y0 < PASTE_H {
+            self.paint_paste_bar();
         }
         if let Screen::Doc(dv) = &self.screen {
             let t = dv.tb.rect();
@@ -853,6 +871,15 @@ impl App {
             self.top_bar_press(x, y);
             return;
         }
+        if self.paste_bar
+            && phase == PenPhase::Press
+            && y < PASTE_H
+            && matches!(self.screen, Screen::Doc(_))
+        {
+            self.pen_swallow = true;
+            self.paste_bar_press(x, y);
+            return;
+        }
         match &self.screen {
             Screen::Home(_) => {
                 if phase == PenPhase::Press {
@@ -866,6 +893,12 @@ impl App {
     }
 
     fn doc_pen(&mut self, phase: PenPhase, x: i32, y: i32, pressure: i32, rubber: bool) {
+        /* the paste flow is modal: every pen event goes to placement /
+         * drag / finish until DONE (or a tap outside the box) ends it */
+        if self.paste_bar {
+            self.paste_pen(phase, x, y);
+            return;
+        }
         /* the toolbar swallows presses only — a stroke that started on the
          * canvas may finish under it (chrome repaints over the ink) */
         if phase == PenPhase::Press {
@@ -979,6 +1012,7 @@ impl App {
                         Some(sel) => match sel.chip_at(x, y) {
                             Some(select::Chip::Delete) => 1,
                             Some(select::Chip::Cut) => 2,
+                            Some(select::Chip::Copy) => 4,
                             None if sel.contains(x, y) => {
                                 sel.drag_from = Some((x, y));
                                 3
@@ -992,6 +1026,7 @@ impl App {
                     1 => self.selection_delete(false),
                     2 => self.selection_delete(true),
                     3 => {}
+                    4 => self.selection_copy(),
                     _ => {
                         self.dismiss_selection();
                         self.flush_anim(); /* select what's IN the model, visibly */
@@ -1200,14 +1235,15 @@ impl App {
     }
 
     /// The chip bar: DELETE drops the selected strokes; CUT also stashes
-    /// them (normalized) in the clipboard.
+    /// them (normalized) in the clipboard and arms the paste bar.
     fn selection_delete(&mut self, cut: bool) {
-        let gone = {
+        let (gone, armed) = {
             let Screen::Doc(dv) = &mut self.screen else { return };
             let Some(sel) = dv.selection.take() else { return };
             let chrome = dv.sel_chrome.take().unwrap_or_else(|| sel.chrome_rect());
             let (lifted, gone) = dv.doc.page.remove_strokes_by_ids(&sel.refs);
-            if cut && !lifted.is_empty() {
+            let armed = cut && !lifted.is_empty();
+            if armed {
                 let origin = gone.unwrap_or(sel.bbox);
                 self.clipboard = Some(
                     lifted
@@ -1229,13 +1265,236 @@ impl App {
                 dv.page_changed = true;
                 dv.deghost_at = Some(Instant::now() + Duration::from_millis(1200));
             }
-            gone.map_or(chrome, |g| g.union(chrome))
+            (gone.map_or(chrome, |g| g.union(chrome)), armed)
         };
         let r = gone.pad(4).clamp_screen();
         self.render_doc_region_wave(r, Some(Wave::Ink));
         self.restore_chrome_over(r);
         self.paint_toolbar();
         self.rearm_pause();
+        if armed {
+            self.paste_bar = true;
+            self.paint_paste_bar();
+        }
+    }
+
+    /// COPY: stash the selected strokes (normalized to the box origin)
+    /// WITHOUT removing them, and arm the paste bar.
+    fn selection_copy(&mut self) {
+        let stashed = {
+            let Screen::Doc(dv) = &self.screen else { return };
+            let Some(sel) = &dv.selection else { return };
+            let origin = sel.bbox;
+            let mut out: Vec<Stroke> = Vec::new();
+            let mut grab = |s: &Stroke| {
+                let mut s = s.clone();
+                for p in &mut s.pts {
+                    p.x -= origin.x0 as f32;
+                    p.y -= origin.y0 as f32;
+                }
+                out.push(s);
+            };
+            for (owner, id) in &sel.refs {
+                match owner {
+                    ink::Owner::User => {
+                        if let Some(s) = dv.doc.page.strokes.iter().find(|s| s.id == *id) {
+                            grab(s);
+                        }
+                    }
+                    ink::Owner::Patch(pid) => {
+                        if let Some(p) = dv.doc.page.patches.iter().find(|p| p.id == *pid) {
+                            if let Some(s) = p.strokes.iter().find(|s| s.id == *id) {
+                                grab(s);
+                            }
+                        }
+                    }
+                }
+            }
+            out
+        };
+        if stashed.is_empty() {
+            return;
+        }
+        self.clipboard = Some(stashed);
+        self.paste_bar = true;
+        self.paint_paste_bar();
+    }
+
+    /* -- the paste flow (the clipboard bar + placement) -- */
+
+    /// The paste bar, drawn into the fb only (render_doc_full composes it
+    /// into the same display pass as a page turn).
+    fn blit_paste_bar(&mut self) {
+        let n = self.clipboard.as_ref().map_or(0, |c| c.len());
+        let placed = matches!(&self.screen, Screen::Doc(dv) if dv.selection.is_some());
+        self.fb.fill_rect(0, 0, FB_W, PASTE_H, WHITE);
+        self.fb.fill_rect(0, PASTE_H - 2, FB_W, 2, BLACK);
+        let msg = if placed {
+            "PASTED \u{2014} DRAG TO MOVE, TAP OUTSIDE OR DONE".to_string()
+        } else {
+            format!(
+                "{n} STROKE{} IN CLIPBOARD \u{2014} TAP THE PAGE TO PASTE",
+                if n == 1 { "" } else { "S" }
+            )
+        };
+        text::draw_line(&mut self.fb, 28, (PASTE_H - 30) / 2, text::Face::Body, 30.0, &msg);
+        self.fb.fill_rect(PASTE_DONE_X0, PASTE_DONE_Y0, PASTE_DONE_W, PASTE_DONE_H, BLACK);
+        self.fb.text(
+            PASTE_DONE_X0 + (PASTE_DONE_W - text_width("DONE", 3)) / 2,
+            PASTE_DONE_Y0 + (PASTE_DONE_H - 21) / 2,
+            "DONE",
+            3,
+            WHITE,
+        );
+    }
+
+    fn paint_paste_bar(&mut self) {
+        if !matches!(self.screen, Screen::Doc(_)) {
+            return;
+        }
+        self.blit_paste_bar();
+        self.disp.update(0, 0, FB_W, PASTE_H, Wave::Ink);
+    }
+
+    /// End the flow: drop any placed selection's chrome, hide the bar.
+    /// The clipboard itself survives (the next CUT/COPY replaces it).
+    fn end_paste_flow(&mut self) {
+        if !self.paste_bar {
+            return;
+        }
+        self.paste_bar = false;
+        self.dismiss_selection();
+        if matches!(self.screen, Screen::Doc(_)) {
+            let r = Rect { x0: 0, y0: 0, x1: FB_W - 1, y1: PASTE_H - 1 };
+            self.render_doc_region(r);
+            self.restore_chrome_over(r);
+        }
+    }
+
+    fn paste_bar_press(&mut self, x: i32, y: i32) {
+        if in_rect(x, y, PASTE_DONE_X0, PASTE_DONE_Y0, PASTE_DONE_W, PASTE_DONE_H) {
+            self.end_paste_flow();
+        }
+        /* anywhere else on the bar: swallowed */
+    }
+
+    /// Pen input while the flow is live. No selection yet: a press places
+    /// the clipboard under the pen and the same contact drags it into
+    /// position. With a placed selection: chips act, inside drags,
+    /// outside finishes the flow.
+    fn paste_pen(&mut self, phase: PenPhase, x: i32, y: i32) {
+        match phase {
+            PenPhase::Press => {
+                let action = {
+                    let Screen::Doc(dv) = &mut self.screen else { return };
+                    if dv.tb.hit(x, y).is_some() {
+                        /* the toolbar is inert mid-flow: swallow the tap */
+                        self.pen_swallow = true;
+                        return;
+                    }
+                    match &mut dv.selection {
+                        Some(sel) => match sel.chip_at(x, y) {
+                            Some(select::Chip::Delete) => 1,
+                            Some(select::Chip::Cut) => 2,
+                            Some(select::Chip::Copy) => 4,
+                            None if sel.contains(x, y) => {
+                                sel.drag_from = Some((x, y));
+                                3
+                            }
+                            None => 0,
+                        },
+                        None => 5,
+                    }
+                };
+                match action {
+                    1 => {
+                        self.selection_delete(false);
+                        self.paint_paste_bar(); /* back to "tap to paste" */
+                    }
+                    2 => self.selection_delete(true), /* re-arms the clipboard */
+                    3 => {}
+                    4 => self.selection_copy(),
+                    5 => self.paste_place(x, y),
+                    _ => self.end_paste_flow(), /* outside the box: done */
+                }
+            }
+            PenPhase::Move => {
+                let dragging = {
+                    let Screen::Doc(dv) = &self.screen else { return };
+                    dv.selection.as_ref().is_some_and(|s| s.drag_from.is_some())
+                };
+                if dragging {
+                    self.drag_move(x, y);
+                }
+            }
+            PenPhase::Release => {
+                let dragging = {
+                    let Screen::Doc(dv) = &self.screen else { return };
+                    dv.selection.as_ref().is_some_and(|s| s.drag_from.is_some())
+                };
+                if dragging {
+                    self.drag_commit();
+                }
+            }
+        }
+    }
+
+    /// A finger tap while the flow is live: same semantics as a pen press,
+    /// but a tap has no ongoing contact, so no drag is left armed.
+    fn paste_touch_tap(&mut self, x: i32, y: i32) {
+        self.paste_pen(PenPhase::Press, x, y);
+        if let Screen::Doc(dv) = &mut self.screen {
+            if let Some(sel) = &mut dv.selection {
+                sel.drag_from = None;
+            }
+        }
+    }
+
+    /// Land the clipboard on the current page centered at the tap, select
+    /// it (one undoable op), and let the same contact drag it.
+    fn paste_place(&mut self, x: i32, y: i32) {
+        let Some(clip) = self.clipboard.clone() else { return };
+        let mut b: Option<Rect> = None;
+        for s in &clip {
+            if let Some(sb) = ink::stroke_bbox(s) {
+                b = Some(b.map_or(sb, |a| a.union(sb)));
+            }
+        }
+        let Some(b) = b else { return };
+        let (w, h) = (b.w(), b.h());
+        let pad = select::SEL_PAD + 4;
+        let ox = (x - w / 2).clamp(pad, (FB_W - w - pad).max(pad));
+        let oy = (y - h / 2).clamp(PASTE_H + pad, (FB_H - h - pad).max(PASTE_H + pad));
+        let bbox = {
+            let Screen::Doc(dv) = &mut self.screen else { return };
+            let mut refs: Vec<(ink::Owner, u64)> = Vec::new();
+            for s in &clip {
+                let mut s = s.clone();
+                for p in &mut s.pts {
+                    p.x += (ox - b.x0) as f32;
+                    p.y += (oy - b.y0) as f32;
+                }
+                let id = dv.doc.page.push_stroke(s);
+                refs.push((ink::Owner::User, id));
+            }
+            let bbox = Rect { x0: ox, y0: oy, x1: ox + w, y1: oy + h };
+            let key = dv.doc.cur_ink_path();
+            dv.undo
+                .stack(&key)
+                .push(EditOp::PasteStrokes { refs: refs.clone(), strokes: None });
+            dv.page_changed = true;
+            dv.deghost_at = Some(Instant::now() + Duration::from_millis(1200));
+            let mut sel = select::Selection::new(refs, bbox);
+            sel.drag_from = Some((x, y)); /* keep holding: drag into place */
+            dv.selection = Some(sel);
+            bbox
+        };
+        let r = bbox.pad(4).clamp_screen();
+        self.render_doc_region_wave(r, Some(Wave::Ink));
+        self.restore_chrome_over(r);
+        self.repaint_selection_chrome();
+        self.paint_paste_bar(); /* the label flips to "pasted" */
+        self.paint_toolbar(); /* undo became available */
     }
 
     /// Land the in-progress stroke in the page model (one undoable op).
@@ -1659,6 +1918,10 @@ impl App {
                     self.top_bar_press(x, y);
                     return;
                 }
+                if self.paste_bar && y < PASTE_H && matches!(self.screen, Screen::Doc(_)) {
+                    self.paste_bar_press(x, y);
+                    return;
+                }
                 if y <= EDGE_Y {
                     self.swipe_from = Some(y);
                     return;
@@ -1696,6 +1959,9 @@ impl App {
                         if dx.abs() >= FLIP_DX && dy.abs() <= FLIP_DY_MAX {
                             /* swipe left = next page (turning forward) */
                             self.flip(if dx < 0 { 1 } else { -1 });
+                        } else if self.paste_bar && dx.abs() < 40 && dy.abs() < 40 {
+                            /* a finger tap places (or finishes) the paste */
+                            self.paste_touch_tap(sx, sy);
                         }
                     }
                     Screen::Agent(_) => {
@@ -1780,7 +2046,10 @@ impl App {
         self.bar_until = None;
         let r = Rect { x0: 0, y0: 0, x1: FB_W - 1, y1: BAR_H - 1 };
         match &self.screen {
-            Screen::Doc(_) => self.render_doc_region(r),
+            Screen::Doc(_) => {
+                self.render_doc_region(r);
+                self.restore_chrome_over(r); /* the paste bar may live here */
+            }
             Screen::Home(_) => self.render_home(false),
             Screen::Agent(_) => self.render_agent_page(false),
         }
@@ -2326,8 +2595,12 @@ impl App {
         }
         let due = {
             let Screen::Doc(dv) = &self.screen else { return };
-            /* a live selection/lasso means the user is mid-manipulation */
-            if dv.lasso.is_some() || dv.selection.is_some() || dv.cur_stroke.is_some() {
+            /* a live selection/lasso/paste means the user is mid-manipulation */
+            if dv.lasso.is_some()
+                || dv.selection.is_some()
+                || dv.cur_stroke.is_some()
+                || self.paste_bar
+            {
                 return;
             }
             match dv.idle_at {
@@ -3378,6 +3651,7 @@ fn main() -> std::process::ExitCode {
         ink_flush: if takeover { INK_FLUSH_TAKEOVER } else { INK_FLUSH_QTFB },
         last_ink_flush: now,
         clipboard: None,
+        paste_bar: false,
         palm: palm::PalmGuard::default(),
         pen_swallow: false,
         touch_start: None,

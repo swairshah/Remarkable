@@ -664,7 +664,7 @@ def scenario_m4(h, out_png):
 
     lasso_loop(s, 500, 560, 280)
     s.drain(1.2)
-    shot("selected")            # dashed box + DELETE/CUT chips
+    shot("selected")            # dashed box + COPY/CUT/DELETE chips
 
     # drag from inside the box by (+400, +440); count update messages
     s.pen(PEN_PRESS, 500, 560)
@@ -690,9 +690,11 @@ def scenario_m4(h, out_png):
     # re-lasso at the moved spot, DELETE via chip, then undo.
     # The ring hugs the STROKES' bbox (moved to x 700..1100, y 940..1060):
     # ring y0 = 940-12 = 928, chips 14+64 above, centered on x=900.
+    # Chip bar = COPY/CUT/DELETE (3 x 170 + 2 x 10 = 530 wide); DELETE is
+    # the third chip: x0 = 900-265, DELETE center = x0 + 2*180 + 85.
     lasso_loop(s, 900, 1000, 300)
     s.drain(1.2)
-    pen_tap(s, 900 - 175 + 85, 928 - 14 - 64 + 32)  # DELETE chip center
+    pen_tap(s, 900 - 265 + 2 * 180 + 85, 928 - 14 - 64 + 32)  # DELETE chip center
     s.drain(1.2)
     shot("deleted")
     pen_tap(s, TB_CX, TB_BTN["undo"])
@@ -716,6 +718,80 @@ def scenario_m4(h, out_png):
     py10 = ink["patches"][0]["strokes"][0]["p"][1]
     assert abs(py10 - 10600) < 200, f"moved patch y: {py10}"
     print("fake-qtfb: m4 assertions passed")
+
+
+def scenario_paste(h, out_png):
+    """Clipboard: CUT arms the paste bar; the bar survives a page flip; a
+    tap pastes as a live selection; a drag positions it; DONE ends it."""
+    def shot(tag):
+        write_png(out_png.replace(".png", f"-{tag}.png"))
+
+    subprocess.run(["rm", "-rf", DATA_DIR], check=False)
+    os.makedirs(f"{DATA_DIR}/docs/nb-clip/ink", exist_ok=True)
+    with open(f"{DATA_DIR}/docs/nb-clip/meta.json", "w") as f:
+        json.dump({"v": 1, "kind": "notebook", "title": "Clip Lab"}, f)
+    # two strokes on page 1; page 2 pre-exists (empty) as the paste target
+    with open(f"{DATA_DIR}/docs/nb-clip/ink/note-0001.json", "w") as f:
+        json.dump({"v": 1, "patches": [],
+                   "strokes": [{"g": 0, "p": hline(500)},
+                               {"g": 0, "p": hline(560)}]}, f)
+    with open(f"{DATA_DIR}/docs/nb-clip/ink/note-0002.json", "w") as f:
+        json.dump({"v": 1, "patches": [], "strokes": []}, f)
+    with open(f"{DATA_DIR}/docs/nb-clip/state.json", "w") as f:
+        json.dump({"v": 1, "seq": [{"n": 1}, {"n": 2}], "next_note": 3, "pos": 0}, f)
+
+    s = h.launch(PAPIER_OPEN="nb-clip", PAPIER_FAKE_SYS="1")
+    s.drain(1.8)
+
+    pen_tap(s, *TB_TOGGLE)      # expand toolbar
+    s.drain(0.6)
+    pen_tap(s, TB_CX, TB_BTN["lasso"])
+    s.drain(0.5)
+
+    lasso_loop(s, 500, 530, 260)
+    s.drain(1.2)
+    shot("selected")
+
+    # CUT chip: strokes bbox x 297..706, y 497..566; ring y0 = 497-12 = 485,
+    # chips 14+64 above, centered on x~=501. CUT is the middle chip.
+    pen_tap(s, 501 - 265 + 180 + 85, 485 - 14 - 64 + 32)
+    s.drain(1.5)
+    shot("cut")                 # ink gone; paste bar at the top
+
+    time.sleep(1.7)             # let palm rejection lapse before the swipe
+    s.swipe(1150, 190)          # flip forward -> page 2 (bar must survive)
+    s.drain(1.8)
+    shot("flipped")
+
+    pen_tap(s, 700, 900)        # tap the page: paste lands centered here
+    s.drain(1.5)
+    shot("pasted")              # dashed box + chips, bar says PASTED
+
+    # drag the pasted box by (-200, +300)
+    s.pen(PEN_PRESS, 700, 900)
+    for i in range(1, 21):
+        s.pen(PEN_UPDATE, 700 - i * 10, 900 + i * 15)
+        time.sleep(0.02)
+    s.pen(PEN_RELEASE, 500, 1200)
+    s.drain(1.5)
+    shot("dragged")
+
+    pen_tap(s, W - 20 - 75, 36)  # DONE (center of the bar's button)
+    s.drain(1.2)
+    shot("done")                # bar + selection gone, ink stays
+
+    s.terminate_clean()
+
+    p1 = json.load(open(f"{DATA_DIR}/docs/nb-clip/ink/note-0001.json"))
+    assert len(p1["strokes"]) == 0, f"page 1 should be cut clean: {len(p1['strokes'])}"
+    p2 = json.load(open(f"{DATA_DIR}/docs/nb-clip/ink/note-0002.json"))
+    assert len(p2["strokes"]) == 2, f"page 2 should hold the paste: {len(p2['strokes'])}"
+    # centered at the tap (700,900), then dragged (-200,+300):
+    # first stroke ~ x 299, y 1170 (x10 units)
+    x10, y10 = p2["strokes"][0]["p"][0], p2["strokes"][0]["p"][1]
+    assert abs(x10 - 2990) < 300, f"pasted x: {x10}"
+    assert abs(y10 - 11700) < 300, f"pasted y: {y10}"
+    print("fake-qtfb: paste assertions passed")
 
 
 def scenario_m5_book(h, out_png):
@@ -918,6 +994,7 @@ SCENARIOS = {
     "m2": scenario_m2,
     "m3": scenario_m3,
     "m4": scenario_m4,
+    "paste": scenario_paste,
     "m5-book": scenario_m5_book,
     "m5-nb": scenario_m5_nb,
     "redobug": scenario_redobug,

@@ -38,6 +38,9 @@ pub enum EditOp {
     },
     /// A lasso move (M4).
     MoveStrokes { refs: Vec<(Owner, u64)>, dx: f32, dy: f32 },
+    /// A clipboard paste. `strokes` is Some only while UNDONE (mirror of
+    /// EraseStrokes: the page owns the ink while the op is applied).
+    PasteStrokes { refs: Vec<(Owner, u64)>, strokes: Option<Vec<OwnedStroke>> },
     /// pi drew a patch. `body` (strokes + typeset texts) is Some only while UNDONE.
     AddPatch { id: u64, body: Option<PatchBody> },
     /// pi (or the rubber) erased a patch. `body` is Some while APPLIED.
@@ -66,6 +69,9 @@ fn op_owned_pts(op: &EditOp) -> usize {
             .map(|o| o.stroke.pts.len())
             .sum(),
         EditOp::MoveStrokes { .. } => 0,
+        EditOp::PasteStrokes { strokes, .. } => {
+            strokes.as_ref().map_or(0, |v| v.iter().map(|o| o.stroke.pts.len()).sum())
+        }
         EditOp::AddPatch { body, .. } | EditOp::ErasePatch { body, .. } => {
             body.as_ref().map_or(0, |(ss, _)| ss.iter().map(|s| s.pts.len()).sum())
         }
@@ -143,6 +149,11 @@ impl UndoStack {
                     }
                 }
                 EditOp::MoveStrokes { refs, dx, dy } => page.translate_strokes(refs, -*dx, -*dy),
+                EditOp::PasteStrokes { refs, strokes } => {
+                    let (lifted, b) = page.remove_strokes_by_ids(refs);
+                    *strokes = Some(lifted);
+                    b
+                }
                 EditOp::AddPatch { id, body } => {
                     let (content, b) = page.take_patch(*id)?;
                     *body = Some(content);
@@ -191,6 +202,7 @@ impl UndoStack {
                     }
                 }
                 EditOp::MoveStrokes { refs, dx, dy } => page.translate_strokes(refs, *dx, *dy),
+                EditOp::PasteStrokes { strokes, .. } => page.insert_owned(strokes.take()?),
                 EditOp::AddPatch { id, body } => {
                     let content = body.take()?;
                     let b = body_bbox(&content);

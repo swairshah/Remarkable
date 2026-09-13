@@ -27,11 +27,12 @@ const DASH_T: i32 = 2;
 pub const CHIP_H: i32 = 64;
 pub const CHIP_W: i32 = 170;
 const CHIP_GAP: i32 = 10;
-const CHIPS: [&str; 2] = ["DELETE", "CUT"];
+const CHIPS: [&str; 3] = ["COPY", "CUT", "DELETE"];
 
 pub enum Chip {
-    Delete,
+    Copy,
     Cut,
+    Delete,
 }
 
 /// The pen-drawn loop, while capturing.
@@ -194,8 +195,9 @@ impl Selection {
         for (i, _) in CHIPS.iter().enumerate() {
             if x >= bx && x < bx + CHIP_W {
                 return match i {
-                    0 => Some(Chip::Delete),
-                    _ => Some(Chip::Cut),
+                    0 => Some(Chip::Copy),
+                    1 => Some(Chip::Cut),
+                    _ => Some(Chip::Delete),
                 };
             }
             bx += CHIP_W + CHIP_GAP;
