@@ -10,14 +10,14 @@ tags:
 
 How to write in the **Writings** notebook so [papier-publish.sh](./server/bin/papier-publish.sh) typesets it well. The agent reads diff pages, merges your ink into `posts/<slug>/post.md`, and pushes to swair.dev; these conventions are the contract between your pen and that agent.
 
-## What the agent now does on its own
+## What the agent does on its own
 
-- Re-paragraphs your ink: merges fragments into flowing prose, breaks where the argument turns, and avoids one-sentence orphan paragraphs.
-- Converts long discursive numbered lists into prose; keeps only short, parallel lists.
-- Sets verbatim prompts/quotes as blockquotes without quotation marks.
-- Limits `##` sections to a few per post, each with at least two paragraphs.
+- Joins a sentence when it physically continues across a line or page boundary.
+- Preserves your paragraph breaks, short paragraphs, and numbered or bulleted lists.
+- Sets clearly quoted prompts or instructions as blockquotes without redundant quotation marks.
+- Leaves unchanged published passages exactly as they are when processing later page edits.
 
-By default it still preserves your words verbatim — it edits structure, not voice.
+Your marks control editorial structure. The agent does not rewrite or rearrange prose unless you add `[polish]`.
 
 ## Proofreader's marks
 

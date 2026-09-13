@@ -294,10 +294,11 @@ echo PUBLISHED
   assert.match(prompt, /<aside>/);
   assert.match(prompt, /display LaTeX as `\$\$\.\.\.\$\$`/);
   assert.match(prompt, /fenced\s+code blocks with a language identifier/);
-  assert.match(prompt, /paragraphing is YOUR editorial/);
-  assert.match(prompt, /Merge ONLY fragments that are clearly one continuous thought/);
+  assert.match(prompt, /existing post is authoritative for unchanged material/);
+  assert.match(prompt, /paragraph and list structure is part of the writing/);
+  assert.match(prompt, /one sentence physically continues across/);
   assert.match(prompt, /enumeration STAYS a list/);
-  assert.match(prompt, /never invent connective wording/);
+  assert.match(prompt, /Never dissolve it into prose or invent connective wording/);
   assert.match(prompt, /blockquote WITHOUT surrounding quotation marks/);
   assert.match(prompt, /proofreading marks/);
   assert.match(prompt, /run them together into one\s+paragraph/);

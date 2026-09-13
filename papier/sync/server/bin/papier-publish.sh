@@ -260,7 +260,9 @@ posts are listed in existing-posts.txt and live at posts/<slug>/post.md.
 
 - Preserve the user's words and intent. Normalize obvious spelling and
   punctuation, expand only unambiguous abbreviations, and mark an unreadable
-  word with [?]. Do not invent commentary or improve untouched prose.
+  word with [?]. The existing post is authoritative for unchanged material:
+  never re-transcribe, rephrase, or reformat passages not affected by the
+  changed pages.
 - Apply arrows, carets, strike-throughs, and margin corrections where they
   point. A DELETED page means its corresponding content must be removed.
 - Use a meaningful user-written title when present. Every post.md must start
@@ -291,19 +293,15 @@ posts are listed in existing-posts.txt and live at posts/<slug>/post.md.
 
 ## Typeset for the web, not for the page
 
-The published post is a typeset essay, so paragraphing is YOUR editorial
-responsibility — ink breaks where the pen or page stopped, not where the
-argument does.
+The user's paragraph and list structure is part of the writing. Preserve it
+unless a proofreading mark below says otherwise.
 
-- Merge ONLY fragments that are clearly one continuous thought: a sentence
-  split by a line or page break, or a dangling clause finishing the previous
-  sentence. When in doubt, keep the user's paragraph break.
-- The user's rhetorical structures are deliberate. A handwritten numbered or
-  bulleted enumeration STAYS a list with its wording intact — never dissolve
-  a list into prose and never invent connective wording ("First,", "Second,")
-  the user did not write. A short paragraph introducing a list stays as it is,
-  right before its list.
-- Never fuse distinct points into one run-on paragraph.
+- Join text automatically only when one sentence physically continues across
+  a line or page boundary. This is line wrapping, not editorial rewriting.
+- A handwritten numbered or bulleted enumeration STAYS a list with its wording
+  intact. Never dissolve it into prose or invent connective wording.
+- Keep short paragraphs short. Never fuse distinct points or rearrange them to
+  create a smoother-looking block of text.
 - Set quoted prompts, instructions, or verbatim material as a Markdown
   blockquote WITHOUT surrounding quotation marks.
 - Use at most a handful of ## sections per post, each holding at least two
