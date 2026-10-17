@@ -23,6 +23,11 @@ WORK="$JOB/work"
 OUT="$JOB/out"
 MD2PDF="${MD2PDF:-$HOME/bin/notes-md2pdf.sh}"
 PI_BIN="${PI_BIN:-pi}"
+COVER_TOOL="${PAPIER_COVER_TOOL:-$HOME/bin/papier-compose-cover.py}"
+PAPIER_PY="${PAPIER_PY:-$HOME/papier-venv/bin/python3}"
+COVER_REQUIRED="${PAPIER_COVER_REQUIRED:-0}"
+COVER_PNG="$WORK/cover.png"
+COVER_PDF="$WORK/cover.pdf"
 FORMATS_FILE="$JOB/formats.txt"
 WANT_PDF=false
 WANT_EPUB=false
@@ -57,10 +62,10 @@ status "researching sources"
 cat <<'PROMPT'
 You are a document-composition agent for Papier (a reMarkable tablet
 library). The user wants a new reading document created from the
-instructions below. Your final deliverable is ONE markdown file at
-article.md in the current directory. A separate renderer turns it into a
-typeset the selected PDF and/or EPUB outputs, so the markdown must be
-clean, portable, and self-contained.
+instructions below. Your deliverables are article.md and cover-brief.txt
+in the current directory. A separate renderer turns the article into the
+selected PDF and/or EPUB outputs, so the markdown must be clean, portable,
+and self-contained.
 
 --- USER INSTRUCTIONS ---
 PROMPT
@@ -138,14 +143,25 @@ material thoroughly. Requirements:
 - Length: substantial but not bloated. Match the depth the instructions
   ask for; default to a thorough read of roughly 2000-5000 words.
 
-## Step 3 — Verify
+## Step 3 — Write the cover brief (cover-brief.txt)
+
+Write one plain-text paragraph of 35–70 words describing a single concrete
+visual metaphor for this article. Use one dominant object or scene and at
+most three supporting elements. Favor a surprising human-scale metaphor
+over generic robots, brains, circuit boards, or glowing AI imagery. Describe
+only the subject and composition—not an art style. Do not request lettering,
+a title, numbers, logos, frames, or a mockup; Papier adds the real title.
+
+## Step 4 — Verify
 
 - Re-read article.md top to bottom. Fix broken math delimiters, unclosed
   code fences, and any reference to an image that is not in assets/.
 - Confirm the YAML title matches the article.
+- Confirm cover-brief.txt is one paragraph and contains no instructions to
+  draw words, lettering, numbers, logos, frames, or mockups.
 
-Work in the current directory. Write article.md there. When done, reply
-with exactly one line: the final title of the article.
+Work in the current directory. Write article.md and cover-brief.txt there.
+When done, reply with exactly one line: the final title of the article.
 PROMPT
 } > "$JOB/prompt.md"
 
@@ -241,9 +257,45 @@ TITLE="$(awk -F': *' '/^title:/ { sub(/^title: */, ""); gsub(/^"|"$/, ""); print
 [ -n "$TITLE" ] || TITLE="Composed document"
 printf '%s' "$TITLE" > "$JOB/title.txt"
 
+# Generate one image-led cover page. The title is typeset locally so it stays
+# sharp and correct; the image model never draws lettering. Cover failures are
+# non-fatal by default so an external image outage cannot discard the article.
+COVER_READY=false
+if [ ! -x "$PAPIER_PY" ]; then PAPIER_PY="$(command -v python3 || true)"; fi
+if [ -f "$COVER_TOOL" ] && [ -n "$PAPIER_PY" ] \
+   && { [ -n "${OPENROUTER_API_KEY:-}" ] || [ -n "${PAPIER_COVER_SOURCE_IMAGE:-}" ]; }; then
+  status "creating cover art"
+  if "$PAPIER_PY" "$COVER_TOOL" generate "$TITLE" "$WORK/cover-brief.txt" "$COVER_PNG" "$COVER_PDF" >&2; then
+    COVER_READY=true
+  else
+    echo "[compose] cover generation failed; continuing without a cover" >&2
+    if [ "$COVER_REQUIRED" = 1 ]; then
+      status "failed: cover generation failed"
+      exit 1
+    fi
+  fi
+else
+  echo "[compose] cover generator or OpenRouter key unavailable; continuing without a cover" >&2
+fi
+
 if $WANT_PDF; then
   status "typesetting the PDF"
-  "$MD2PDF" "$WORK/article.md" "$OUT/article.pdf" "$TITLE" >&2
+  BODY_PDF="$OUT/article.body.pdf"
+  "$MD2PDF" "$WORK/article.md" "$BODY_PDF" "$TITLE" >&2
+  if $COVER_READY; then
+    if "$PAPIER_PY" "$COVER_TOOL" prepend "$COVER_PDF" "$BODY_PDF" "$OUT/article.pdf" >&2; then
+      rm -f "$BODY_PDF"
+    else
+      echo "[compose] cover prepend failed; shipping the article without a cover" >&2
+      mv "$BODY_PDF" "$OUT/article.pdf"
+      if [ "$COVER_REQUIRED" = 1 ]; then
+        status "failed: cover prepend failed"
+        exit 1
+      fi
+    fi
+  else
+    mv "$BODY_PDF" "$OUT/article.pdf"
+  fi
 fi
 
 if $WANT_EPUB; then
@@ -336,6 +388,7 @@ CSS
       --css "$EPUB_CSS"
       --metadata "title=$TITLE"
     )
+    if $COVER_READY && [ -s "$COVER_PNG" ]; then PANDOC_ARGS+=(--epub-cover-image "$COVER_PNG"); fi
     if [ "${#EPUB_FONT_ARGS[@]}" -gt 0 ]; then PANDOC_ARGS+=("${EPUB_FONT_ARGS[@]}"); fi
     PANDOC_ARGS+=(-o "$OUT/article.epub")
     pandoc "${PANDOC_ARGS[@]}"

@@ -41,6 +41,7 @@ test('compose renderer defaults to PDF and creates a Clippings-style EPUB 3', (t
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'papier-compose-script-'));
   const fakePi = path.join(root, 'fake-pi.sh');
   const fakePdf = path.join(root, 'fake-pdf.sh');
+  const fakeCover = path.join(root, 'fake-cover.py');
   const emptyFonts = path.join(root, 'fonts');
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(emptyFonts);
@@ -55,20 +56,36 @@ title: "Archive Test"
 
 Inline math $x^2 + y^2 = z^2$ and **strong text**.
 EOF
+cat > cover-brief.txt <<'EOF'
+One oversized archive box opens into a small path of carefully ordered pages.
+EOF
 printf '%s\n' 'Archive Test'
 `);
   executable(fakePdf, `#!/bin/sh
 printf '%s\n' '%PDF-1.4 test' > "$2"
 `);
+  executable(fakeCover, `#!/usr/bin/env python3
+from pathlib import Path
+import sys
+if sys.argv[1] == 'generate':
+    _, title, brief, png, pdf = sys.argv[1:]
+    Path(png).write_bytes(b'PNG')
+    Path(pdf).write_bytes(b'COVER\\n')
+elif sys.argv[1] == 'prepend':
+    _, cover, body, output = sys.argv[1:]
+    Path(output).write_bytes(Path(cover).read_bytes() + Path(body).read_bytes())
+else:
+    raise SystemExit(2)
+`);
 
-  const run = (job, formats) => {
+  const run = (job, formats, extraEnv = {}) => {
     fs.mkdirSync(path.join(job, 'work'), { recursive: true });
     fs.mkdirSync(path.join(job, 'out'), { recursive: true });
     fs.writeFileSync(path.join(job, 'instructions.md'), 'Write a test article.\n');
     if (formats) fs.writeFileSync(path.join(job, 'formats.txt'), formats.join('\n') + '\n');
     return spawnSync('/bin/bash', [composeScript, job], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: root, PI_BIN: fakePi, MD2PDF: fakePdf, READER_FONT_DIR: emptyFonts },
+      env: { ...process.env, HOME: root, PI_BIN: fakePi, MD2PDF: fakePdf, READER_FONT_DIR: emptyFonts, ...extraEnv },
     });
   };
 
@@ -78,6 +95,19 @@ printf '%s\n' '%PDF-1.4 test' > "$2"
   assert.equal(fs.readFileSync(path.join(defaultJob, 'formats.txt'), 'utf8'), 'pdf\n');
   assert.ok(fs.existsSync(path.join(defaultJob, 'out', 'article.pdf')));
   assert.ok(!fs.existsSync(path.join(defaultJob, 'out', 'article.epub')));
+
+  const coveredJob = path.join(root, 'covered-job');
+  const coveredResult = run(coveredJob, ['pdf'], {
+    PAPIER_COVER_TOOL: fakeCover,
+    PAPIER_COVER_SOURCE_IMAGE: path.join(root, 'fixture.png'),
+    PAPIER_COVER_REQUIRED: '1',
+  });
+  assert.equal(coveredResult.status, 0, coveredResult.stderr);
+  assert.equal(
+    fs.readFileSync(path.join(coveredJob, 'out', 'article.pdf'), 'utf8'),
+    'COVER\n%PDF-1.4 test\n',
+  );
+  assert.match(fs.readFileSync(path.join(coveredJob, 'work', 'cover-brief.txt'), 'utf8'), /archive box/);
 
   const epubJob = path.join(root, 'epub-job');
   const epubResult = run(epubJob, ['epub']);
