@@ -35,6 +35,7 @@ enum EraserMode: String, CaseIterable {
 
 enum CanvasTool: Equatable {
     case pencil
+    case highlighter
     case eraser
     case lasso
 }
@@ -171,6 +172,8 @@ struct CanvasView: UIViewRepresentable {
         switch tool {
         case .pencil:
             canvas.tool = PencilBridge.pencilTool()
+        case .highlighter:
+            canvas.tool = PencilBridge.highlighterTool()
         case .eraser:
             switch eraserMode {
             case .object: canvas.tool = PKEraserTool(.vector)

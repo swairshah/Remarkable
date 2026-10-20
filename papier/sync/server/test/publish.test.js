@@ -87,6 +87,28 @@ test('render script diffs strokes by content and colours grey/black/red', (t) =>
   assert.deepEqual(pixel(clean, 200, 450), [255, 255, 255]);
 });
 
+test('render script draws highlighter bands amber, under the ink they mark', (t) => {
+  if (!hasPillow()) return t.skip('Pillow is not installed');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'papier-publish-hl-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cur = path.join(root, 'cur.json');
+  // a fat pale band and a black stroke on the same line
+  writeJson(cur, { strokes: [stroke(1, 500, 200, 600, 130, 186), stroke(2, 500)] });
+
+  const out = path.join(root, 'clean.png');
+  assert.equal(spawnSync(PY, [renderScript, out, cur, '--clean'], { encoding: 'utf8' }).status, 0);
+  // the band's own area is amber; the ink through the middle of it is black
+  assert.deepEqual(pixel(out, 200, 253), [250, 226, 132]);
+  assert.deepEqual(pixel(out, 200, 250), [24, 24, 24]);
+
+  // in a diff a highlight is amber, never mistaken for pi's blue ink
+  const prev = path.join(root, 'prev.json');
+  writeJson(prev, { strokes: [] });
+  const diff = path.join(root, 'diff.png');
+  assert.equal(spawnSync(PY, [renderScript, diff, cur, '--prev', prev], { encoding: 'utf8' }).status, 0);
+  assert.deepEqual(pixel(diff, 200, 253), [250, 226, 132]);
+});
+
 test('site builder makes swair.dev root the post index and copies only chosen assets', (t) => {
   if (!hasPandoc()) return t.skip('pandoc is not installed');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'papier-publish-site-'));

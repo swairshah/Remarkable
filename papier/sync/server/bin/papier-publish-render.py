@@ -13,6 +13,11 @@ devices. Colour code, which the publish prompt explains to the model:
     black  added      (new since the last publish)
     red    removed    (erased since the last publish)
     blue   pi's own ink / typeset text (context, not the user's words)
+    amber  the user's highlighter bands (pale strokes: src/highlight.rs)
+
+Highlighter strokes are drawn FIRST, under everything else, so the words
+they mark stay readable — the same order the tablet's darkest-wins stamping
+produces.
 
 --clean draws every stroke in its final colour (user black, pi blue) for the
 handwritten-page figures on the site. A missing/empty current file renders a
@@ -32,7 +37,13 @@ BLACK = (24, 24, 24)
 RED = (214, 44, 44)
 BLUE = (36, 87, 197)
 BLUE_OLD = (176, 190, 214)
+AMBER = (250, 226, 132)
+AMBER_OLD = (245, 240, 214)
 BG = (255, 255, 255)
+
+# strokes at or above this grey are highlighter bands, not ink
+# (src/highlight.rs HL_MIN_GRAY)
+HL_MIN_GRAY = 150
 
 
 def load(path):
@@ -50,29 +61,33 @@ def items(doc):
 
     kind: 'stroke' | 'text'; the key is a content hash so the same ink on
     two devices (different ids) matches, and a re-drawn stroke counts as
-    removed + added."""
+    removed + added. `ink` is 'user', 'pi' or 'hl'."""
     out = []
     for s in doc.get("strokes") or []:
         pts = s.get("p") or []
         if len(pts) < 3:
             continue
-        ai = bool(s.get("g", 0))
-        key = "s:" + hashlib.sha1(("%d:%s" % (ai, ",".join(str(int(v)) for v in pts))).encode()).hexdigest()
-        out.append((key, "stroke", (pts, ai)))
+        g = int(s.get("g", 0) or 0)
+        ink = "hl" if g >= HL_MIN_GRAY else ("pi" if g else "user")
+        # the hash tag stays 0/1 for ink so already-published pages keep
+        # matching; highlighter bands are the new tag 2
+        tag = {"user": 0, "pi": 1, "hl": 2}[ink]
+        key = "s:" + hashlib.sha1(("%d:%s" % (tag, ",".join(str(int(v)) for v in pts))).encode()).hexdigest()
+        out.append((key, "stroke", (pts, ink)))
     for p in doc.get("patches") or []:
         for s in p.get("strokes") or []:
             pts = s.get("p") or []
             if len(pts) < 3:
                 continue
             key = "s:" + hashlib.sha1(("1:%s" % ",".join(str(int(v)) for v in pts)).encode()).hexdigest()
-            out.append((key, "stroke", (pts, True)))
+            out.append((key, "stroke", (pts, "pi")))
         for t in p.get("texts") or []:
             txt = str(t.get("t", ""))
             if not txt:
                 continue
-            ai = bool(t.get("g", 0))
-            key = "t:" + hashlib.sha1(("%d:%s:%s:%s:%s" % (ai, txt, t.get("x"), t.get("y"), t.get("s"))).encode()).hexdigest()
-            out.append((key, "text", (txt, float(t.get("x", 0)), float(t.get("y", 0)), float(t.get("s", 320)), ai)))
+            ink = "pi" if t.get("g", 0) else "user"
+            key = "t:" + hashlib.sha1(("%d:%s:%s:%s:%s" % (ink == "pi", txt, t.get("x"), t.get("y"), t.get("s"))).encode()).hexdigest()
+            out.append((key, "text", (txt, float(t.get("x", 0)), float(t.get("y", 0)), float(t.get("s", 320)), ink)))
     return out
 
 
@@ -111,12 +126,16 @@ def main(argv):
         img = Image.new("RGB", (w, h), BG)
         draw = ImageDraw.Draw(img)
 
-        def colour(ai, status):
+        def colour(ink, status):
+            if ink == "hl":
+                if not clean and status == "removed":
+                    return RED
+                return AMBER if clean or status == "added" else AMBER_OLD
             if clean:
-                return BLUE if ai else BLACK
+                return BLUE if ink == "pi" else BLACK
             if status == "removed":
                 return RED
-            if ai:
+            if ink == "pi":
                 return BLUE if status == "added" else BLUE_OLD
             return BLACK if status == "added" else GREY
 
@@ -140,17 +159,19 @@ def main(argv):
             except (ValueError, TypeError):
                 draw.text((x / 10 * scale, y / 10 * scale - px), txt, fill=fill, font=font)
 
-        # removed ink underneath, unchanged next, added on top: the new
+        # highlighter bands first (they mark words, they must not cover
+        # them), then removed ink, unchanged, and added on top: the new
         # strokes must stay legible where they overlap old ones.
         layers = [] if clean else [(it, "removed") for it in removed]
         layers += [(it, "unchanged") for it in unchanged] + [(it, "added") for it in added]
+        layers.sort(key=lambda l: 0 if l[0][2][-1] == "hl" else 1)
         for (key, kind, payload), status in layers:
             if kind == "stroke":
-                pts, ai = payload
-                draw_stroke(pts, colour(ai, status))
+                pts, ink = payload
+                draw_stroke(pts, colour(ink, status))
             else:
-                txt, x, y, size, ai = payload
-                draw_text(txt, x, y, size, colour(ai, status))
+                txt, x, y, size, ink = payload
+                draw_text(txt, x, y, size, colour(ink, status))
         img.save(out_path, "PNG", optimize=True)
 
     print(json.dumps(summary))

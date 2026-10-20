@@ -24,6 +24,15 @@ files round-trip libreink-page's exact ink JSON.
 - Existing tablet ink is loaded INTO the PencilKit canvas as pencil
   strokes (papier heals foreign stroke ids), pi's patches render read-only
   in pi blue, exactly like the web viewer.
+- **Highlighter** (rail: the marker pen, next to the pencil) draws
+  PencilKit *marker* strokes, which blend rather than paint over, so the
+  words a band marks stay readable. It serializes into the same page
+  schema the tablet uses — an ordinary stroke with a pale `gray` (186) and
+  a fat radius (papier `src/highlight.rs`) — so bands drawn here appear on
+  the reMarkable and vice versa, with no format change and nothing special
+  in erase / lasso / undo. The tablet additionally levels a band and snaps
+  it to the line of print under the nib; on the iPad the Pencil draws the
+  band freehand.
 
 ## Build
 
