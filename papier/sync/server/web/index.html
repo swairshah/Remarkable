@@ -52,6 +52,7 @@
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 18px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; cursor: pointer; transition: transform .08s ease, box-shadow .08s ease; }
   .card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,.10); }
+  .card.context-open { transform: translateY(-2px); box-shadow: 0 0 0 2px var(--accent), 0 8px 24px rgba(0,0,0,.14); }
   .thumb { aspect-ratio: 3/4; background: var(--papier); display: grid; place-items: center; border-bottom: 1px solid var(--line); overflow: hidden; }
   .thumb img, .thumb canvas { width: 100%; height: 100%; object-fit: contain; }
   .thumb.folder { background: linear-gradient(160deg, #d9d9d2, #c7c7bf); }
@@ -117,6 +118,20 @@
   .docside .sbtn .ico { width:16px; text-align:center; opacity:.85; font-size:14px; }
   .docside .sbtn .k { margin-left:auto; font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:1px 5px; }
   .docside .sbtn.active .k { color:inherit; border-color:currentColor; opacity:.7; }
+
+  /* document-card context menu */
+  .docmenu { position:fixed; z-index:50; width:210px; padding:6px; border-radius:14px; background:var(--card); box-shadow:0 0 0 1px rgba(0,0,0,.08), 0 12px 36px rgba(0,0,0,.20); opacity:0; translate:0 4px; pointer-events:none; transition-property:opacity, translate; transition-duration:120ms; transition-timing-function:cubic-bezier(.2,0,0,1); }
+  .docmenu.show { opacity:1; translate:0 0; pointer-events:auto; }
+  .docmenu button { display:flex; align-items:center; gap:10px; width:100%; min-height:42px; padding:9px 10px; border:0; border-radius:8px; background:transparent; color:var(--accent); font:inherit; font-size:13px; text-align:left; cursor:pointer; transition-property:background-color, scale; transition-duration:120ms; transition-timing-function:ease-out; }
+  .docmenu button:hover, .docmenu button:focus-visible { background:var(--bg); outline:none; }
+  .docmenu button:active { scale:.96; }
+  .docmenu .ico { width:18px; text-align:center; color:var(--muted); }
+  .docmenu .danger { color:#b42318; }
+  .docmenu .danger .ico { color:inherit; }
+  .docmenu .sep { height:1px; margin:5px 6px; background:var(--line); }
+  @media (prefers-color-scheme:dark) { :root:not([data-theme]) .docmenu { box-shadow:0 0 0 1px rgba(255,255,255,.10), 0 14px 38px rgba(0,0,0,.42); } }
+  html[data-theme=dark] .docmenu { box-shadow:0 0 0 1px rgba(255,255,255,.10), 0 14px 38px rgba(0,0,0,.42); }
+  @media (prefers-reduced-motion:reduce) { .docmenu, .docmenu button { transition:none; } }
 
   /* ---- full PDF.js viewer overlay ---- */
   #pv { position: fixed; inset: 0; z-index: 45; background: var(--bg); display: none; flex-direction: column; }
@@ -493,7 +508,78 @@ function hasInk(d, key) {
 function folderGlyph() {
   return '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h6l2 2h10v12H3z"/></svg>';
 }
+let contextDoc = null;
+let contextCard = null;
+function ensureDocMenu() {
+  let menu = $('docmenu');
+  if (menu) return menu;
+  menu = document.createElement('div');
+  menu.id = 'docmenu'; menu.className = 'docmenu'; menu.hidden = true;
+  menu.setAttribute('role', 'menu'); menu.setAttribute('aria-label', 'Document actions');
+  menu.innerHTML = '<button type="button" role="menuitem" data-action="open"><span class="ico">↗</span><span>Open</span></button>' +
+    '<div class="sep" role="separator"></div>' +
+    '<button type="button" role="menuitem" class="danger" data-action="delete"><span class="ico">⌫</span><span>Delete document</span></button>';
+  menu.addEventListener('click', (e) => {
+    const button = e.target.closest('button[data-action]');
+    if (!button || !contextDoc) return;
+    const d = contextDoc;
+    if (button.dataset.action === 'open') { closeDocMenu(); openDoc(d); }
+    else if (button.dataset.action === 'delete') deleteDocument(d);
+  });
+  menu.addEventListener('keydown', (e) => {
+    const items = [...menu.querySelectorAll('button')];
+    const at = items.indexOf(document.activeElement);
+    let next = null;
+    if (e.key === 'ArrowDown') next = items[(at + 1) % items.length];
+    else if (e.key === 'ArrowUp') next = items[(at - 1 + items.length) % items.length];
+    else if (e.key === 'Home') next = items[0];
+    else if (e.key === 'End') next = items[items.length - 1];
+    if (next) { e.preventDefault(); next.focus(); }
+  });
+  document.body.appendChild(menu);
+  return menu;
+}
+function closeDocMenu() {
+  const menu = $('docmenu');
+  if (contextCard) contextCard.classList.remove('context-open');
+  contextCard = null; contextDoc = null;
+  if (!menu) return;
+  clearTimeout(menu._hideTimer);
+  menu.classList.remove('show');
+  menu._hideTimer = setTimeout(() => { if (!menu.classList.contains('show')) menu.hidden = true; }, 120);
+}
+function openDocMenu(e, d, card) {
+  e.preventDefault();
+  const menu = ensureDocMenu();
+  clearTimeout(menu._hideTimer);
+  if (contextCard) contextCard.classList.remove('context-open');
+  contextDoc = d; contextCard = card; card.classList.add('context-open');
+  menu.hidden = false; menu.classList.remove('show');
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(e.clientX, window.innerWidth - rect.width - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(e.clientY, window.innerHeight - rect.height - 8)) + 'px';
+  requestAnimationFrame(() => {
+    if (contextDoc === d) { menu.classList.add('show'); menu.querySelector('button').focus({ preventScroll:true }); }
+  });
+}
+async function deleteDocument(d) {
+  const title = d.meta.title || d.id;
+  closeDocMenu();
+  if (!confirm(`Delete “${title}”?\n\nIt will be removed from Papier and kept in recoverable server trash.`)) return;
+  try {
+    const r = await fetch(API + 'delete?id=' + encodeURIComponent(d.id), { method:'POST' });
+    const result = await r.json().catch(() => null);
+    if (!r.ok || !result || !result.ok) throw new Error((result && result.error) || ('delete ' + r.status));
+    state.docs = state.docs.filter(doc => doc.id !== d.id);
+    state.sig = '';
+    renderHome();
+    toast(`Deleted “${title}”. It will disappear from the tablet after sync.`, 6000);
+  } catch (err) {
+    toast('Delete failed: ' + (err && err.message || 'unknown error'), 6000);
+  }
+}
 async function renderHome() {
+  closeDocMenu();
   state.open = null;
   if (openDoc._io) { openDoc._io.disconnect(); openDoc._io = null; }
   $('docside') && $('docside').remove();
@@ -529,6 +615,7 @@ async function renderHome() {
     card.innerHTML = `<div class="thumb" data-id="${esc(d.id)}">${cover ? `<img src="${esc(cover)}" alt="" loading="lazy" decoding="async">` : ''}</div>
       <div class="meta"><div class="t">${esc(d.meta.title || d.id)}</div><div class="s">${esc(sub)}</div></div>`;
     card.onclick = () => openDoc(d);
+    card.oncontextmenu = (e) => openDocMenu(e, d, card);
     grid.appendChild(card);
     if (!cover) thumbCanvas(d).then(c => { const t = card.querySelector('.thumb'); if (t) { t.innerHTML = ''; t.appendChild(c); } });
   }
@@ -1367,7 +1454,8 @@ window.addEventListener('resize', () => {
 });
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if ($('pv').classList.contains('show')) closePdfViewer();       // PDF viewer overlay first
+    if ($('docmenu') && $('docmenu').classList.contains('show')) closeDocMenu();
+    else if ($('pv').classList.contains('show')) closePdfViewer();  // PDF viewer overlay first
     else if ($('kfmt').classList.contains('show')) kindleModal(false);
     else if ($('cmp').classList.contains('show')) composeModal(false);
     else if ($('med').classList.contains('show')) closeEditor();    // then the crop editor
@@ -1409,6 +1497,10 @@ $('kfmt-send').onclick = confirmKindleSend;
 $('kfmt').addEventListener('click', (e) => { if (e.target.id === 'kfmt') kindleModal(false); });
 $('pv-close').onclick = closePdfViewer;
 $('file').onchange = (e) => upload(e.target.files);
+document.addEventListener('pointerdown', (e) => { const menu = $('docmenu'); if (menu && !menu.contains(e.target)) closeDocMenu(); });
+window.addEventListener('blur', closeDocMenu);
+window.addEventListener('resize', closeDocMenu);
+window.addEventListener('scroll', closeDocMenu, true);
 let dragN = 0;
 window.addEventListener('dragenter', (e) => { e.preventDefault(); if (dragN++ === 0) $('drop').classList.add('show'); });
 window.addEventListener('dragover', (e) => e.preventDefault());
