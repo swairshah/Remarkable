@@ -55,7 +55,12 @@ title: "Archive Test"
 ## A section
 
 Inline math $x^2 + y^2 = z^2$ and **strong text**.
+
+![A test diagram](assets/test-diagram.svg)
 EOF
+mkdir -p assets
+printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>' > assets/test-diagram.svg
+printf '%s\t%s\t%s\t%s\n' included themed-image://test-diagram.svg assets/test-diagram.svg 'A test diagram' > figure-manifest.tsv
 cat > cover-brief.txt <<'EOF'
 One oversized archive box opens into a small path of carefully ordered pages.
 EOF
@@ -93,8 +98,27 @@ else:
   const defaultResult = run(defaultJob);
   assert.equal(defaultResult.status, 0, defaultResult.stderr);
   assert.equal(fs.readFileSync(path.join(defaultJob, 'formats.txt'), 'utf8'), 'pdf\n');
+  const prompt = fs.readFileSync(path.join(defaultJob, 'prompt.md'), 'utf8');
+  assert.match(prompt, /Treat requests such as "the full page".*as EXHAUSTIVE/s);
+  assert.match(prompt, /compare the article's section list against the source table of contents/);
+  assert.match(prompt, /Exhaustive jobs may be much longer/);
+  assert.match(prompt, /preserve EVERY unique substantive source\s+figure or diagram/);
+  assert.match(prompt, /themed-image:\/\/NAME\.svg/);
+  assert.match(prompt, /figure-manifest\.tsv/);
   assert.ok(fs.existsSync(path.join(defaultJob, 'out', 'article.pdf')));
   assert.ok(!fs.existsSync(path.join(defaultJob, 'out', 'article.epub')));
+
+  const exhaustiveJob = path.join(root, 'exhaustive-job');
+  fs.mkdirSync(path.join(exhaustiveJob, 'work'), { recursive: true });
+  fs.mkdirSync(path.join(exhaustiveJob, 'out'), { recursive: true });
+  fs.writeFileSync(path.join(exhaustiveJob, 'instructions.md'), 'Include the full page and every chapter.\n');
+  fs.writeFileSync(path.join(exhaustiveJob, 'formats.txt'), 'pdf\n');
+  const exhaustiveResult = spawnSync('/bin/bash', [composeScript, exhaustiveJob], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: root, PI_BIN: fakePi, MD2PDF: fakePdf, READER_FONT_DIR: emptyFonts },
+  });
+  assert.equal(exhaustiveResult.status, 0, exhaustiveResult.stderr);
+  assert.match(fs.readFileSync(path.join(exhaustiveJob, 'work', 'figure-manifest.tsv'), 'utf8'), /included\tthemed-image:\/\/test-diagram\.svg/);
 
   const coveredJob = path.join(root, 'covered-job');
   const coveredResult = run(coveredJob, ['pdf'], {
@@ -192,6 +216,7 @@ fs.writeFileSync(path.join(out, 'meta.json'), JSON.stringify({ title, kind: 'boo
   assert.equal(epubSubmission.response.status, 202);
   const epubStatus = await waitForJob(port, epubSubmission.json.job);
   assert.equal(epubStatus.status, 'done', serviceErr);
+  assert.equal(epubStatus.phase, 'done writing');
   assert.equal(epubStatus.trace, undefined);
   assert.deepEqual(epubStatus.formats, ['epub']);
   assert.deepEqual(epubStatus.outputs, ['epub']);
@@ -215,6 +240,7 @@ fs.writeFileSync(path.join(out, 'meta.json'), JSON.stringify({ title, kind: 'boo
   assert.equal(defaultSubmission.response.status, 202);
   const defaultStatus = await waitForJob(port, defaultSubmission.json.job);
   assert.equal(defaultStatus.status, 'done', serviceErr);
+  assert.equal(defaultStatus.phase, 'done writing');
   assert.deepEqual(defaultStatus.formats, ['pdf']);
   assert.deepEqual(defaultStatus.outputs, ['pdf']);
   assert.equal(defaultStatus.docId, 'format-test');

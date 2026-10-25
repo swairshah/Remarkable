@@ -829,7 +829,8 @@ function selectedComposeFormats(value) {
 
 function completeCompose(job, dir, title, docId) {
   const outputs = job.formats.filter((format) => fs.existsSync(path.join(dir, 'out', `article.${format}`)));
-  Object.assign(job, { status: 'done', title, outputs, updated: Date.now() });
+  const phase = readComposePhase(job.id) || 'done writing';
+  Object.assign(job, { status: 'done', phase, title, outputs, updated: Date.now() });
   if (docId) job.docId = docId;
   persistComposeResult(job.id, job);
 }

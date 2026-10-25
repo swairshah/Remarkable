@@ -46,6 +46,11 @@ if ! $WANT_PDF && ! $WANT_EPUB; then
   exit 1
 fi
 
+EXHAUSTIVE=false
+if grep -Eqi 'full[[:space:]-]+page|all[[:space:]]+(sections|chapters|entries)|every[[:space:]]+chapter|each[[:space:]]+entry|do[[:space:]]+not[[:space:]]+summarize' "$JOB/instructions.md"; then
+  EXHAUSTIVE=true
+fi
+
 status() { printf '%s' "$1" > "$JOB/status.txt"; echo "[compose] $1" >&2; }
 
 # The service runs under systemd without a login env; pick up API keys.
@@ -78,6 +83,12 @@ cat <<'PROMPT'
 - If the instructions contain links, fetch each one and read it properly
   (curl -L with a browser User-Agent; for arXiv prefer
   https://arxiv.org/abs/ID and https://ar5iv.labs.arxiv.org/html/ID).
+- If a linked page is a table of contents, index, or landing page, follow the
+  linked chapters or entries needed to satisfy the request. Do not mistake the
+  index text for the full source.
+- Preserve explanatory figures and diagrams while gathering sources. Inspect
+  source Markdown or the upstream repository when a site's static HTML exposes
+  an empty figure that is filled by client-side JavaScript.
 - If a fetch fails, SELF-RESCUE: retry, then search for an authoritative
   substitute (author's blog, official docs, Wikipedia, a good survey).
   Never give up after one failed fetch, and NEVER write meta-commentary
@@ -91,6 +102,15 @@ cat <<'PROMPT'
 
 One long-form, genuinely readable teaching article that covers the
 material thoroughly. Requirements:
+
+- Treat requests such as "the full page", "all sections", "every chapter",
+  "each entry", or "do not summarize" as EXHAUSTIVE. Preserve the source order
+  and give every requested chapter or entry its own descriptive section. Carry
+  over its substantive explanations, examples, equations, and important
+  qualifications. Do not merge entries into a thematic summary, and do not
+  stop at a normal article length merely to stay concise. Before finishing,
+  compare the article's section list against the source table of contents and
+  add anything missing.
 
 - Start with YAML frontmatter:
   ---
@@ -117,10 +137,23 @@ material thoroughly. Requirements:
   never with color. When quoting math from a source that uses color,
   strip the color and keep the mathematics.
 - Code in fenced blocks with language tags.
-- Images: download any image you want to include into assets/ (curl with
-  a Referer of the page it came from) and reference it as
-  ![caption](assets/file.png). NEVER hotlink remote images. Skip images
-  that fail to download.
+- Images: for ordinary jobs, include the source images that materially improve
+  understanding. For EXHAUSTIVE jobs, preserve EVERY unique substantive source
+  figure or diagram, in source order, at its first relevant section. Deduplicate
+  identical figures, but do not replace them with prose. Download them into
+  assets/ and reference them as ![caption](assets/file.svg) (PNG/JPEG/WebP are
+  also supported). NEVER hotlink remote images.
+- Some sites use custom image schemes. For the Modal GPU Glossary, resolve
+  themed-image://NAME.svg to
+  https://modal-cdn.com/gpu-glossary/light-NAME.svg, then download the light
+  SVG into assets/ for the white e-ink page. Do not discard an image merely
+  because its original reference is not an http(s) URL.
+- For an EXHAUSTIVE job, write figure-manifest.tsv with one tab-separated line
+  per unique source figure:
+    included<TAB>original source reference<TAB>assets/local-file.ext<TAB>caption
+  Use `skipped` instead of `included` only after retries genuinely fail, with
+  the reason in the last field. If the complete source truly contains no
+  substantive figures, write one `none` line and explain how you verified it.
 - No raw HTML. No hyperlink-only "see also" dumps. Keep external links
   sparse and inline as plain [text](url) — the reader is offline.
 - Exercises: if the document includes exercises or practice problems
@@ -140,8 +173,9 @@ material thoroughly. Requirements:
   page-break div (solutions may share pages with each other).
 - End with a short "Sources" section listing what you actually read
   (title + URL, one line each).
-- Length: substantial but not bloated. Match the depth the instructions
-  ask for; default to a thorough read of roughly 2000-5000 words.
+- Length: match the depth and completeness the instructions ask for. Only when
+  the user has not requested exhaustive coverage, default to a thorough read
+  of roughly 2000-5000 words. Exhaustive jobs may be much longer.
 
 ## Step 3 — Write the cover brief (cover-brief.txt)
 
@@ -156,11 +190,15 @@ a title, numbers, logos, frames, or a mockup; Papier adds the real title.
 
 - Re-read article.md top to bottom. Fix broken math delimiters, unclosed
   code fences, and any reference to an image that is not in assets/.
+- For an exhaustive job, compare figure-manifest.tsv with the source and with
+  article.md. Every included asset must exist and appear in the article; every
+  substantive source figure must be accounted for.
 - Confirm the YAML title matches the article.
 - Confirm cover-brief.txt is one paragraph and contains no instructions to
   draw words, lettering, numbers, logos, frames, or mockups.
 
-Work in the current directory. Write article.md and cover-brief.txt there.
+Work in the current directory. Write article.md and cover-brief.txt there, plus
+figure-manifest.tsv when the request is exhaustive.
 When done, reply with exactly one line: the final title of the article.
 PROMPT
 } > "$JOB/prompt.md"
@@ -205,8 +243,40 @@ collect_render_problems() {
   printf '%s' "$problems" | sed '/^[[:space:]]*$/d'
 }
 
+collect_figure_problems() {
+  $EXHAUSTIVE || return 0
+  local manifest="$WORK/figure-manifest.tsv" problems="" rows=0
+  if [ ! -s "$manifest" ]; then
+    printf '%s\n' "Exhaustive source-figure coverage is unaudited: create figure-manifest.tsv and include every substantive source figure."
+    return 0
+  fi
+  while IFS=$'\t' read -r disposition source asset detail; do
+    [ -z "$disposition" ] && continue
+    case "$disposition" in
+      included)
+        rows=$((rows + 1))
+        if [[ "$asset" != assets/* ]]; then
+          problems+="Manifest entry must use a local assets/ path: $source -> $asset"$'\n'
+        elif [ ! -f "$WORK/$asset" ]; then
+          problems+="Manifest asset does not exist: $source -> $asset"$'\n'
+        elif ! grep -Fq "$asset" "$WORK/article.md"; then
+          problems+="Manifest asset is not referenced by article.md: $source -> $asset"$'\n'
+        fi
+        ;;
+      skipped|none) rows=$((rows + 1)) ;;
+      *) problems+="Bad figure-manifest.tsv disposition '$disposition' for: $source"$'\n' ;;
+    esac
+  done < "$manifest"
+  [ "$rows" -gt 0 ] || problems+="figure-manifest.tsv has no figure records."$'\n'
+  printf '%s' "$problems" | sed '/^[[:space:]]*$/d'
+}
+
 for PASS in 1 2 3; do
   PROBLEMS="$(collect_render_problems)"
+  FIGURE_PROBLEMS="$(collect_figure_problems)"
+  if [ -n "$FIGURE_PROBLEMS" ]; then
+    PROBLEMS="${PROBLEMS:+$PROBLEMS$'\n'}$FIGURE_PROBLEMS"
+  fi
   [ -z "$PROBLEMS" ] && { echo "[compose] review clean (pass $PASS)" >&2; break; }
   if [ "$PASS" = 3 ]; then
     echo "[compose] unresolved rendering problems after 2 fix passes — shipping anyway:" >&2
@@ -231,9 +301,12 @@ Rules:
   express emphasis structurally, never with color.
 - For every "Could not convert TeX math" snippet below, find it in
   article.md and rewrite it so it parses as standard LaTeX.
-- For every missing image file, remove the image reference or replace
-  it with a short text description.
-- Do not add new content and do not restructure the article.
+- For ordinary missing images, repair the download or remove the reference.
+  For any problem mentioning exhaustive source-figure coverage or
+  figure-manifest.tsv, DO NOT replace the figure with prose: download and
+  include the required local asset, update article.md, and create or correct
+  figure-manifest.tsv.
+- Do not restructure the article.
 
 --- PROBLEMS REPORTED BY THE RENDERER ---
 FIX
@@ -249,6 +322,13 @@ FIX
     | tee -a "$JOB/agent.stderr.log" >&2
   set -e
 done
+
+FINAL_FIGURE_PROBLEMS="$(collect_figure_problems)"
+if [ -n "$FINAL_FIGURE_PROBLEMS" ]; then
+  status "failed: exhaustive source-figure coverage incomplete"
+  printf '%s\n' "$FINAL_FIGURE_PROBLEMS" >&2
+  exit 1
+fi
 
 # Resolve the title: YAML title -> first heading -> agent's last line.
 TITLE="$(awk -F': *' '/^title:/ { sub(/^title: */, ""); gsub(/^"|"$/, ""); print; exit }' "$WORK/article.md" || true)"

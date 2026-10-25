@@ -312,7 +312,15 @@ $code_font_css
     font-size: 10pt;
   }
 
-  img { max-width: 100%; display: block; margin: 1.2em auto; border-radius: 2pt; page-break-inside: avoid; break-inside: avoid; }
+  /* Leave room for a caption and surrounding prose on the 189mm-tall print
+     area. Chrome may split an oversized SVG despite break-inside: avoid; a
+     physical max-height keeps the complete figure on one reMarkable page. */
+  figure { page-break-inside: avoid; break-inside: avoid; }
+  img {
+    max-width: 100%; max-height: 150mm; width: auto; height: auto;
+    object-fit: contain; display: block; margin: 1.2em auto;
+    border-radius: 2pt; page-break-inside: avoid; break-inside: avoid;
+  }
 
   code { font-family: var(--mono); font-size: 0.9em; background: var(--code-bg); padding: 0.05em 0.3em; border-radius: 2pt; }
   pre, div.sourceCode pre, div.sourceCode {
