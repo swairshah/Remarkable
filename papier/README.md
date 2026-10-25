@@ -16,6 +16,12 @@ A xochitl-like **home grid** opens two kinds of documents:
   margin companion that underlines, writes short margin notes, and inserts
   note pages, never touching the printed text.
 
+Navigation: a **two-finger swipe down** (from the top half) returns to the
+library; a **two-finger swipe up** (from the bottom half) reopens the
+previous document, so repeated up-swipes flip between the last two. A
+one-finger swipe from the top edge peeks the status (clock, wifi, battery)
+inside a document, or shows EXIT in the library.
+
 On top of the canvas: a **top status bar** (battery, wifi, clock), a
 **right-edge toolbar** (pen / eraser / lasso / undo / redo / page nav /
 home), **lasso selection** with move + delete/cut, and full **undo/redo**.
@@ -45,6 +51,7 @@ make deploy HOST=root@<ip>    # push to the tablet (needs make fetch-server once
 | `m4`      | lasso select (user + AI ink), drag-move, delete/cut, undo |
 | `m5-book` | pi margin companion: underline + margin note + inserted note page |
 | `m5-nb`   | pi co-writer + pause suppression while a selection is active |
+| `gestures` | two-finger swipes: down → library, up → previous doc (bounces between the last two), status peek |
 
 The preview harness runs an **arm64** container (native python + a single
 qemu layer for the armv7 binary); an amd64 container on an Apple-silicon

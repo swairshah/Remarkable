@@ -140,16 +140,19 @@ const TB_FEATURES: [Feature; 13] = [
 const TB_EDGE: i32 = TB_CX - toolbar::STRIP_W / 2;
 const DOT_RECT: Rect = Rect { x0: TB_EDGE - 40, y0: 8, x1: TB_EDGE - 14, y1: 34 };
 
-/* the top-edge swipe reveals the top bar (CLOSE or EXIT / MY FILES / status) */
+/* two-finger vertical swipes: down (starting in the top half) goes home,
+ * up (starting in the bottom half) opens the previous document */
+const TWO_SWIPE_DY: i32 = 260;
+
+/* the top-edge swipe reveals the top bar: EXIT + status in the library; a
+ * status-only peek (title, clock, wifi, battery) inside a document */
 const EDGE_Y: i32 = 16;
 const SWIPE_DIST: i32 = 90;
 const BAR_H: i32 = 90;
 const CLOSE_BTN_W: i32 = 132; /* smaller than before (was 190) */
 const CLOSE_BTN_H: i32 = 56;
-const CLOSE_X0: i32 = FB_W - CLOSE_BTN_W - 20; /* top-RIGHT corner (was left) */
+const CLOSE_X0: i32 = FB_W - CLOSE_BTN_W - 20; /* top-RIGHT corner */
 const CLOSE_Y0: i32 = 16;
-const FILES_X0: i32 = 16; /* MY FILES moves to the left edge now CLOSE is right */
-const FILES_BTN_W: i32 = 260;
 const BAR_TTL: Duration = Duration::from_secs(4);
 
 /* the paste bar: pinned at the top while the clipboard is armed (cut/copy);
@@ -448,6 +451,16 @@ struct App {
     touch_last: (i32, i32),
     swipe_from: Option<i32>,
     bar_until: Option<Instant>,
+    /// Most fingers seen during the current touch contact.
+    touch_fingers: u8,
+    /// Where the current contact's primary finger landed (any path).
+    gesture_start: Option<(i32, i32)>,
+    /// A multi-finger gesture ended but fingers are still down: ignore
+    /// touch until the glass is clear, so the straggler isn't read as a tap.
+    touch_mute: bool,
+    /// Documents opened this session, most recent last (the two-finger
+    /// swipe-up target is the newest one that isn't open now).
+    recent: Vec<String>,
 }
 
 impl App {
@@ -621,8 +634,20 @@ impl App {
     /* -- documents ------------------------------------------------------ */
 
     fn open_doc(&mut self, id: &str) -> bool {
+        /* doc -> doc (the two-finger swipe-up): land the outgoing doc first */
+        let switching = matches!(&self.screen, Screen::Doc(_));
+        if let Screen::Doc(dv) = &mut self.screen {
+            if dv.doc.id == id {
+                return true;
+            }
+            self.paste_bar = false;
+            dv.doc.save_all();
+        }
         match Doc::open(id) {
             Some(d) => {
+                self.recent.retain(|r| r != id);
+                self.recent.push(id.to_string());
+                self.bar_until = None;
                 println!(
                     "papier: opened '{}' ({} pdf pages, {} entries, at {})",
                     d.title,
@@ -636,6 +661,9 @@ impl App {
                 self.flips_since_flash = 0;
                 self.render_doc_full(true); /* clean GC16 on open */
                 self.show_page_indicator();
+                if switching {
+                    self.trigger_sync();
+                }
                 true
             }
             None => {
@@ -1902,9 +1930,18 @@ impl App {
 
     /* -- touch: taps, holds, flips, scrolls, the top bar -- */
 
-    fn route_touch(&mut self, phase: Phase, x: i32, y: i32) {
+    fn route_touch(&mut self, phase: Phase, x: i32, y: i32, fingers: u8) {
+        if self.touch_mute {
+            if phase == Phase::Release && fingers == 0 {
+                self.touch_mute = false;
+            }
+            return;
+        }
         if self.palm.within(PEN_TIMEOUT) {
             return; /* palm rejection */
+        }
+        if self.multi_touch(phase, x, y, fingers) {
+            return;
         }
         if self.dialog.is_some() {
             if phase == Phase::Press {
@@ -1989,50 +2026,125 @@ impl App {
         }
     }
 
+    /// Two-finger gestures. Returns true when the event belongs to one (the
+    /// single-finger paths must not see it). A second finger landing turns
+    /// the contact into a gesture: the long-press clock stops, the edge
+    /// swipe is dropped, and the Release decides — down from the top half
+    /// goes home, up from the bottom half opens the previous document.
+    fn multi_touch(&mut self, phase: Phase, x: i32, y: i32, fingers: u8) -> bool {
+        if phase == Phase::Press {
+            self.touch_fingers = fingers;
+            self.gesture_start = Some((x, y));
+            return fingers >= 2;
+        }
+        if fingers >= 2 {
+            self.touch_fingers = self.touch_fingers.max(fingers);
+            self.touch_t0 = None; /* no long-press under a gesture */
+            self.swipe_from = None;
+        }
+        if self.touch_fingers < 2 {
+            return false;
+        }
+        if phase == Phase::Move {
+            return true;
+        }
+        /* Release: the gesture ends with the primary finger */
+        self.touch_start = None;
+        self.touch_t0 = None;
+        let start = self.gesture_start.take();
+        let two = self.touch_fingers == 2;
+        self.touch_fingers = 0;
+        if fingers > 0 {
+            self.touch_mute = true;
+        }
+        let Some((sx, sy)) = start else { return true };
+        let (dx, dy) = (x - sx, y - sy);
+        if !two || dy.abs() < TWO_SWIPE_DY || dx.abs() > dy.abs() {
+            return true; /* a palm, a pinch, or a sideways drag: nothing */
+        }
+        if dy > 0 && sy < FB_H / 2 {
+            println!("papier: two-finger swipe down -> home");
+            match &self.screen {
+                Screen::Doc(_) => self.go_home(None),
+                Screen::Agent(_) => self.close_agent_page(),
+                Screen::Home(hv) if hv.folder.is_some() => self.go_home(None),
+                Screen::Home(_) => {}
+            }
+        } else if dy < 0 && sy >= FB_H / 2 {
+            match self.previous_doc() {
+                Some(id) => {
+                    println!("papier: two-finger swipe up -> previous doc '{id}'");
+                    if matches!(self.screen, Screen::Agent(_)) {
+                        self.close_agent_page();
+                    }
+                    self.open_doc(&id);
+                }
+                None => println!("papier: two-finger swipe up: no previous doc"),
+            }
+        }
+        true
+    }
+
+    /// The document to bounce back to: the newest one opened this session
+    /// that isn't open now, else the library's most recently opened.
+    fn previous_doc(&self) -> Option<String> {
+        let cur = self.doc_id();
+        self.recent
+            .iter()
+            .rev()
+            .find(|id| **id != cur)
+            .cloned()
+            .or_else(|| store::scan().into_iter().map(|d| d.id).find(|id| *id != cur))
+    }
+
     /* -- the top bar (revealed by the top-edge swipe) -- */
 
     fn paint_top_bar(&mut self) {
         self.fb.fill_rect(0, 0, FB_W, BAR_H, WHITE);
         self.fb.fill_rect(0, BAR_H - 2, FB_W, 2, BLACK);
-        /* CLOSE the document, or EXIT when already in the library */
-        self.fb.fill_rect(CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H, BLACK);
-        let label = if matches!(self.screen, Screen::Doc(_)) { "CLOSE" } else { "EXIT" };
-        self.fb.text(
-            CLOSE_X0 + (CLOSE_BTN_W - text_width(label, 3)) / 2,
-            CLOSE_Y0 + (CLOSE_BTN_H - 21) / 2,
-            label,
-            3,
-            WHITE,
-        );
-        /* MY FILES (only useful inside a doc) + title */
-        if let Screen::Doc(dv) = &self.screen {
-            self.fb.rect_outline(FILES_X0, CLOSE_Y0, FILES_BTN_W, CLOSE_BTN_H, 2, BLACK);
-            let fl = "MY FILES";
+        let in_doc = matches!(self.screen, Screen::Doc(_));
+        /* EXIT in the library; inside a document the bar is a status peek
+         * (leaving is the two-finger swipe down, or the toolbar's HOME) */
+        /* in a doc, stay left of the pi working dot */
+        let mut right = if in_doc { DOT_RECT.x0 - 20 } else { FB_W - 28 };
+        if !in_doc {
+            self.fb.fill_rect(CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H, BLACK);
+            let label = "EXIT";
             self.fb.text(
-                FILES_X0 + (FILES_BTN_W - text_width(fl, 3)) / 2,
+                CLOSE_X0 + (CLOSE_BTN_W - text_width(label, 3)) / 2,
                 CLOSE_Y0 + (CLOSE_BTN_H - 21) / 2,
-                fl,
+                label,
                 3,
-                BLACK,
+                WHITE,
             );
+            right = CLOSE_X0 - 28;
+        }
+        if let Screen::Doc(dv) = &self.screen {
             let mut t = dv.doc.title.clone();
-            while text::width(text::Face::Body, 32.0, &t) > FB_W - 800 && t.chars().count() > 4 {
+            while text::width(text::Face::Body, 32.0, &t) > FB_W - 560 && t.chars().count() > 4 {
                 t = t.chars().take(t.chars().count() - 4).collect();
                 t.push_str("..");
             }
-            text::draw_line(&mut self.fb, FILES_X0 + FILES_BTN_W + 32, 26, text::Face::Body, 32.0, &t);
+            text::draw_line(&mut self.fb, 28, 26, text::Face::Body, 32.0, &t);
         }
-        /* status cluster, right: clock + battery */
+        /* status cluster, right: clock, wifi, battery */
         let clock = format!("{:02}:{:02}", self.status.hm.0, self.status.hm.1);
         let pct = if self.status.batt_pct >= 0 {
             format!("{}%", self.status.batt_pct)
         } else {
             "--".into()
         };
-        let s = format!("{clock}   {pct}");
-        let w = text::width(text::Face::Body, 30.0, &s);
-        /* sit the clock/battery just left of the (now right-aligned) close btn */
-        text::draw_line(&mut self.fb, CLOSE_X0 - 28 - w, 28, text::Face::Body, 30.0, &s);
+        let pw = text::width(text::Face::Body, 30.0, &pct);
+        text::draw_line(&mut self.fb, right - pw, 28, text::Face::Body, 30.0, &pct);
+        let wx = right - pw - 44;
+        statusbar::wifi_glyph(&mut self.fb, wx, BAR_H / 2 + 14, self.status.wifi_bars);
+        let cw = text::width(text::Face::Body, 30.0, &clock);
+        text::draw_line(&mut self.fb, wx - 40 - cw, 28, text::Face::Body, 30.0, &clock);
+        if self.working {
+            let r = DOT_RECT;
+            self.fb.disc((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2, 8, GRAY);
+        }
+        self.blit_toolbar(); /* its button pokes into the bar */
         self.disp.update(0, 0, FB_W, BAR_H, Wave::Ink);
     }
 
@@ -2056,22 +2168,11 @@ impl App {
     }
 
     fn top_bar_press(&mut self, x: i32, y: i32) {
-        if in_rect(x, y, CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H) {
-            if matches!(self.screen, Screen::Doc(_)) {
-                println!("papier: close document");
-                self.bar_until = None;
-                self.go_home(None);
-            } else {
-                println!("papier: close app");
-                RUNNING.store(false, Ordering::Relaxed);
-            }
-            return;
-        }
-        if matches!(self.screen, Screen::Doc(_))
-            && in_rect(x, y, FILES_X0, CLOSE_Y0, FILES_BTN_W, CLOSE_BTN_H)
+        if !matches!(self.screen, Screen::Doc(_))
+            && in_rect(x, y, CLOSE_X0, CLOSE_Y0, CLOSE_BTN_W, CLOSE_BTN_H)
         {
-            self.bar_until = None;
-            self.go_home(None);
+            println!("papier: close app");
+            RUNNING.store(false, Ordering::Relaxed);
             return;
         }
         self.dismiss_top_bar();
@@ -3602,6 +3703,7 @@ fn main() -> std::process::ExitCode {
     let auto_sleep = (powerdev.is_some() && auto_sleep_min > 0)
         .then(|| Duration::from_secs(auto_sleep_min * 60));
     let mut last_activity = Instant::now();
+    let (mut qt_fingers, mut qt_primary): (Vec<i32>, Option<i32>) = (Vec::new(), None);
 
     let sock = sock_path();
     let ipc = IpcServer::open(APP, &sock)
@@ -3659,6 +3761,10 @@ fn main() -> std::process::ExitCode {
         touch_last: (0, 0),
         swipe_from: None,
         bar_until: None,
+        touch_fingers: 0,
+        gesture_start: None,
+        touch_mute: false,
+        recent: Vec::new(),
     };
     let _ = app.takeover;
 
@@ -3732,7 +3838,7 @@ fn main() -> std::process::ExitCode {
                     last_activity = Instant::now();
                 }
                 for e in evs {
-                    app.route_touch(e.phase, e.x, e.y);
+                    app.route_touch(e.phase, e.x, e.y, e.fingers);
                 }
             }
         }
@@ -3746,7 +3852,35 @@ fn main() -> std::process::ExitCode {
                         break;
                     }
                     Event::Interrupted => continue,
-                    Event::Touch { phase, x, y, .. } => app.route_touch(phase, x, y),
+                    Event::Touch { id, phase, x, y } => {
+                        /* AppLoad sends every finger; the first one down
+                         * drives (like touch.rs), the rest only count */
+                        match phase {
+                            Phase::Press => {
+                                if !qt_fingers.contains(&id) {
+                                    qt_fingers.push(id);
+                                }
+                            }
+                            Phase::Release => qt_fingers.retain(|f| *f != id),
+                            Phase::Move => {}
+                        }
+                        if qt_primary.is_none() && phase == Phase::Press {
+                            qt_primary = Some(id);
+                        }
+                        let n = qt_fingers.len() as u8;
+                        if qt_primary == Some(id) {
+                            if phase == Phase::Release {
+                                qt_primary = None;
+                            }
+                            app.route_touch(phase, x, y, n);
+                        } else if qt_primary.is_some() && phase != Phase::Move {
+                            /* a finger landing or lifting changes the count */
+                            let (lx, ly) = app.touch_last;
+                            app.route_touch(Phase::Move, lx, ly, n);
+                        } else if qt_primary.is_none() && phase == Phase::Release && n == 0 {
+                            app.route_touch(Phase::Release, x, y, 0);
+                        }
+                    }
                     Event::Pen { phase, x, y, .. } => {
                         app.palm.arm();
                         if !direct_pen {

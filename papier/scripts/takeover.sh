@@ -3,8 +3,8 @@
 # host the e-ink engine with the bundled rm2fb server (timower/rM2-stuff),
 # run Papier against it (instant ink), ALWAYS restore xochitl on exit.
 #
-# Exit Papier from its library: top-edge swipe -> EXIT, or SIGTERM; closing
-# a document returns to the library. The power button sleeps instead.
+# Exit Papier from its library: top-edge swipe -> EXIT, or SIGTERM; a
+# two-finger swipe down leaves a document for the library. The power button sleeps instead.
 # Escape hatch if anything wedges:
 # ssh root@<tablet> 'systemctl start xochitl'.
 

@@ -37,7 +37,33 @@ sys.path.insert(0, os.environ.get(
 from qtfb_host import *  # noqa: E402,F403
 
 DATA_DIR = "/tmp/au-data"
-CLOSE_TAP_X, CLOSE_TAP_Y = 1318, 44  # inside the CLOSE button (now top-RIGHT)
+CLOSE_TAP_X, CLOSE_TAP_Y = 1318, 44  # inside the library's EXIT button (top-RIGHT)
+
+
+def finger(s, itype, fid, x, y):
+    """One touch message for finger `fid` (qtfb dev_id)."""
+    s.conn.send(struct.pack("<B3xiiiii", MESSAGE_USERINPUT, itype, fid, x, y, 0))
+
+
+def two_finger_swipe(s, y0, y1, x=600, gap=160):
+    """Two fingers land together and travel vertically from y0 to y1."""
+    finger(s, TOUCH_PRESS, 1, x, y0)
+    finger(s, TOUCH_PRESS, 2, x + gap, y0 + 10)
+    for i in range(1, 13):
+        y = y0 + (y1 - y0) * i // 12
+        finger(s, TOUCH_UPDATE, 1, x, y)
+        finger(s, TOUCH_UPDATE, 2, x + gap, y + 10)
+    finger(s, TOUCH_RELEASE, 1, x, y1)
+    finger(s, TOUCH_RELEASE, 2, x + gap, y1 + 10)
+
+
+def go_home(s):
+    """Two-finger swipe down from the top: leave the document."""
+    two_finger_swipe(s, 120, 900)
+
+
+def last_doc():
+    return json.load(open(f"{DATA_DIR}/settings.json")).get("last_doc", "")
 
 
 class PaperHarness(Harness):
@@ -97,12 +123,10 @@ def scenario_m1(h, out_png):
     s.drain(2.2)
     shot("book-back")
 
-    s.swipe_down_from_top()
-    s.drain(0.8)
-    s.tap(CLOSE_TAP_X, CLOSE_TAP_Y)
+    go_home(s)
     s.drain(1.5)
-    assert s.app.poll() is None, "CLOSE inside a document must keep Papier running"
-    shot("book-close-home")  # CLOSE leaves the document; Papier stays running
+    assert s.app.poll() is None, "leaving a document must keep Papier running"
+    shot("book-close-home")  # two-finger swipe down: back to the library
 
     # EXIT from the library still exits the app.
     s.swipe_down_from_top()
@@ -135,10 +159,8 @@ def scenario_m1(h, out_png):
     time.sleep(1.8)
     shot("nb-resume")  # last_doc=nb-test, page 1 ink straight from disk
 
-    # Closing a notebook returns to the library instead of restarting xochitl.
-    s.swipe_down_from_top()
-    s.drain(0.8)
-    s.tap(CLOSE_TAP_X, CLOSE_TAP_Y)
+    # Leaving a notebook returns to the library instead of restarting xochitl.
+    go_home(s)
     s.drain(1.5)
     assert s.app.poll() is None, "closing a notebook must keep Papier running"
     shot("nb-close-home")
@@ -271,8 +293,9 @@ def scenario_m2(h, out_png):
     time.sleep(1.7)  # let palm rejection lapse before the finger swipe
     s.swipe_down_from_top()
     s.drain(1.0)
-    shot("topbar")
-    s.tap(16 + 130, 44)  # MY FILES (now at the left edge, FILES_X0=16)
+    shot("topbar")  # status peek: title, clock, wifi, battery — no buttons
+    s.drain(4.5)  # the peek times out
+    go_home(s)
     s.drain(3.0)
     shot("home2")  # new notebook first, with its ink thumbnail
 
@@ -988,7 +1011,66 @@ def scenario_erasemodes(h, out_png):
     print("fake-qtfb: erasemodes assertions passed")
 
 
+def scenario_gestures(h, out_png):
+    """Two-finger swipes: down -> library, up -> previous doc, repeated up
+    swipes bounce between the two most recent docs; a one-finger top-edge
+    swipe in a doc is a status-only peek."""
+    def shot(tag):
+        write_png(out_png.replace(".png", f"-{tag}.png"))
+
+    subprocess.run(["rm", "-rf", DATA_DIR], check=False)
+    copy_tree(os.path.join(h.here, "..", "build", "testbook", "docs", "demo-paper"),
+              f"{DATA_DIR}/docs/demo-paper")
+    os.makedirs(f"{DATA_DIR}/docs/nb-test", exist_ok=True)
+    with open(f"{DATA_DIR}/docs/nb-test/meta.json", "w") as f:
+        json.dump({"v": 1, "kind": "notebook", "title": "Test Notebook"}, f)
+
+    s = h.launch(PAPIER_OPEN="nb-test", PAPIER_FAKE_SYS="1")
+    s.drain(2.0)
+    s.squiggle(200, 700, n=60)
+    s.drain(1.0)
+    time.sleep(1.7)  # palm rejection lapses
+
+    s.swipe_down_from_top()
+    s.drain(1.0)
+    shot("peek")
+    s.drain(4.5)
+
+    go_home(s)
+    s.drain(2.5)
+    shot("home")
+    assert s.app.poll() is None
+
+    # straggler finger must not tap: home stays home (no doc opened)
+    two_finger_swipe(s, 1700, 1650)  # too short: nothing
+    s.drain(1.0)
+    assert last_doc() == "", f"short swipe opened {last_doc()!r}"
+
+    two_finger_swipe(s, 1700, 700)  # up from the bottom: previous doc
+    s.drain(2.5)
+    shot("prev1")
+    assert last_doc() == "nb-test", last_doc()
+
+    go_home(s)
+    s.drain(2.0)
+    s.tap(702, 480)  # the book: second cell (nb-test, opened last, is first)
+    s.drain(2.5)
+    assert last_doc() == "demo-paper", last_doc()
+
+    two_finger_swipe(s, 1700, 700)
+    s.drain(2.5)
+    assert last_doc() == "nb-test", last_doc()
+    shot("bounce-nb")
+    two_finger_swipe(s, 1700, 700)
+    s.drain(2.5)
+    assert last_doc() == "demo-paper", last_doc()
+    shot("bounce-book")
+    s.terminate_clean()
+    print("fake-qtfb: gestures assertions passed")
+
+
 SCENARIOS = {
+    "gestures": scenario_gestures,
     "m0": scenario_m0,
     "m1": scenario_m1,
     "m2": scenario_m2,
