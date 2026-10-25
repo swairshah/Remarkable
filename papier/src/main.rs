@@ -1222,7 +1222,7 @@ impl App {
             if !l.viable() {
                 (trail, Vec::new(), None)
             } else {
-                let (refs, bbox) = select::select_strokes(&dv.doc.page, &l.pts);
+                let (refs, bbox) = select::select_strokes(&dv.doc.page, &l.pts, false);
                 (trail, refs, bbox)
             }
         };
@@ -1382,6 +1382,7 @@ impl App {
                             }
                         }
                     }
+                    ink::Owner::Highlight => {} /* the lasso never selects marks */
                 }
             }
             out
@@ -1667,7 +1668,7 @@ impl App {
             let trail = l.bbox().pad(6);
             let mut dirty: Option<Rect> = None;
             if l.viable() {
-                let (refs, _) = select::select_strokes(&dv.doc.page, &l.pts);
+                let (refs, _) = select::select_strokes(&dv.doc.page, &l.pts, true);
                 if !refs.is_empty() {
                     let (lifted, gone) = dv.doc.page.remove_strokes_by_ids(&refs);
                     let key = dv.doc.cur_ink_path();

@@ -1115,9 +1115,19 @@ def scenario_highlight(h, out_png):
     pen_tap(s, TB_CX, TB_BTN["undo"])
     s.drain(1.2)
     shot("undo")
+
+    # the eraser rubs marks out too (object mode: the whole mark goes)
+    pen_tap(s, TB_CX, TB_BTN["eraser"])
+    s.drain(0.6)
+    s.pen(PEN_PRESS, 400, y + 40)
+    for i in range(1, 8):
+        s.pen(PEN_UPDATE, 400, y + 40 - i * 8)
+    s.pen(PEN_RELEASE, 400, y - 16)
+    s.drain(2.0)
+    shot("erased")
     s.terminate_clean()
     page = ink_file()
-    assert len(page.get("highlights", [])) == 1, page.get("highlights")
+    assert page.get("highlights", []) == [], page.get("highlights")
     print("fake-qtfb: highlight assertions passed")
 
 

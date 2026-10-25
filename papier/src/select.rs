@@ -96,7 +96,13 @@ fn point_in_poly(poly: &[(f32, f32)], x: f32, y: f32) -> bool {
 }
 
 /// Strokes fully inside the loop, as stable refs + their union bbox.
-pub fn select_strokes(page: &Page, poly: &[(f32, f32)]) -> (Vec<(Owner, u64)>, Option<Rect>) {
+/// `highlights`: also take highlighter marks (the region eraser does; the
+/// lasso doesn't — cut/copy/paste carry pen ink only).
+pub fn select_strokes(
+    page: &Page,
+    poly: &[(f32, f32)],
+    highlights: bool,
+) -> (Vec<(Owner, u64)>, Option<Rect>) {
     let lb = {
         let mut r = Rect { x0: i32::MAX, y0: i32::MAX, x1: i32::MIN, y1: i32::MIN };
         for &(x, y) in poly {
@@ -132,6 +138,11 @@ pub fn select_strokes(page: &Page, poly: &[(f32, f32)]) -> (Vec<(Owner, u64)>, O
     for p in &page.patches {
         for s in &p.strokes {
             test(Owner::Patch(p.id), s);
+        }
+    }
+    if highlights {
+        for s in &page.highlights {
+            test(Owner::Highlight, s);
         }
     }
     (refs, bbox)
