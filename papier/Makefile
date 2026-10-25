@@ -133,6 +133,9 @@ deploy: build vendor/rm2fb_server
 	cat vendor/librm2fb_server.so | $(SSH) 'cat > $(DEVICE_DIR)/librm2fb_server.so'
 	cat app/external.manifest.json | $(SSH) 'cat > $(DEVICE_DIR)/external.manifest.json'
 	cat app/icon.png | $(SSH) 'cat > $(DEVICE_DIR)/icon.png'
+	@# the tablet's system zone is UTC: give the app the Mac's zone (TZ override wins)
+	tz=$${TZ_NAME:-$$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')}; \
+		[ -n "$$tz" ] && $(SSH) "mkdir -p $(DATA_DIR) && test -f /usr/share/zoneinfo/$$tz && echo $$tz > $(DATA_DIR)/timezone && echo timezone: $$tz"
 	@if [ -d build/fonts ]; then \
 		$(SSH) 'mkdir -p $(DEVICE_DIR)/fonts'; \
 		for f in build/fonts/*.ttf; do \

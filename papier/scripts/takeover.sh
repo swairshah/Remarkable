@@ -47,6 +47,12 @@ sleep 0.5
 # PAPIER_FONT is the default face for pi's writing: serif (formal roman),
 # script (natural cursive handwriting), or sans (plain plotter).
 # PAPIER_FONT_DIR holds the device-extracted UI fonts (make fonts), optional.
+# The device's system zone is UTC; local time for the clock (and pi) comes
+# from the data dir's timezone file (an IANA name, written by make deploy).
+if [ -z "$TZ" ] && [ -s /home/root/.local/share/papier/timezone ]; then
+    TZ=$(cat /home/root/.local/share/papier/timezone)
+    export TZ
+fi
 cd /home/root
 HOME=/home/root PATH="/home/root/bin:/home/root/opt/node/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     PAPIER_EXT="$HERE/papier-canvas.ts:$HERE/papier-transcribe.ts:$HERE/papier-metrics.ts" \

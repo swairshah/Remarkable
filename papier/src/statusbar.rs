@@ -4,12 +4,19 @@
 //!
 //! All readers are plain file reads — no fork/exec on the poll loop.
 //! Battery comes from /sys/class/power_supply (the node name differs by
-//! board; globbed once at startup). Wifi comes from /proc/net/wireless
-//! (pure procfs; wpa_cli is deliberately NOT used here — it can hang
-//! exactly when wpa_supplicant is wedged). PAPIER_FAKE_SYS=1 pins
-//! deterministic values for the preview harness.
+//! board; globbed once at startup). Wifi is "connected" when wlan0's
+//! operstate is up; bars come from /proc/net/wireless when the driver
+//! fills it in (this firmware's brcmfmac often leaves it empty, so a
+//! live link without a quality reading shows full bars). wpa_cli is
+//! deliberately NOT used here — it can hang exactly when wpa_supplicant
+//! is wedged. PAPIER_FAKE_SYS=1 pins deterministic values for the preview
+//! harness.
+//!
+//! The clock is local time via localtime_r, so it needs TZ: the device
+//! ships as UTC, and takeover.sh exports TZ from the data dir's
+//! `timezone` file (written by `make deploy` from the Mac's zone).
 
-use crate::draw::{BLACK, GRAY, WHITE};
+use crate::draw::{BLACK, LIGHT, WHITE};
 use crate::fb::{Framebuffer, SCREEN_W};
 use crate::text;
 
@@ -90,9 +97,13 @@ fn find_battery() -> (Option<String>, Option<String>) {
     (None, None)
 }
 
-/// Link quality from /proc/net/wireless -> 0..=3 bars (-1 = no wlan0).
+/// Wifi state -> 0..=3 bars, -1 = not connected (no link on wlan0).
 fn read_wifi_bars() -> i8 {
-    let Ok(s) = std::fs::read_to_string("/proc/net/wireless") else { return -1 };
+    let up = read_trim("/sys/class/net/wlan0/operstate").is_some_and(|s| s == "up");
+    if !up {
+        return -1;
+    }
+    let s = std::fs::read_to_string("/proc/net/wireless").unwrap_or_default();
     for line in s.lines() {
         let line = line.trim_start();
         if let Some(rest) = line.strip_prefix("wlan0:") {
@@ -114,7 +125,7 @@ fn read_wifi_bars() -> i8 {
             };
         }
     }
-    -1
+    3 /* link up, no quality reading */
 }
 
 fn clock_hm() -> (i32, i32) {
@@ -155,17 +166,32 @@ pub fn render(fb: &mut Framebuffer, st: &SysStatus) {
         fb.fill_rect(bx + bw / 2 - 2, by - 6, 4, 4, BLACK);
     }
 
-    /* wifi bars, left of the battery text */
-    let wx = bx - 12 - text::width(text::Face::Body, 26.0, &pct) - 24 - 30;
-    let base_y = STATUS_H / 2 + 10;
-    for i in 0..4 {
-        let h = 6 + i * 5;
-        let x = wx + i * 8;
-        let on = st.wifi_bars >= i as i8;
-        if on {
-            fb.fill_rect(x, base_y - h, 5, h, BLACK);
-        } else {
-            fb.fill_rect(x, base_y - 2, 5, 2, GRAY);
+    /* wifi, left of the battery text */
+    let wx = bx - 12 - pw - 28;
+    wifi_glyph(fb, wx, STATUS_H / 2 + 12, st.wifi_bars);
+}
+
+/// The wifi fan: a dot plus three arcs opening upward from (cx, base_y).
+/// `bars` arcs are black (0..=3); -1 = disconnected: the fan goes light
+/// gray and a black slash strikes it out. Spans ~44x34 px.
+pub fn wifi_glyph(fb: &mut Framebuffer, cx: i32, base_y: i32, bars: i8) {
+    let off = bars < 0;
+    fb.disc(cx, base_y - 3, 4, if off { LIGHT } else { BLACK });
+    for i in 1..=3i32 {
+        let r = 9 * i + 1;
+        let c = if !off && bars >= i as i8 { BLACK } else { LIGHT };
+        let (a0, a1) = (-2.36f32, -0.78f32); /* -135deg .. -45deg */
+        let mut last: Option<(i32, i32)> = None;
+        for k in 0..=16 {
+            let a = a0 + (a1 - a0) * k as f32 / 16.0;
+            let p = (cx + (r as f32 * a.cos()).round() as i32, base_y - 3 + (r as f32 * a.sin()).round() as i32);
+            if let Some(l) = last {
+                fb.stroke_segment(l.0, l.1, p.0, p.1, 1, c);
+            }
+            last = Some(p);
         }
+    }
+    if off {
+        fb.stroke_segment(cx - 18, base_y - 32, cx + 18, base_y + 2, 1, BLACK);
     }
 }
