@@ -45,6 +45,10 @@ pub enum EditOp {
     AddPatch { id: u64, body: Option<PatchBody> },
     /// pi (or the rubber) erased a patch. `body` is Some while APPLIED.
     ErasePatch { id: u64, body: Option<PatchBody> },
+    /// A finished highlighter mark. `stroke` is Some only while UNDONE.
+    AddHighlight { id: u64, stroke: Option<Stroke> },
+    /// A highlight removed (long-press X). `stroke` is Some while APPLIED.
+    EraseHighlight { id: u64, stroke: Option<Stroke> },
 }
 
 impl EditOp {
@@ -74,6 +78,9 @@ fn op_owned_pts(op: &EditOp) -> usize {
         }
         EditOp::AddPatch { body, .. } | EditOp::ErasePatch { body, .. } => {
             body.as_ref().map_or(0, |(ss, _)| ss.iter().map(|s| s.pts.len()).sum())
+        }
+        EditOp::AddHighlight { stroke, .. } | EditOp::EraseHighlight { stroke, .. } => {
+            stroke.as_ref().map_or(0, |s| s.pts.len())
         }
     }
 }
@@ -165,6 +172,12 @@ impl UndoStack {
                     page.add_patch_with_id(*id, content);
                     b
                 }
+                EditOp::AddHighlight { id, stroke } => {
+                    let (s, b) = page.remove_highlight(*id)?;
+                    *stroke = Some(s);
+                    Some(b)
+                }
+                EditOp::EraseHighlight { stroke, .. } => page.insert_highlight(stroke.take()?),
             }
         })();
         self.redo.push(op);
@@ -212,6 +225,12 @@ impl UndoStack {
                 EditOp::ErasePatch { id, body } => {
                     let (content, b) = page.take_patch(*id)?;
                     *body = Some(content);
+                    Some(b)
+                }
+                EditOp::AddHighlight { stroke, .. } => page.insert_highlight(stroke.take()?),
+                EditOp::EraseHighlight { id, stroke } => {
+                    let (s, b) = page.remove_highlight(*id)?;
+                    *stroke = Some(s);
                     Some(b)
                 }
             }

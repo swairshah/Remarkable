@@ -120,10 +120,11 @@ fn agent_md_path() -> String {
  * center + this app's feature set, top to bottom */
 const TB_CX: i32 = FB_W - 52;
 const TB_CY: i32 = 96;
-const TB_FEATURES: [Feature; 13] = [
+const TB_FEATURES: [Feature; 14] = [
     Feature::Tool(Tool::Pen),
     Feature::Tool(Tool::Eraser),
     Feature::Tool(Tool::Lasso),
+    Feature::Tool(Tool::Highlighter),
     Feature::Undo,
     Feature::Redo,
     Feature::PiMode,
@@ -167,8 +168,12 @@ const PASTE_DONE_Y0: i32 = (PASTE_H - PASTE_DONE_H) / 2;
 const FLIP_DX: i32 = 260;
 const FLIP_DY_MAX: i32 = 240;
 
-/* long-press on a home cell */
+/* long-press on a home cell (or on a highlight in a doc) */
 const HOLD_DELAY: Duration = Duration::from_millis(650);
+
+/* the remove-highlight popup: a boxed X beside the long-pressed mark */
+const HL_POP: i32 = 76;
+const HL_HIT_SLOP: f32 = 14.0;
 
 /* transient page-number indicator after a flip: a subtle grey number in the
  * bottom-right (no box), sitting clear of the right-edge toolbar strip */
@@ -311,8 +316,11 @@ struct DocView {
     drag_moved_at: Instant, /* last pen motion during a drag */
     drag_dirty: bool,       /* ring not yet painted at the current offset */
 
-    /* live pen ink */
+    /* live pen ink (a highlighter mark in progress is a cur_stroke tagged
+     * gray HL_SHADE) */
     cur_stroke: Option<Stroke>,
+    /// The remove-highlight popup: (highlight id, where the X box is).
+    hl_menu: Option<(u64, Rect)>,
     ink_dirty: Option<Rect>,
     contact_changed: bool,
     page_changed: bool,
@@ -348,6 +356,7 @@ impl DocView {
             drag_moved_at: Instant::now(),
             drag_dirty: false,
             cur_stroke: None,
+            hl_menu: None,
             ink_dirty: None,
             contact_changed: false,
             page_changed: false,
@@ -616,12 +625,21 @@ impl App {
     /// Open the document menu as soon as the hold threshold passes. Waiting
     /// for release made the required hold duration invisible to the user.
     fn home_hold_tick(&mut self) {
-        if !matches!(self.screen, Screen::Home(_)) || self.dialog.is_some() {
+        if matches!(self.screen, Screen::Agent(_)) || self.dialog.is_some() {
             return;
         }
         let (Some((sx, sy)), Some(t0)) = (self.touch_start, self.touch_t0) else { return };
         let (dx, dy) = (self.touch_last.0 - sx, self.touch_last.1 - sy);
         if dx.abs() >= 40 || dy.abs() >= 40 || t0.elapsed() < HOLD_DELAY {
+            return;
+        }
+        if matches!(self.screen, Screen::Doc(_)) {
+            /* a still finger on a highlight: the remove popup. Anywhere
+             * else the contact carries on (stop timing it either way). */
+            self.touch_t0 = None;
+            if self.doc_hold(sx, sy) {
+                self.touch_start = None;
+            }
             return;
         }
         /* Consume this contact before opening the modal so its eventual
@@ -701,13 +719,15 @@ impl App {
             let Screen::Doc(dv) = &mut self.screen else { return };
             dv.ink_settle = None; /* the whole-page repaint below supersedes any settle */
             dv.ink_settle_at = None;
+            dv.hl_menu = None; /* the repaint wipes the popup */
             dv.doc.render_full(&mut self.fb);
             /* pi content is antialiased Garamond + mid-gray strokes; synced
              * patches (iPad sessions) reach the screen ONLY through this
              * full render, so a hard binary wave would shred them thin */
-            let gray = dv.doc.page.patches.iter().any(|p| {
-                !p.texts.is_empty() || p.strokes.iter().any(|s| s.gray != ink::USER_GRAY)
-            });
+            let gray = !dv.doc.page.highlights.is_empty()
+                || dv.doc.page.patches.iter().any(|p| {
+                    !p.texts.is_empty() || p.strokes.iter().any(|s| s.gray != ink::USER_GRAY)
+                });
             (dv.doc.has_raster(), gray)
         };
         self.blit_toolbar();
@@ -731,7 +751,18 @@ impl App {
             Screen::Doc(dv) => {
                 let r = r.clamp_screen();
                 let had_gray = dv.doc.render_region(&mut self.fb, r);
-                let w = wave.unwrap_or(if had_gray { Wave::Text } else { Wave::Ink });
+                /* a highlight's wash is a true gray: only a full 16-level
+                 * pass renders it smooth (partial GL16 speckles it) */
+                let hl = dv.doc.page.highlights.iter().filter_map(ink::highlight_bbox).any(|b| {
+                    b.x1 >= r.x0 && b.x0 <= r.x1 && b.y1 >= r.y0 && b.y0 <= r.y1
+                });
+                let w = wave.unwrap_or(if hl {
+                    Wave::Print
+                } else if had_gray {
+                    Wave::Text
+                } else {
+                    Wave::Ink
+                });
                 self.disp.update(r.x0, r.y0, r.w(), r.h(), w);
             }
             Screen::Home(_) => self.render_home(false),
@@ -765,6 +796,15 @@ impl App {
         };
         if sel_hit {
             self.repaint_selection_chrome();
+        }
+        let pop = match &self.screen {
+            Screen::Doc(dv) => dv.hl_menu.map(|(_, p)| p),
+            _ => None,
+        };
+        if let Some(p) = pop {
+            if r.x1 >= p.x0 && r.x0 <= p.x1 && r.y1 >= p.y0 && r.y0 <= p.y1 {
+                self.paint_hl_menu();
+            }
         }
     }
 
@@ -927,6 +967,10 @@ impl App {
             self.paste_pen(phase, x, y);
             return;
         }
+        if phase == PenPhase::Press && self.hl_menu_press(x, y) {
+            self.pen_swallow = true;
+            return;
+        }
         /* the toolbar swallows presses only — a stroke that started on the
          * canvas may finish under it (chrome repaints over the ink) */
         if phase == PenPhase::Press {
@@ -969,6 +1013,8 @@ impl App {
                     }
                 } else if tool == Tool::Pen {
                     self.ink_pass(phase, x, y, pressure);
+                } else if tool == Tool::Highlighter {
+                    self.highlight_pass(phase, x, y);
                 } else {
                     self.lasso_pen(phase, x, y);
                 }
@@ -1532,6 +1578,22 @@ impl App {
         if s.pts.is_empty() {
             return;
         }
+        if s.gray == ink::HL_SHADE {
+            /* a highlighter mark: swap the live dither for the real wash */
+            let b = ink::highlight_bbox(&s);
+            let id = dv.doc.page.push_highlight(s);
+            dv.contact_changed = true;
+            dv.page_changed = true;
+            let key = dv.doc.cur_ink_path();
+            dv.undo.stack(&key).push(EditOp::AddHighlight { id, stroke: None });
+            if let Some(b) = b {
+                let r = b.pad(2).clamp_screen();
+                self.render_doc_region_wave(r, Some(Wave::Print));
+                self.restore_chrome_over(r);
+            }
+            self.paint_toolbar();
+            return;
+        }
         let id = dv.doc.page.push_stroke(s);
         dv.contact_changed = true;
         dv.page_changed = true;
@@ -1680,6 +1742,103 @@ impl App {
             });
             dv.ink_settle_at = Some(Instant::now() + Duration::from_millis(800));
         }
+    }
+
+    /// The highlighter: a chisel nib, drawn live as a DU-friendly dither,
+    /// re-rendered as a smooth gray wash when the pen lifts.
+    fn highlight_pass(&mut self, phase: PenPhase, x: i32, y: i32) {
+        let Screen::Doc(dv) = &mut self.screen else { return };
+        let p = Pt { x: x as f32, y: y as f32, r: ink::HL_HALF_H };
+        let prev = match (&mut dv.cur_stroke, phase) {
+            (Some(s), PenPhase::Move) if s.gray == ink::HL_SHADE => {
+                let prev = *s.pts.last().unwrap();
+                s.pts.push(p);
+                prev
+            }
+            _ => {
+                dv.cur_stroke = Some(Stroke { id: 0, pts: vec![p], gray: ink::HL_SHADE });
+                p
+            }
+        };
+        ink::stamp_highlight_live_segment(&mut self.fb, prev, p);
+        let (hw, hh) = (ink::HL_HALF_W.ceil() as i32 + 1, ink::HL_HALF_H.ceil() as i32 + 1);
+        let seg = Rect {
+            x0: prev.x.min(p.x) as i32 - hw,
+            y0: prev.y.min(p.y) as i32 - hh,
+            x1: prev.x.max(p.x).ceil() as i32 + hw,
+            y1: prev.y.max(p.y).ceil() as i32 + hh,
+        };
+        dv.ink_dirty = Some(match dv.ink_dirty {
+            None => seg,
+            Some(d) => d.union(seg),
+        });
+    }
+
+    /// Long-press on a highlight (finger): offer the X to remove it.
+    /// Returns true if a highlight was under the finger.
+    fn doc_hold(&mut self, x: i32, y: i32) -> bool {
+        let pop = {
+            let Screen::Doc(dv) = &mut self.screen else { return false };
+            let Some(id) = dv.doc.page.highlight_at(x as f32, y as f32, HL_HIT_SLOP) else {
+                return false;
+            };
+            /* beside the mark without covering it: just above the band at
+             * the finger (below when there's no room), clear of the toolbar */
+            let gap = ink::HL_HALF_H as i32 + 14;
+            let top = if y - gap - HL_POP >= 8 { y - gap - HL_POP } else { y + gap };
+            let cy = top + HL_POP / 2;
+            let px = (x - HL_POP / 2).clamp(8, TB_EDGE - 12 - HL_POP);
+            let r = Rect { x0: px, y0: cy - HL_POP / 2, x1: px + HL_POP - 1, y1: cy + HL_POP / 2 - 1 };
+            dv.hl_menu = Some((id, r));
+            r
+        };
+        println!("papier: highlight popup at {},{}", pop.x0, pop.y0);
+        self.paint_hl_menu();
+        true
+    }
+
+    fn paint_hl_menu(&mut self) {
+        let Screen::Doc(dv) = &self.screen else { return };
+        let Some((_, r)) = dv.hl_menu else { return };
+        self.fb.fill_rect(r.x0, r.y0, r.w(), r.h(), WHITE);
+        self.fb.rect_outline(r.x0, r.y0, r.w(), r.h(), 3, BLACK);
+        let (cx, cy, k) = ((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2, 16);
+        self.fb.stroke_segment(cx - k, cy - k, cx + k, cy + k, 2, BLACK);
+        self.fb.stroke_segment(cx - k, cy + k, cx + k, cy - k, 2, BLACK);
+        self.disp.update(r.x0, r.y0, r.w(), r.h(), Wave::Ink);
+    }
+
+    /// A press while the popup is up: on the X removes the highlight
+    /// (undoable); anywhere else just closes the popup. Either way the
+    /// press is consumed. False = no popup was open.
+    fn hl_menu_press(&mut self, x: i32, y: i32) -> bool {
+        let (dirty, removed) = {
+            let Screen::Doc(dv) = &mut self.screen else { return false };
+            let Some((id, r)) = dv.hl_menu.take() else { return false };
+            if in_rect(x, y, r.x0, r.y0, r.w(), r.h()) {
+                match dv.doc.page.remove_highlight(id) {
+                    Some((s, b)) => {
+                        let key = dv.doc.cur_ink_path();
+                        dv.undo.stack(&key).push(EditOp::EraseHighlight { id, stroke: Some(s) });
+                        dv.page_changed = true;
+                        (r.union(b), true)
+                    }
+                    None => (r, false),
+                }
+            } else {
+                (r, false)
+            }
+        };
+        if removed {
+            println!("papier: highlight removed");
+        }
+        let r = dirty.pad(4).clamp_screen();
+        self.render_doc_region_wave(r, if removed { Some(Wave::Print) } else { None });
+        self.restore_chrome_over(r);
+        if removed {
+            self.paint_toolbar();
+        }
+        true
     }
 
     fn erase_pass(&mut self, x: f32, y: f32) {
@@ -1961,6 +2120,9 @@ impl App {
                 }
                 if y <= EDGE_Y {
                     self.swipe_from = Some(y);
+                    return;
+                }
+                if self.hl_menu_press(x, y) {
                     return;
                 }
                 /* finger taps work the toolbar too */
@@ -4051,6 +4213,12 @@ fn next_timeout(app: &App) -> i32 {
             }
             if dv.drag_dirty {
                 soonest(DRAG_SETTLE.saturating_sub(dv.drag_moved_at.elapsed()));
+            }
+            if let (Some((sx, sy)), Some(t0)) = (app.touch_start, app.touch_t0) {
+                let (dx, dy) = (app.touch_last.0 - sx, app.touch_last.1 - sy);
+                if dx.abs() < 40 && dy.abs() < 40 && app.dialog.is_none() {
+                    soonest(HOLD_DELAY.saturating_sub(t0.elapsed()));
+                }
             }
         }
         Screen::Home(hv) => {

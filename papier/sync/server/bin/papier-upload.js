@@ -326,7 +326,8 @@ function handleInkRead(res, id, file) {
 // Ownership split: the poster (iPad) is the authority on USER strokes; the
 // SERVER is the authority on pi's patches (cloud pi may have drawn/erased
 // since the client loaded the page), so the current file's patches replace
-// the posted ones.
+// the posted ones. Highlighter marks are tablet-only for now: a poster
+// that doesn't know the `highlights` layer keeps the file's.
 function handleInkWrite(req, res, id, file) {
   id = safeId(id);
   if (!id) return json(res, 400, { ok: false, error: 'bad id' });
@@ -342,6 +343,10 @@ function handleInkWrite(req, res, id, file) {
       if (current && Array.isArray(current.patches)) {
         page.patches = current.patches;
         page.next_patch = Math.max(page.next_patch || 1, current.next_patch || 1);
+      }
+      if (current && Array.isArray(current.highlights) && !Array.isArray(page.highlights)) {
+        page.highlights = current.highlights;
+        page.next_stroke = Math.max(page.next_stroke || 1, current.next_stroke || 1);
       }
     } catch (_) { /* no existing file — nothing to merge */ }
     try {

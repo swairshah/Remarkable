@@ -332,9 +332,9 @@ def scenario_m2(h, out_png):
 TB_CX = W - 52  # toggle-button center x (the strip is centered under it)
 TB_TOGGLE = (W - 52, 96)
 # cell-center y per feature: strip top = cy + BTN_R + GAP = 136, CELL_H = 104
-TB_BTN = {"pen": 188, "eraser": 292, "lasso": 396, "undo": 500, "redo": 604,
-          "pi": 708, "nudge": 812,
-          "prev": 916, "goto": 1020, "next": 1124, "add": 1228, "font": 1332, "home": 1436}
+TB_ORDER = ["pen", "eraser", "lasso", "marker", "undo", "redo", "pi", "nudge",
+            "prev", "goto", "next", "add", "font", "home"]
+TB_BTN = {k: 136 + 104 * i + 52 for i, k in enumerate(TB_ORDER)}
 
 
 def pen_tap(s, x, y):
@@ -504,7 +504,7 @@ def scenario_redobug(h, out_png):
     def buttons(tag=None):
         if tag:
             write_png(out_png.replace(".png", f"-{tag}.png"))
-        return darkness(486), darkness(590)
+        return darkness(TB_BTN["undo"] - 14), darkness(TB_BTN["redo"] - 14)
 
     undo_d, redo_d = buttons("stroke-undo")
     print(f"fake-qtfb: redobug stroke undo-btn={undo_d} redo-btn={redo_d}")
@@ -1069,7 +1069,60 @@ def scenario_gestures(h, out_png):
     print("fake-qtfb: gestures assertions passed")
 
 
+def scenario_highlight(h, out_png):
+    """Highlighter: a gray wash under the print (text stays black), saved
+    as the page's `highlights` layer; long-press it -> X popup -> tap X
+    removes it; UNDO brings it back."""
+    def shot(tag):
+        write_png(out_png.replace(".png", f"-{tag}.png"))
+
+    def ink_file():
+        d = f"{DATA_DIR}/docs/demo-paper/ink"
+        return json.load(open(os.path.join(d, sorted(os.listdir(d))[0])))
+
+    subprocess.run(["rm", "-rf", DATA_DIR], check=False)
+    copy_tree(os.path.join(h.here, "..", "build", "testbook", "docs", "demo-paper"),
+              f"{DATA_DIR}/docs/demo-paper")
+    s = h.launch(PAPIER_OPEN="demo-paper", PAPIER_FAKE_SYS="1")
+    s.drain(2.2)
+    pen_tap(s, *TB_TOGGLE)
+    s.drain(0.8)
+    pen_tap(s, TB_CX, TB_BTN["marker"])
+    s.drain(0.8)
+    shot("tool")
+
+    y = int(os.environ.get("HL_Y", "330"))
+    s.pen(PEN_PRESS, 160, y)
+    for i in range(1, 40):
+        s.pen(PEN_UPDATE, 160 + i * 20, y)
+    s.pen(PEN_RELEASE, 160 + 40 * 20, y)
+    s.drain(1.5)
+    shot("marked")
+
+    time.sleep(1.7)  # palm rejection lapses
+    s.touch(TOUCH_PRESS, 500, y)
+    time.sleep(0.9)
+    s.drain(0.3)
+    shot("popup")
+    s.touch(TOUCH_RELEASE, 500, y)
+    s.drain(0.3)
+
+    # the X box sits just above the band at the finger (HL_HALF_H 17 + 14 gap)
+    s.tap(500, y - 31 - 38)
+    s.drain(1.2)
+    shot("removed")
+
+    pen_tap(s, TB_CX, TB_BTN["undo"])
+    s.drain(1.2)
+    shot("undo")
+    s.terminate_clean()
+    page = ink_file()
+    assert len(page.get("highlights", [])) == 1, page.get("highlights")
+    print("fake-qtfb: highlight assertions passed")
+
+
 SCENARIOS = {
+    "highlight": scenario_highlight,
     "gestures": scenario_gestures,
     "m0": scenario_m0,
     "m1": scenario_m1,
