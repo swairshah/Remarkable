@@ -85,8 +85,6 @@
   /* doc reader */
   .pages { display: flex; flex-direction: column; align-items: center; gap: 22px; }
   .page { position: relative; width: 100%; max-width: 900px; aspect-ratio: 1404 / 1872; background: var(--papier); box-shadow: 0 2px 14px rgba(0,0,0,.12); border-radius: 4px; overflow: hidden; }
-  body.compact-pages .pages { gap:16px; }
-  body.compact-pages .page { width:82%; max-width:720px; }
   .page canvas, .page img { display: block; width: 100%; height: auto; }
   .page .plabel { position: absolute; top: 8px; right: 12px; font-size: 11px; color: var(--muted); background: rgba(255,255,255,.7); padding: 1px 7px; border-radius: 9px; }
   .empty { color: var(--muted); text-align: center; padding: 80px 20px; }
@@ -128,13 +126,10 @@
       min-width:0; min-height:44px; padding:7px 8px; line-height:1.25;
       white-space:normal;
     }
-    body.reading header { grid-template-columns:minmax(0,1fr) auto; gap:6px; padding:6px 10px; }
-    body.reading header .brand { display:none; }
-    body.reading header #crumb { grid-column:1; color:var(--accent); font-weight:600; }
-    body.reading header .reader-actions { grid-column:2; grid-row:1; }
-    body.reading .reader-breadcrumb { display:none; }
+    body.reading header { grid-template-columns:auto minmax(0,1fr) auto; }
+    body.reading header #crumb { grid-column:2; }
+    body.reading header .reader-actions { grid-column:3; grid-row:1; }
     .reader-menu-toggle .menu-label { display:none; }
-    body.reading main { padding-top:10px; }
     main { padding:14px 12px 48px; }
   }
   .docside .sect { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.07em; margin:14px 6px 3px; }
@@ -331,11 +326,6 @@ const $ = (id) => document.getElementById(id);
 const $view = $('view');
 const PERF_START = performance.now();
 const paperPerf = window.__paperPerf = {};
-const PAGE_VIEW_KEY = 'papier-page-view';
-function savedCompactPages() {
-  try { return localStorage.getItem(PAGE_VIEW_KEY) === 'compact'; }
-  catch (_) { return false; }
-}
 function perfMark(name) {
   const ms = Math.round(performance.now() - PERF_START);
   paperPerf[name] = ms;
@@ -349,10 +339,8 @@ const state = {
   folders: [],         // folder names
   open: null,          // {id, meta, seq, pages:[...]}
   aiBlue: true,
-  compactPages: savedCompactPages(),
   sig: '',             // doc-set signature for change detection
 };
-document.body.classList.toggle('compact-pages', state.compactPages);
 
 /* ---------- fetch helpers ---------- */
 /* `base` selects the mirror (DATA) or the inbound/pending source (INBOUND) */
@@ -805,34 +793,6 @@ function redrawOpenPages() {
     if (p._cv) renderPage(p._cv, state.open, p._entry);
   });
 }
-function resizeOpenVectorPages() {
-  if (!state.open || !state.open.pdfPromise) return;
-  document.querySelectorAll('.page').forEach(page => {
-    const cv = page._cv;
-    if (!cv) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
-    const width = Math.min(Math.round((page.clientWidth || 900) * dpr), 2160);
-    cv.width = width; cv.height = Math.round(width * PAGE_H / PAGE_W);
-    renderPage(cv, state.open, page._entry);
-  });
-}
-function syncCompactPageAction(button) {
-  button.setAttribute('aria-pressed', String(state.compactPages));
-  setReaderMenuLabel(button, '▱', 'Compact pages');
-}
-function toggleCompactPages(button) {
-  const headerBottom = document.querySelector('header').getBoundingClientRect().bottom;
-  const anchor = [...document.querySelectorAll('.page')].find(page => page.getBoundingClientRect().bottom > headerBottom);
-  const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
-  state.compactPages = !state.compactPages;
-  document.body.classList.toggle('compact-pages', state.compactPages);
-  try { localStorage.setItem(PAGE_VIEW_KEY, state.compactPages ? 'compact' : 'wide'); } catch (_) {}
-  syncCompactPageAction(button);
-  requestAnimationFrame(() => {
-    if (anchor) window.scrollBy(0, anchor.getBoundingClientRect().top - anchorTop);
-    resizeOpenVectorPages();
-  });
-}
 function setReaderMenuLabel(button, ico, label) {
   button.querySelector('.ico').textContent = ico;
   button.querySelector('.label').textContent = label;
@@ -861,8 +821,6 @@ function toggleReaderMenu() {
   if (!menu.hidden) { closeReaderMenu(true); return; }
   const theme = menu.querySelector('[data-reader-action="theme"]');
   if (theme) syncReaderThemeAction(theme);
-  const compact = menu.querySelector('[data-reader-action="compact"]');
-  if (compact) syncCompactPageAction(compact);
   menu.hidden = false; trigger.setAttribute('aria-expanded', 'true');
   const first = [...menu.querySelectorAll('button')].find(button => button.style.display !== 'none');
   if (first) first.focus({ preventScroll:true });
@@ -896,9 +854,6 @@ function toggleReaderTheme(button) {
 function buildReaderMenu(d) {
   const menu = $('reader-menu'); menu.innerHTML = '';
   menu.appendChild(readerMenuItem('⌂', 'Home', goFiles));
-  const compact = readerMenuItem('▱', 'Compact pages', toggleCompactPages, { pressed:state.compactPages });
-  compact.dataset.readerAction = 'compact';
-  menu.appendChild(compact);
   readerMenuSeparator(menu);
   if (d.meta.kind === 'book') {
     menu.appendChild(readerMenuItem('▦', 'Adjust margins', () => openMarginEditor(d)));
@@ -971,7 +926,7 @@ async function openDoc(d, options) {
   state.open = { ...d, seq, pdfPromise: startSourcePdf(d) };
   if (!options || options.history !== false) history.pushState({ papier:'doc', id:d.id }, '', location.href);
   buildSidebar(d);
-  $('crumb').innerHTML = '<span class="reader-breadcrumb">› <span class="crumb" id="home-crumb">My files</span> › </span><span class="reader-title">' + esc(d.meta.title || d.id) + '</span>';
+  $('crumb').innerHTML = '  ›  <span class="crumb" id="home-crumb">My files</span>  ›  ' + esc(d.meta.title || d.id);
   const hc = $('home-crumb'); if (hc) hc.onclick = goFiles;
 
   $view.innerHTML = '';
