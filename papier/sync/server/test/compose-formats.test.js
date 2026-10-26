@@ -105,6 +105,7 @@ else:
   assert.match(prompt, /preserve EVERY unique substantive source\s+figure or diagram/);
   assert.match(prompt, /themed-image:\/\/NAME\.svg/);
   assert.match(prompt, /figure-manifest\.tsv/);
+  assert.match(prompt, /author\/date byline in an optional YAML `subtitle:` field/);
   assert.match(prompt, /COMPOSITION MODE: TRANSFORMATIVE ARTICLE/);
   assert.ok(fs.existsSync(path.join(defaultJob, 'out', 'article.pdf')));
   assert.ok(!fs.existsSync(path.join(defaultJob, 'out', 'article.epub')));
@@ -120,14 +121,32 @@ else:
   });
   assert.equal(readingResult.status, 0, readingResult.stderr);
   const readingPrompt = fs.readFileSync(path.join(readingJob, 'prompt.md'), 'utf8');
-  assert.match(readingPrompt, /COMPOSITION MODE: SOURCE-PRESERVING READING EDITION/);
-  assert.match(readingPrompt, /Preserve the\s+author's wording sentence-for-sentence and paragraph-for-paragraph/);
+  assert.match(readingPrompt, /COMPOSITION MODE: SOURCE-AWARE READING EDITION/);
+  assert.match(readingPrompt, /For prose-led sources, follow the SOURCE-PRESERVING rules/);
+  assert.match(readingPrompt, /For technical-reference material, create a pedagogical edition/);
+  assert.match(readingPrompt, /Treat mixed source sets per source/);
+  assert.match(readingPrompt, /Reader's note/);
   assert.match(readingPrompt, /Begin at the first substantive reader-facing content/);
   assert.match(readingPrompt, /author affiliations and contact addresses/);
   assert.match(readingPrompt, /copyright\/copying\s+or reprint permission notices/);
   assert.match(readingPrompt, /Do not treat an abstract, foreword, preface, epigraph, dedication/);
   assert.match(readingPrompt, /Do not add a new introduction, conclusion, prerequisites, worked example/);
   assert.match(readingPrompt, /For multiple posts, keep the URLs in the user's order/);
+
+  const preserveJob = path.join(root, 'preserve-job');
+  fs.mkdirSync(path.join(preserveJob, 'work'), { recursive: true });
+  fs.mkdirSync(path.join(preserveJob, 'out'), { recursive: true });
+  fs.writeFileSync(path.join(preserveJob, 'instructions.md'), 'Format https://writer.example/post/one and preserve the prose.\n');
+  fs.writeFileSync(path.join(preserveJob, 'formats.txt'), 'pdf\n');
+  const preserveResult = spawnSync('/bin/bash', [composeScript, preserveJob], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: root, PI_BIN: fakePi, MD2PDF: fakePdf, READER_FONT_DIR: emptyFonts },
+  });
+  assert.equal(preserveResult.status, 0, preserveResult.stderr);
+  const preservePrompt = fs.readFileSync(path.join(preserveJob, 'prompt.md'), 'utf8');
+  assert.match(preservePrompt, /COMPOSITION MODE: SOURCE-PRESERVING READING EDITION/);
+  assert.match(preservePrompt, /Preserve the\s+author's wording sentence-for-sentence and paragraph-for-paragraph/);
+  assert.match(preservePrompt, /Reader's note/);
 
   const writeupJob = path.join(root, 'writeup-job');
   fs.mkdirSync(path.join(writeupJob, 'work'), { recursive: true });

@@ -12,10 +12,11 @@
 #
 # The writing style/pipeline is a port of the local Clippings enrichment
 # flow (~/Documents/Notes/Clippings/enrich_clippings_agentic.py). URL-only
-# requests become source-faithful reading editions; requests that explicitly
-# ask for synthesis or transformation become teaching articles. In both modes
-# the agent localizes images, keeps math/code portable, and the md is typeset
-# with the same reMarkable preset (notes-md2pdf.sh = md2pdf.sh --rm2 port).
+# requests use a source-aware mode: authored articles and blog posts keep their
+# prose, while technical papers and books become pedagogical editions. Explicit
+# fidelity or transformation instructions still override that default. In every
+# mode the agent localizes images, keeps math/code portable, and the md is
+# typeset with the same reMarkable preset (notes-md2pdf.sh = md2pdf.sh --rm2 port).
 set -euo pipefail
 
 JOB="${1:?usage: papier-compose.sh <jobdir>}"
@@ -47,22 +48,22 @@ if ! $WANT_PDF && ! $WANT_EPUB; then
 fi
 
 EXHAUSTIVE=false
-if grep -Eqi 'full[[:space:]-]+page|all[[:space:]]+(sections|chapters|entries)|every[[:space:]]+chapter|each[[:space:]]+entry|do[[:space:]]+not[[:space:]]+summarize' "$JOB/instructions.md"; then
+if grep -Eqi 'full(est)?([[:space:]-]+(page|paper|book|article|post))?|complete[[:space:]-]+(paper|book|article|post|edition)|all[[:space:]]+(sections|chapters|entries)|every[[:space:]]+chapter|each[[:space:]]+entry|do[[:space:]]+not[[:space:]]+summarize' "$JOB/instructions.md"; then
   EXHAUSTIVE=true
 fi
 
-# A bare URL (or a list of URLs) means "make this comfortable to read", not
-# "write a new article about this". Transformation remains available when the
-# user explicitly asks for it. Explicit fidelity language wins even if it
-# mentions words such as "rephrase" in a negative instruction.
+# Explicit fidelity language wins even if it mentions words such as "rephrase"
+# in a negative instruction. A bare URL uses source-aware mode: the agent keeps
+# authored article/blog prose, but may simplify and augment papers and books.
 SOURCE_PRESERVING=false
+SOURCE_AWARE=false
 URL_COUNT="$( { grep -Eo 'https?://[^[:space:]<>()]+' "$JOB/instructions.md" 2>/dev/null || true; } | wc -l | tr -d ' ')"
 PRESERVE_RE='do[[:space:]]+not[[:space:]]+(rewrite|rephrase|summari[sz]e)|without[[:space:]]+(rewriting|rephrasing|summari[sz]ing)|verbatim|as[-[:space:]]+is|format(ting)?[[:space:]]+only|reading[[:space:]-]+edition|preserve[[:space:]]+(the[[:space:]]+)?(wording|prose|text)'
 TRANSFORM_RE='summari[sz]e|rewrite|rephrase|write[-[:space:]]*up|write[[:space:]]+(an?|the)[[:space:]]+(new[[:space:]]+)?(article|essay|guide|tutorial)|create[[:space:]]+(an?|the)[[:space:]]+(article|essay|guide|tutorial)|explain|compare|contrast|synthesi[sz]e|analy[sz]e|critique|expand|enrich|adapt|turn.+into'
 if grep -Eqi "$PRESERVE_RE" "$JOB/instructions.md"; then
   SOURCE_PRESERVING=true
 elif [ "${URL_COUNT:-0}" -gt 0 ] && ! grep -Eqi "$TRANSFORM_RE" "$JOB/instructions.md"; then
-  SOURCE_PRESERVING=true
+  SOURCE_AWARE=true
 fi
 if $SOURCE_PRESERVING; then EXHAUSTIVE=true; fi
 
@@ -94,6 +95,10 @@ if $SOURCE_PRESERVING; then
 cat <<'PROMPT'
 --- COMPOSITION MODE: SOURCE-PRESERVING READING EDITION ---
 PROMPT
+elif $SOURCE_AWARE; then
+cat <<'PROMPT'
+--- COMPOSITION MODE: SOURCE-AWARE READING EDITION ---
+PROMPT
 else
 cat <<'PROMPT'
 --- COMPOSITION MODE: TRANSFORMATIVE ARTICLE ---
@@ -123,6 +128,11 @@ cat <<'PROMPT'
 - In TRANSFORMATIVE mode, extract the core claims, equations, results, and
   difficult concepts. In SOURCE-PRESERVING mode, extract the complete main
   article body and its original structure instead of reducing it to claims.
+- In SOURCE-AWARE mode, classify each source before writing. Extract an
+  article or blog post's complete authored body and structure. For a technical
+  paper, report, specification, book, or book chapter, extract the full set of
+  claims, arguments, equations, examples, code, results, and qualifications
+  needed for a faithful pedagogical edition.
 
 ## Step 2 — Write the article (article.md)
 
@@ -151,8 +161,13 @@ Produce the document required by the selected composition mode.
   footers, related-post modules, and advertisements. A sponsor passage inside
   the authored post remains unless it is clearly injected site chrome.
 - Do not add a new introduction, conclusion, prerequisites, worked example,
-  aside, transition, summary, commentary, or Sources section. Do not merge,
-  rename, reorder, or synthesize sections.
+  transition, summary, or Sources section. Do not merge, rename, reorder, or
+  synthesize sections. You MAY add a concise `::: aside` immediately after a
+  genuinely dense passage to explain prerequisite context, terminology, an
+  equation, or a difficult inference. Begin it with **Reader's note.** Keep the
+  original passage unchanged, make the addition clearly editorial, and never
+  use notes to summarize, fact-check, argue with, or repeatedly interrupt the
+  author.
 - For multiple posts, keep the URLs in the user's order. Give each post a
   clear boundary using its original title, subtitle, byline, and date, then
   preserve its complete body. Do not blend several authors' posts into one
@@ -161,6 +176,30 @@ Produce the document required by the selected composition mode.
   image in its original position and retain the original caption/alt text.
 - Before finishing, compare article.md against every source from beginning to
   end. Every main-body block must be represented once and in the same order.
+
+### SOURCE-AWARE READING EDITION rules
+
+- First classify each source by what it is, not merely by its URL or file
+  format. An authored essay, blog post, newsletter, interview, or magazine
+  article is prose-led. An academic paper, technical report, specification,
+  manual, textbook, book, or book chapter is technical-reference material.
+- For prose-led sources, follow the SOURCE-PRESERVING rules above: retain the
+  author's wording, voice, paragraph order, headings, examples, and complete
+  body. Add only occasional, clearly labeled Reader's note asides where a dense
+  passage genuinely benefits from explanation; never replace that passage.
+- For technical-reference material, create a pedagogical edition. You may
+  simplify sentences, reorganize exposition, introduce prerequisites, carry a
+  worked example, and add explanations or connective tissue. Preserve the
+  source's claims, results, equations, algorithms, code, important examples,
+  limitations, and citations faithfully. Never turn a precise technical claim
+  into a looser or stronger one.
+- When the request asks for full or complete coverage, preserve the source's
+  full technical scope even if you reorganize it for clarity. Do not collapse a
+  paper or book into a short summary.
+- Treat mixed source sets per source. Do not rewrite an essay merely because a
+  linked paper is technical, and do not transcribe a dense paper merely because
+  a linked post is prose-led. If classification is genuinely ambiguous, favor
+  preserving the author's prose and add clearly labeled explanations.
 
 ### TRANSFORMATIVE ARTICLE rules
 
@@ -189,6 +228,9 @@ Produce the document required by the selected composition mode.
   ---
   title: "The Title"
   ---
+  Put a compact author/date byline in an optional YAML `subtitle:` field,
+  rather than as the first body paragraph; otherwise the renderer's opening
+  drop cap can incorrectly consume the author's initial.
   Then go STRAIGHT into the body with ## sections. Do NOT repeat the
   title as a "# ..." heading — the renderer typesets the frontmatter
   title itself, so a body H1 would print it twice.
