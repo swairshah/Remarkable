@@ -16,11 +16,18 @@ test('reader actions stay in the sticky header and browser Back returns home', (
   assert.doesNotThrow(() => new Function(script[1]), 'viewer script parses');
   assert.match(html, /id="reader-menu-btn"[^>]*aria-haspopup="menu"/);
   assert.match(html, /body\.reading \.reader-actions \{ display:block; \}/);
+  assert.match(html, /body\.reading header \.brand \{ display:none; \}/);
+  assert.match(html, /body\.reading \.reader-breadcrumb \{ display:none; \}/);
   assert.match(html, /\.reader-menu-toggle \{[^}]*min-width:44px; min-height:44px;/);
   assert.match(html, /readerMenuItem\('▦', 'Adjust margins'/);
   assert.match(html, /readerMenuItem\('⤡', 'PDF viewer'/);
   assert.match(html, /readerMenuItem\('⇪', 'Send to Kindle'/);
   assert.match(html, /readerMenuItem\('⌂', 'Home', goFiles\)/);
+  assert.match(html, /readerMenuItem\('▱', 'Compact pages', toggleCompactPages/);
+  assert.match(html, /body\.compact-pages \.page \{ width:82%; max-width:720px; \}/);
+  assert.match(html, /const PAGE_VIEW_KEY = 'papier-page-view'/);
+  assert.match(html, /localStorage\.setItem\(PAGE_VIEW_KEY, state\.compactPages \? 'compact' : 'wide'\)/);
+  assert.match(html, /window\.scrollBy\(0, anchor\.getBoundingClientRect\(\)\.top - anchorTop\)/);
   assert.match(html, /sharedToggle && sharedToggle\.innerHTML/);
   assert.match(html, /menu\.querySelector\('\[data-reader-action="theme"\]'\)/);
   assert.match(html, /if \(theme\) syncReaderThemeAction\(theme\)/);
