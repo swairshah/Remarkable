@@ -45,6 +45,26 @@
   header .spacer { flex: 1; }
   header .badge { font-size: 12px; color: var(--muted); }
   header .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#3aa76d; margin-right:5px; vertical-align:middle; }
+  .reader-actions { display:none; position:relative; }
+  body.reading header .badge, body.reading header #compose-btn, body.reading header #add { display:none; }
+  body.reading .reader-actions { display:block; }
+  .reader-menu-toggle { display:flex; align-items:center; justify-content:center; gap:7px; min-width:44px; min-height:44px; padding:7px 12px; border:0; border-radius:9px; background:var(--card); color:var(--accent); box-shadow:0 0 0 1px rgba(0,0,0,.08), 0 2px 8px rgba(0,0,0,.06); font:600 13px/1 -apple-system,"Segoe UI",sans-serif; cursor:pointer; transition-property:background-color, box-shadow, scale; transition-duration:140ms; transition-timing-function:ease-out; }
+  .reader-menu-toggle:hover, .reader-menu-toggle[aria-expanded=true] { background:var(--bg); box-shadow:0 0 0 1px rgba(0,0,0,.12), 0 4px 12px rgba(0,0,0,.09); }
+  .reader-menu-toggle:active { scale:.96; }
+  .reader-menu-toggle .dots { font-size:17px; line-height:0; translate:0 -1px; }
+  .reader-menu { position:absolute; top:calc(100% + 8px); right:0; z-index:50; width:min(260px, calc(100vw - 24px)); max-height:calc(100vh - 90px); overflow:auto; overscroll-behavior:contain; padding:6px; border-radius:15px; background:var(--card); box-shadow:0 0 0 1px rgba(0,0,0,.08), 0 16px 44px rgba(0,0,0,.22); }
+  .reader-menu[hidden] { display:none; }
+  .reader-menu button { display:flex; align-items:center; gap:10px; width:100%; min-height:44px; padding:9px 10px; border:0; border-radius:9px; background:transparent; color:var(--accent); font:inherit; font-size:13px; text-align:left; cursor:pointer; transition-property:background-color, scale; transition-duration:120ms; transition-timing-function:ease-out; }
+  .reader-menu button:hover, .reader-menu button:focus-visible { background:var(--bg); outline:none; }
+  .reader-menu button:active { scale:.96; }
+  .reader-menu button[aria-pressed=true] { background:var(--accent); color:var(--card); }
+  .reader-menu .ico { width:19px; flex:none; color:var(--muted); text-align:center; font-size:15px; }
+  .reader-menu button[aria-pressed=true] .ico { color:inherit; }
+  .reader-menu .label { flex:1; min-width:0; }
+  .reader-menu .sep { height:1px; margin:5px 7px; background:var(--line); }
+  @media (prefers-color-scheme:dark) { :root:not([data-theme]) .reader-menu-toggle { box-shadow:0 0 0 1px rgba(255,255,255,.10); } :root:not([data-theme]) .reader-menu { box-shadow:0 0 0 1px rgba(255,255,255,.10), 0 18px 48px rgba(0,0,0,.45); } }
+  html[data-theme=dark] .reader-menu-toggle { box-shadow:0 0 0 1px rgba(255,255,255,.10); }
+  html[data-theme=dark] .reader-menu { box-shadow:0 0 0 1px rgba(255,255,255,.10), 0 18px 48px rgba(0,0,0,.45); }
   main { max-width: 1200px; margin: 0 auto; padding: 22px 20px 60px; }
 
   /* home grid */
@@ -78,13 +98,11 @@
   .addbtn { border: 1px solid var(--line); background: var(--card); color: var(--accent); border-radius: 8px; padding: 7px 13px; font-size: 13px; cursor: pointer; }
   .addbtn:hover { border-color: var(--muted); }
   .ai-toggle { cursor: pointer; user-select: none; }
-  .docbar { display:flex; align-items:center; gap:10px; margin: 0 auto 14px; max-width:900px; }
 
   /* doc-view sidebar; shifts content right so it never overlaps. Below the
-     breakpoint the sidebar hides and the docbar button is the fallback. */
+     breakpoint the sticky header menu is the compact reader control. */
   .docside { position:fixed; left:18px; top:116px; z-index:6; display:none; flex-direction:column; gap:7px; width:196px; }
   @media (min-width:1000px) {
-    body.reading .docbar { display:none; }               /* sidebar is the control */
     body.reading.sidebar .docside { display:flex; }       /* Cmd+B toggles the .sidebar class */
     body.reading.sidebar main { margin-left:230px; }
   }
@@ -103,13 +121,15 @@
     header .badge { grid-column:1; grid-row:2; align-self:center; white-space:nowrap; }
     header #compose-btn { grid-column:2; grid-row:2; }
     header #add { grid-column:3; grid-row:2; }
-    header .addbtn, .docbar .addbtn {
+    header .addbtn {
       min-width:0; min-height:44px; padding:7px 8px; line-height:1.25;
       white-space:normal;
     }
+    body.reading header { grid-template-columns:auto minmax(0,1fr) auto; }
+    body.reading header #crumb { grid-column:2; }
+    body.reading header .reader-actions { grid-column:3; grid-row:1; }
+    .reader-menu-toggle .menu-label { display:none; }
     main { padding:14px 12px 48px; }
-    .docbar { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
-    .docbar .addbtn { height:100%; }
   }
   .docside .sect { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.07em; margin:14px 6px 3px; }
   .docside .sbtn { display:flex; align-items:center; gap:10px; padding:9px 12px; border:1px solid var(--line); background:var(--card); color:var(--accent); border-radius:9px; cursor:pointer; font:inherit; font-size:13px; text-align:left; width:100%; }
@@ -131,7 +151,7 @@
   .docmenu .sep { height:1px; margin:5px 6px; background:var(--line); }
   @media (prefers-color-scheme:dark) { :root:not([data-theme]) .docmenu { box-shadow:0 0 0 1px rgba(255,255,255,.10), 0 14px 38px rgba(0,0,0,.42); } }
   html[data-theme=dark] .docmenu { box-shadow:0 0 0 1px rgba(255,255,255,.10), 0 14px 38px rgba(0,0,0,.42); }
-  @media (prefers-reduced-motion:reduce) { .docmenu, .docmenu button { transition:none; } }
+  @media (prefers-reduced-motion:reduce) { .docmenu, .docmenu button, .reader-menu-toggle, .reader-menu button { transition:none; } }
 
   /* ---- full PDF.js viewer overlay ---- */
   #pv { position: fixed; inset: 0; z-index: 45; background: var(--bg); display: none; flex-direction: column; }
@@ -248,6 +268,10 @@
   <span class="badge" id="badge"><span class="dot"></span>synced view</span>
   <button class="addbtn" id="compose-btn">✦ Compose</button>
   <button class="addbtn" id="add">+ Add document</button>
+  <div class="reader-actions" id="reader-actions">
+    <button class="reader-menu-toggle" id="reader-menu-btn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="reader-menu"><span class="dots" aria-hidden="true">•••</span><span class="menu-label">Options</span></button>
+    <div class="reader-menu" id="reader-menu" role="menu" hidden></div>
+  </div>
 </header>
 <main id="view"><div class="empty">Loading…</div></main>
 <input type="file" id="file" multiple hidden>
@@ -580,6 +604,7 @@ async function deleteDocument(d) {
 }
 async function renderHome() {
   closeDocMenu();
+  closeReaderMenu();
   state.open = null;
   if (openDoc._io) { openDoc._io.disconnect(); openDoc._io = null; }
   $('docside') && $('docside').remove();
@@ -631,13 +656,18 @@ async function renderHome() {
 }
 
 /* ---------- doc reader ---------- */
-// Esc from a book -> back to My files
-function goFiles() {
-  if (state.open) state.folder = state.open.meta.folder || null;
-  state.open = null;
-  $('docside') && $('docside').remove();
-  document.body.classList.remove('reading', 'sidebar');
+// Browser Back and every explicit Home action return to the Papier library.
+// Opening a document pushes one in-app history entry, so Back never has to
+// leave the site just to close the reader.
+function goFiles(options) {
+  const fromHistory = options && options.fromHistory;
+  if (!fromHistory && state.open && history.state && history.state.papier === 'doc') {
+    history.back();
+    return;
+  }
+  state.folder = null;
   renderHome();
+  if (!fromHistory) history.replaceState({ papier:'home' }, '', location.href);
 }
 // the sidebar's "Adjust margins" -> open the crop editor for the current book
 function openEditor() {
@@ -762,6 +792,83 @@ function redrawOpenPages() {
     if (p._cv) renderPage(p._cv, state.open, p._entry);
   });
 }
+function setReaderMenuLabel(button, ico, label) {
+  button.querySelector('.ico').textContent = ico;
+  button.querySelector('.label').textContent = label;
+}
+function readerMenuItem(ico, label, on, options) {
+  const button = document.createElement('button');
+  button.type = 'button'; button.setAttribute('role', 'menuitem');
+  button.innerHTML = '<span class="ico" aria-hidden="true"></span><span class="label"></span>';
+  setReaderMenuLabel(button, ico, label);
+  if (options && options.pressed != null) button.setAttribute('aria-pressed', String(!!options.pressed));
+  button.onclick = () => { closeReaderMenu(); on(button); };
+  return button;
+}
+function readerMenuSeparator(menu) {
+  const sep = document.createElement('div'); sep.className = 'sep'; sep.setAttribute('role', 'separator'); menu.appendChild(sep);
+}
+function closeReaderMenu(returnFocus) {
+  const menu = $('reader-menu'), trigger = $('reader-menu-btn');
+  if (!menu || !trigger || menu.hidden) return;
+  menu.hidden = true; trigger.setAttribute('aria-expanded', 'false');
+  if (returnFocus) trigger.focus({ preventScroll:true });
+}
+function toggleReaderMenu() {
+  const menu = $('reader-menu'), trigger = $('reader-menu-btn');
+  if (!menu || !state.open) return;
+  if (!menu.hidden) { closeReaderMenu(true); return; }
+  menu.hidden = false; trigger.setAttribute('aria-expanded', 'true');
+  const first = [...menu.querySelectorAll('button')].find(button => button.style.display !== 'none');
+  if (first) first.focus({ preventScroll:true });
+}
+function currentReaderTheme() {
+  const explicit = document.documentElement.getAttribute('data-theme');
+  if (explicit === 'light' || explicit === 'dark') return explicit;
+  return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+function toggleReaderTheme(button) {
+  const sharedToggle = document.querySelector('.rm-theme-toggle');
+  if (sharedToggle) sharedToggle.click();
+  else {
+    const next = currentReaderTheme() === 'light' ? 'dark' : 'light';
+    try { localStorage.setItem('rm-theme', next); } catch (_) {}
+    document.documentElement.setAttribute('data-theme', next);
+    document.documentElement.style.colorScheme = next;
+  }
+  const next = currentReaderTheme() === 'light' ? 'dark' : 'light';
+  setReaderMenuLabel(button, next === 'dark' ? '☾' : '☀', 'Switch to ' + next + ' theme');
+}
+function buildReaderMenu(d) {
+  const menu = $('reader-menu'); menu.innerHTML = '';
+  menu.appendChild(readerMenuItem('⌂', 'Home', goFiles));
+  readerMenuSeparator(menu);
+  if (d.meta.kind === 'book') {
+    menu.appendChild(readerMenuItem('▦', 'Adjust margins', () => openMarginEditor(d)));
+    menu.appendChild(readerMenuItem('⤡', 'PDF viewer', () => openPdfViewer(d)));
+    const kindle = readerMenuItem('⇪', 'Send to Kindle', (button) => {
+      kindleModal(true, d, (ico, label) => setReaderMenuLabel(button, ico, label));
+    });
+    menu.appendChild(kindle);
+  }
+  if (d.meta.kind === 'notebook' && d.id === 'writings') {
+    publishControls(d, (ico, label, on) => {
+      const button = readerMenuItem(ico, label, () => on());
+      return { btn:button, set:(i, l) => setReaderMenuLabel(button, i, l) };
+    }).forEach(button => menu.appendChild(button));
+  }
+  const ai = readerMenuItem('✦', 'AI ink', (button) => {
+    state.aiBlue = !state.aiBlue;
+    button.setAttribute('aria-pressed', String(state.aiBlue));
+    redrawOpenPages();
+  }, { pressed:state.aiBlue });
+  menu.appendChild(ai);
+  readerMenuSeparator(menu);
+  menu.appendChild(readerMenuItem('✦', 'Compose document', () => composeModal(true)));
+  menu.appendChild(readerMenuItem('+', 'Add document', () => $('file').click()));
+  const nextTheme = currentReaderTheme() === 'light' ? 'dark' : 'light';
+  menu.appendChild(readerMenuItem(nextTheme === 'dark' ? '☾' : '☀', 'Switch to ' + nextTheme + ' theme', toggleReaderTheme));
+}
 // the doc-view sidebar (wide screens): navigation + per-doc actions
 function buildSidebar(d) {
   $('docside') && $('docside').remove();
@@ -793,44 +900,22 @@ function buildSidebar(d) {
   side.appendChild(ai);
   document.body.appendChild(side);
   document.body.classList.add('reading', 'sidebar');   // sidebar on by default (CSS makes room)
+  buildReaderMenu(d);
 }
 
-async function openDoc(d) {
+async function openDoc(d, options) {
   let seq = Array.isArray(d.seq) ? d.seq : null;
   if (!seq) {
     const st = await jfileB(d.base, 'docs/' + d.id + '/state.json');
     seq = (st && st.seq) || [];
   }
   state.open = { ...d, seq, pdfPromise: startSourcePdf(d) };
+  if (!options || options.history !== false) history.pushState({ papier:'doc', id:d.id }, '', location.href);
   buildSidebar(d);
   $('crumb').innerHTML = '  ›  <span class="crumb" id="home-crumb">My files</span>  ›  ' + esc(d.meta.title || d.id);
-  const hc = $('home-crumb'); if (hc) hc.onclick = () => { state.folder = d.meta.folder || null; renderHome(); };
+  const hc = $('home-crumb'); if (hc) hc.onclick = goFiles;
 
   $view.innerHTML = '';
-  if (d.meta.kind === 'book') {
-    const bar = document.createElement('div'); bar.className = 'docbar';
-    const btn = document.createElement('button'); btn.className = 'addbtn';
-    btn.textContent = '⌸  Adjust margins';
-    btn.onclick = () => openMarginEditor(d);
-    bar.appendChild(btn);
-    const pvb = document.createElement('button'); pvb.className = 'addbtn';
-    pvb.textContent = '⤡  PDF viewer';
-    pvb.onclick = () => openPdfViewer(d);
-    bar.appendChild(pvb);
-    const kb = document.createElement('button'); kb.className = 'addbtn';
-    kb.textContent = '⇪  Send to Kindle';
-    kb.onclick = () => kindleModal(true, d, (ico, label) => { kb.textContent = ico + '  ' + label; });
-    bar.appendChild(kb);
-    $view.appendChild(bar);
-  } else if (d.meta.kind === 'notebook' && d.id === 'writings') {
-    const bar = document.createElement('div'); bar.className = 'docbar';
-    publishControls(d, (ico, label, on) => {
-      const b = document.createElement('button'); b.className = 'addbtn';
-      b.textContent = ico + '  ' + label; b.onclick = on;
-      return { btn: b, set: (i, l) => { b.textContent = i + '  ' + l; } };
-    }).forEach(b => bar.appendChild(b));
-    $view.appendChild(bar);
-  }
   const wrap = document.createElement('div'); wrap.className = 'pages';
   $view.appendChild(wrap);
   /* Lazy render: a big book has hundreds of pages — allocating a full-size
@@ -1438,7 +1523,7 @@ async function saveCrop() {
     bust[id] = Date.now();          // force the viewer to load the NEW pages, not the cached ones
     closeEditor();
     toast('Cropped & re-rendered — reaches your tablet on the next sync (~90s).', 6000);
-    if (d) openDoc(d); else setTimeout(refresh, 1000);   // re-open so you see the new pages now
+    if (d) openDoc(d, { history:false }); else setTimeout(refresh, 1000);   // re-open so you see the new pages now
   } catch (err) { toast('Render failed: ' + err.message, 5000); btn.disabled = false; btn.innerHTML = 'Save &amp; push'; }
 }
 
@@ -1454,7 +1539,8 @@ window.addEventListener('resize', () => {
 });
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if ($('docmenu') && $('docmenu').classList.contains('show')) closeDocMenu();
+    if ($('reader-menu') && !$('reader-menu').hidden) closeReaderMenu(true);
+    else if ($('docmenu') && $('docmenu').classList.contains('show')) closeDocMenu();
     else if ($('pv').classList.contains('show')) closePdfViewer();  // PDF viewer overlay first
     else if ($('kfmt').classList.contains('show')) kindleModal(false);
     else if ($('cmp').classList.contains('show')) composeModal(false);
@@ -1486,9 +1572,20 @@ async function refresh() {
 }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
-$('brand').onclick = () => { state.folder = null; renderHome(); };
+$('brand').onclick = goFiles;
 $('add').onclick = () => $('file').click();
 $('compose-btn').onclick = () => composeModal(true);
+$('reader-menu-btn').onclick = toggleReaderMenu;
+$('reader-menu').addEventListener('keydown', (e) => {
+  const items = [...$('reader-menu').querySelectorAll('button')].filter(button => button.style.display !== 'none');
+  const at = items.indexOf(document.activeElement);
+  let next = null;
+  if (e.key === 'ArrowDown') next = items[(at + 1) % items.length];
+  else if (e.key === 'ArrowUp') next = items[(at - 1 + items.length) % items.length];
+  else if (e.key === 'Home') next = items[0];
+  else if (e.key === 'End') next = items[items.length - 1];
+  if (next) { e.preventDefault(); next.focus(); }
+});
 $('cmp-cancel').onclick = () => composeModal(false);
 $('cmp-go').onclick = submitCompose;
 $('cmp').addEventListener('click', (e) => { if (e.target.id === 'cmp') composeModal(false); });
@@ -1497,10 +1594,20 @@ $('kfmt-send').onclick = confirmKindleSend;
 $('kfmt').addEventListener('click', (e) => { if (e.target.id === 'kfmt') kindleModal(false); });
 $('pv-close').onclick = closePdfViewer;
 $('file').onchange = (e) => upload(e.target.files);
-document.addEventListener('pointerdown', (e) => { const menu = $('docmenu'); if (menu && !menu.contains(e.target)) closeDocMenu(); });
-window.addEventListener('blur', closeDocMenu);
-window.addEventListener('resize', closeDocMenu);
-window.addEventListener('scroll', closeDocMenu, true);
+document.addEventListener('pointerdown', (e) => {
+  const menu = $('docmenu'); if (menu && !menu.contains(e.target)) closeDocMenu();
+  const actions = $('reader-actions'); if (actions && !actions.contains(e.target)) closeReaderMenu();
+});
+window.addEventListener('blur', () => { closeDocMenu(); closeReaderMenu(); });
+window.addEventListener('resize', () => { closeDocMenu(); closeReaderMenu(); });
+window.addEventListener('scroll', () => { closeDocMenu(); closeReaderMenu(); }, true);
+window.addEventListener('popstate', (e) => {
+  if (e.state && e.state.papier === 'doc') {
+    const d = state.docs.find(doc => doc.id === e.state.id);
+    if (d) { openDoc(d, { history:false }); return; }
+  }
+  goFiles({ fromHistory:true });
+});
 let dragN = 0;
 window.addEventListener('dragenter', (e) => { e.preventDefault(); if (dragN++ === 0) $('drop').classList.add('show'); });
 window.addEventListener('dragover', (e) => e.preventDefault());
@@ -1512,6 +1619,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && !s
   const pendingCompose = localStorage.getItem(COMPOSE_KEY);
   if (pendingCompose) watchCompose(pendingCompose);
   await loadDocs();
+  history.replaceState({ papier:'home' }, '', location.href);
   renderHome();
   perfMark('ready');
   console.info('Papier ready', paperPerf);
