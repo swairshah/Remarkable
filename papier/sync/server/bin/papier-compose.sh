@@ -11,11 +11,11 @@
 #   title.txt         resolved document title
 #
 # The writing style/pipeline is a port of the local Clippings enrichment
-# flow (~/Documents/Notes/Clippings/enrich_clippings_agentic.py) minus the
-# per-link reference appendix and the quiz: one pi agent researches the
-# links/topic, writes ONE self-contained teaching article, localizes images,
-# keeps math/code portable, and the md is typeset with the same reMarkable
-# preset (notes-md2pdf.sh = md2pdf.sh --rm2 port).
+# flow (~/Documents/Notes/Clippings/enrich_clippings_agentic.py). URL-only
+# requests become source-faithful reading editions; requests that explicitly
+# ask for synthesis or transformation become teaching articles. In both modes
+# the agent localizes images, keeps math/code portable, and the md is typeset
+# with the same reMarkable preset (notes-md2pdf.sh = md2pdf.sh --rm2 port).
 set -euo pipefail
 
 JOB="${1:?usage: papier-compose.sh <jobdir>}"
@@ -51,6 +51,21 @@ if grep -Eqi 'full[[:space:]-]+page|all[[:space:]]+(sections|chapters|entries)|e
   EXHAUSTIVE=true
 fi
 
+# A bare URL (or a list of URLs) means "make this comfortable to read", not
+# "write a new article about this". Transformation remains available when the
+# user explicitly asks for it. Explicit fidelity language wins even if it
+# mentions words such as "rephrase" in a negative instruction.
+SOURCE_PRESERVING=false
+URL_COUNT="$( { grep -Eo 'https?://[^[:space:]<>()]+' "$JOB/instructions.md" 2>/dev/null || true; } | wc -l | tr -d ' ')"
+PRESERVE_RE='do[[:space:]]+not[[:space:]]+(rewrite|rephrase|summari[sz]e)|without[[:space:]]+(rewriting|rephrasing|summari[sz]ing)|verbatim|as[-[:space:]]+is|format(ting)?[[:space:]]+only|reading[[:space:]-]+edition|preserve[[:space:]]+(the[[:space:]]+)?(wording|prose|text)'
+TRANSFORM_RE='summari[sz]e|rewrite|rephrase|write[-[:space:]]*up|write[[:space:]]+(an?|the)[[:space:]]+(new[[:space:]]+)?(article|essay|guide|tutorial)|create[[:space:]]+(an?|the)[[:space:]]+(article|essay|guide|tutorial)|explain|compare|contrast|synthesi[sz]e|analy[sz]e|critique|expand|enrich|adapt|turn.+into'
+if grep -Eqi "$PRESERVE_RE" "$JOB/instructions.md"; then
+  SOURCE_PRESERVING=true
+elif [ "${URL_COUNT:-0}" -gt 0 ] && ! grep -Eqi "$TRANSFORM_RE" "$JOB/instructions.md"; then
+  SOURCE_PRESERVING=true
+fi
+if $SOURCE_PRESERVING; then EXHAUSTIVE=true; fi
+
 status() { printf '%s' "$1" > "$JOB/status.txt"; echo "[compose] $1" >&2; }
 
 # The service runs under systemd without a login env; pick up API keys.
@@ -75,6 +90,15 @@ and self-contained.
 --- USER INSTRUCTIONS ---
 PROMPT
 cat "$JOB/instructions.md"
+if $SOURCE_PRESERVING; then
+cat <<'PROMPT'
+--- COMPOSITION MODE: SOURCE-PRESERVING READING EDITION ---
+PROMPT
+else
+cat <<'PROMPT'
+--- COMPOSITION MODE: TRANSFORMATIVE ARTICLE ---
+PROMPT
+fi
 cat <<'PROMPT'
 --- END USER INSTRUCTIONS ---
 
@@ -89,19 +113,60 @@ cat <<'PROMPT'
 - Preserve explanatory figures and diagrams while gathering sources. Inspect
   source Markdown or the upstream repository when a site's static HTML exposes
   an empty figure that is filled by client-side JavaScript.
-- If a fetch fails, SELF-RESCUE: retry, then search for an authoritative
-  substitute (author's blog, official docs, Wikipedia, a good survey).
-  Never give up after one failed fetch, and NEVER write meta-commentary
-  about fetch failures into the article.
+- If a fetch fails, SELF-RESCUE and retry through the publisher's canonical
+  HTML, RSS/API, print view, or upstream repository. In SOURCE-PRESERVING mode,
+  never substitute another author or source and never invent missing passages.
+  In TRANSFORMATIVE mode, an authoritative substitute is acceptable. Never
+  write fetch-failure meta-commentary into the article.
 - If the instructions are a topic rather than links, research it from
   authoritative sources.
-- Extract the core claims, key equations, key numbers/results, and every
-  concept a smart reader without this background would trip on.
+- In TRANSFORMATIVE mode, extract the core claims, equations, results, and
+  difficult concepts. In SOURCE-PRESERVING mode, extract the complete main
+  article body and its original structure instead of reducing it to claims.
 
 ## Step 2 — Write the article (article.md)
 
-One long-form, genuinely readable teaching article that covers the
-material thoroughly. Requirements:
+Produce the document required by the selected composition mode.
+
+### SOURCE-PRESERVING READING EDITION rules
+
+- This is faithful transcription and formatting, not authorship. Preserve the
+  author's wording sentence-for-sentence and paragraph-for-paragraph. Do not
+  paraphrase, condense, expand, fact-check, correct, modernize, or improve the
+  prose—even when you think a different explanation would be clearer.
+- Preserve the original title, subtitle, byline, publication date, heading
+  order and wording, paragraphs, quotations, lists, footnotes/endnotes,
+  captions, tables, equations, and code. Convert their presentation to clean
+  Markdown, but do not change their content.
+- Remove only website chrome and non-article UI: navigation, share/like/comment
+  controls, subscription prompts, cookie banners, repeated publication
+  footers, related-post modules, and advertisements. A sponsor passage inside
+  the authored post remains unless it is clearly injected site chrome.
+- Do not add a new introduction, conclusion, prerequisites, worked example,
+  aside, transition, summary, commentary, or Sources section. Do not merge,
+  rename, reorder, or synthesize sections.
+- For multiple posts, keep the URLs in the user's order. Give each post a
+  clear boundary using its original title, subtitle, byline, and date, then
+  preserve its complete body. Do not blend several authors' posts into one
+  continuous narrative.
+- Preserve meaningful hyperlinks inline. Localize every substantive source
+  image in its original position and retain the original caption/alt text.
+- Before finishing, compare article.md against every source from beginning to
+  end. Every main-body block must be represented once and in the same order.
+
+### TRANSFORMATIVE ARTICLE rules
+
+- Write one long-form, genuinely readable teaching article in the voice of a
+  careful, slightly informal textbook: confident, precise, and concrete.
+- Carry a concrete worked example through the article where the material
+  allows, and state prerequisites specifically.
+- Put short asides near first use for genuinely difficult concepts.
+- End with a short "Sources" section listing what you actually read.
+- Match the depth the instructions ask for. When the user has not requested
+  exhaustive coverage, default to roughly 2000–5000 words. Exhaustive jobs
+  may be much longer.
+
+### Shared requirements
 
 - Treat requests such as "the full page", "all sections", "every chapter",
   "each entry", or "do not summarize" as EXHAUSTIVE. Preserve the source order
@@ -119,13 +184,6 @@ material thoroughly. Requirements:
   Then go STRAIGHT into the body with ## sections. Do NOT repeat the
   title as a "# ..." heading — the renderer typesets the frontmatter
   title itself, so a body H1 would print it twice.
-- Write in the voice of a careful, slightly informal textbook: confident,
-  precise, concrete. No marketing tone, no filler, no "as an AI".
-- Carry a concrete worked example through the article where the material
-  allows — small real numbers the reader can trace by hand.
-- Put short asides near first use for genuinely difficult concepts.
-- State prerequisites specifically ("basic linear algebra: column space,
-  projections, Frobenius norm" — not "some math background").
 - Do not invent specific facts (numbers, dates, theorem names,
   citations). Mark anything inferred rather than read as "(inferred)".
 - Math: $...$ inline, $$...$$ display. Use \dots (never \hdots). The
@@ -154,8 +212,8 @@ material thoroughly. Requirements:
   Use `skipped` instead of `included` only after retries genuinely fail, with
   the reason in the last field. If the complete source truly contains no
   substantive figures, write one `none` line and explain how you verified it.
-- No raw HTML. No hyperlink-only "see also" dumps. Keep external links
-  sparse and inline as plain [text](url) — the reader is offline.
+- No raw HTML. No hyperlink-only "see also" dumps. Links must be inline as
+  plain [text](url) so the reader remains useful offline.
 - Exercises: if the document includes exercises or practice problems
   (because the user asked, or they genuinely fit), give EACH exercise
   its OWN PAGE — the reader works them in ink directly on the tablet,
@@ -171,11 +229,9 @@ material thoroughly. Requirements:
   continue after an exercise statement. If you include solutions, put
   them in a final "Solutions" section that also starts with a
   page-break div (solutions may share pages with each other).
-- End with a short "Sources" section listing what you actually read
-  (title + URL, one line each).
-- Length: match the depth and completeness the instructions ask for. Only when
-  the user has not requested exhaustive coverage, default to a thorough read
-  of roughly 2000-5000 words. Exhaustive jobs may be much longer.
+- In SOURCE-PRESERVING mode, include exercises only if they occur in the source
+  and keep their original wording. In TRANSFORMATIVE mode, exercises may be
+  added only when requested or when they genuinely fit.
 
 ## Step 3 — Write the cover brief (cover-brief.txt)
 

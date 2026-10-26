@@ -101,12 +101,41 @@ else:
   const prompt = fs.readFileSync(path.join(defaultJob, 'prompt.md'), 'utf8');
   assert.match(prompt, /Treat requests such as "the full page".*as EXHAUSTIVE/s);
   assert.match(prompt, /compare the article's section list against the source table of contents/);
-  assert.match(prompt, /Exhaustive jobs may be much longer/);
+  assert.match(prompt, /Exhaustive jobs\s+may be much longer/);
   assert.match(prompt, /preserve EVERY unique substantive source\s+figure or diagram/);
   assert.match(prompt, /themed-image:\/\/NAME\.svg/);
   assert.match(prompt, /figure-manifest\.tsv/);
+  assert.match(prompt, /COMPOSITION MODE: TRANSFORMATIVE ARTICLE/);
   assert.ok(fs.existsSync(path.join(defaultJob, 'out', 'article.pdf')));
   assert.ok(!fs.existsSync(path.join(defaultJob, 'out', 'article.epub')));
+
+  const readingJob = path.join(root, 'reading-job');
+  fs.mkdirSync(path.join(readingJob, 'work'), { recursive: true });
+  fs.mkdirSync(path.join(readingJob, 'out'), { recursive: true });
+  fs.writeFileSync(path.join(readingJob, 'instructions.md'), 'https://writer.example/post/one\nhttps://writer.example/post/two\n');
+  fs.writeFileSync(path.join(readingJob, 'formats.txt'), 'pdf\n');
+  const readingResult = spawnSync('/bin/bash', [composeScript, readingJob], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: root, PI_BIN: fakePi, MD2PDF: fakePdf, READER_FONT_DIR: emptyFonts },
+  });
+  assert.equal(readingResult.status, 0, readingResult.stderr);
+  const readingPrompt = fs.readFileSync(path.join(readingJob, 'prompt.md'), 'utf8');
+  assert.match(readingPrompt, /COMPOSITION MODE: SOURCE-PRESERVING READING EDITION/);
+  assert.match(readingPrompt, /Preserve the\s+author's wording sentence-for-sentence and paragraph-for-paragraph/);
+  assert.match(readingPrompt, /Do not add a new introduction, conclusion, prerequisites, worked example/);
+  assert.match(readingPrompt, /For multiple posts, keep the URLs in the user's order/);
+
+  const writeupJob = path.join(root, 'writeup-job');
+  fs.mkdirSync(path.join(writeupJob, 'work'), { recursive: true });
+  fs.mkdirSync(path.join(writeupJob, 'out'), { recursive: true });
+  fs.writeFileSync(path.join(writeupJob, 'instructions.md'), 'Create a write-up article explaining https://writer.example/post/one\n');
+  fs.writeFileSync(path.join(writeupJob, 'formats.txt'), 'pdf\n');
+  const writeupResult = spawnSync('/bin/bash', [composeScript, writeupJob], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: root, PI_BIN: fakePi, MD2PDF: fakePdf, READER_FONT_DIR: emptyFonts },
+  });
+  assert.equal(writeupResult.status, 0, writeupResult.stderr);
+  assert.match(fs.readFileSync(path.join(writeupJob, 'prompt.md'), 'utf8'), /COMPOSITION MODE: TRANSFORMATIVE ARTICLE/);
 
   const exhaustiveJob = path.join(root, 'exhaustive-job');
   fs.mkdirSync(path.join(exhaustiveJob, 'work'), { recursive: true });
