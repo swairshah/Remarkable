@@ -45,6 +45,8 @@
   header .spacer { flex: 1; }
   header .badge { font-size: 12px; color: var(--muted); }
   header .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#3aa76d; margin-right:5px; vertical-align:middle; }
+  body:not(.reading) header { padding-block:8px; }
+  body:not(.reading) header .brand, body:not(.reading) header .badge { display:none; }
   .reader-actions { display:none; position:relative; }
   body.reading header .badge, body.reading header #compose-btn, body.reading header #add { display:none; }
   body.reading .reader-actions { display:block; }
@@ -126,6 +128,13 @@
       min-width:0; min-height:44px; padding:7px 8px; line-height:1.25;
       white-space:normal;
     }
+    body:not(.reading) header {
+      grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+      gap:8px; padding:8px 12px;
+    }
+    body:not(.reading) header #crumb, body:not(.reading) header .spacer { display:none; }
+    body:not(.reading) header #compose-btn { grid-column:1; grid-row:1; }
+    body:not(.reading) header #add { grid-column:2; grid-row:1; }
     body.reading header { grid-template-columns:auto minmax(0,1fr) auto; }
     body.reading header #crumb { grid-column:2; }
     body.reading header .reader-actions { grid-column:3; grid-row:1; }

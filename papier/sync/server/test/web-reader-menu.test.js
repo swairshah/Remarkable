@@ -8,7 +8,7 @@ const test = require('node:test');
 const htmlPath = path.resolve(__dirname, '../web/index.html');
 const navPath = path.resolve(__dirname, '../../../../sync/server/web/nav.js');
 
-test('reader actions stay in the sticky header and browser Back returns home', () => {
+test('home actions are compact while reader actions stay sticky and Back returns home', () => {
   const html = fs.readFileSync(htmlPath, 'utf8');
   const script = html.match(/<script>([\s\S]*?)<\/script>/);
 
@@ -16,6 +16,10 @@ test('reader actions stay in the sticky header and browser Back returns home', (
   assert.doesNotThrow(() => new Function(script[1]), 'viewer script parses');
   assert.match(html, /id="reader-menu-btn"[^>]*aria-haspopup="menu"/);
   assert.match(html, /body\.reading \.reader-actions \{ display:block; \}/);
+  assert.match(html, /body:not\(\.reading\) header \.brand, body:not\(\.reading\) header \.badge \{ display:none; \}/);
+  assert.match(html, /body:not\(\.reading\) header \{\s*grid-template-columns:minmax\(0,1fr\) minmax\(0,1fr\);/);
+  assert.match(html, /body:not\(\.reading\) header #compose-btn \{ grid-column:1; grid-row:1; \}/);
+  assert.match(html, /body:not\(\.reading\) header #add \{ grid-column:2; grid-row:1; \}/);
   assert.match(html, /\.reader-menu-toggle \{[^}]*min-width:44px; min-height:44px;/);
   assert.match(html, /readerMenuItem\('▦', 'Adjust margins'/);
   assert.match(html, /readerMenuItem\('⤡', 'PDF viewer'/);
