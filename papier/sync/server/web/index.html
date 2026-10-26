@@ -47,6 +47,9 @@
   header .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#3aa76d; margin-right:5px; vertical-align:middle; }
   body:not(.reading) header { padding-block:8px; }
   body:not(.reading) header .brand, body:not(.reading) header .badge { display:none; }
+  .home-view-actions { position:relative; }
+  body.reading .home-view-actions { display:none; }
+  .home-view-menu { left:0; right:auto; width:190px; }
   .reader-actions { display:none; position:relative; }
   body.reading header .badge, body.reading header #compose-btn, body.reading header #add { display:none; }
   body.reading .reader-actions { display:block; }
@@ -73,6 +76,14 @@
   /* home grid */
   .section-title { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .06em; margin: 22px 4px 10px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 18px; }
+  .grid.view-icons { grid-template-columns:repeat(auto-fill, minmax(112px, 1fr)); gap:10px; }
+  .grid.view-icons .card .meta { padding:7px 8px; }
+  .grid.view-icons .card .meta .t { font-size:12px; }
+  .grid.view-icons .card .meta .s { font-size:11px; margin-top:1px; }
+  .grid.view-list { display:flex; flex-direction:column; gap:8px; }
+  .grid.view-list .card { display:grid; grid-template-columns:72px minmax(0,1fr); min-height:94px; }
+  .grid.view-list .thumb { height:94px; aspect-ratio:auto; border-right:1px solid var(--line); border-bottom:0; }
+  .grid.view-list .card .meta { min-width:0; padding:12px 14px; align-self:center; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; cursor: pointer; transition: transform .08s ease, box-shadow .08s ease; }
   .card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,.10); }
   .card.context-open { transform: translateY(-2px); box-shadow: 0 0 0 2px var(--accent), 0 8px 24px rgba(0,0,0,.14); }
@@ -129,12 +140,13 @@
       white-space:normal;
     }
     body:not(.reading) header {
-      grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+      grid-template-columns:44px minmax(0,1fr) minmax(0,1fr);
       gap:8px; padding:8px 12px;
     }
     body:not(.reading) header #crumb, body:not(.reading) header .spacer { display:none; }
-    body:not(.reading) header #compose-btn { grid-column:1; grid-row:1; }
-    body:not(.reading) header #add { grid-column:2; grid-row:1; }
+    body:not(.reading) header .home-view-actions { grid-column:1; grid-row:1; }
+    body:not(.reading) header #compose-btn { grid-column:2; grid-row:1; }
+    body:not(.reading) header #add { grid-column:3; grid-row:1; }
     body.reading header { grid-template-columns:auto minmax(0,1fr) auto; }
     body.reading header #crumb { grid-column:2; }
     body.reading header .reader-actions { grid-column:3; grid-row:1; }
@@ -276,6 +288,14 @@
   <span id="crumb"></span>
   <span class="spacer"></span>
   <span class="badge" id="badge"><span class="dot"></span>synced view</span>
+  <div class="home-view-actions" id="home-view-actions">
+    <button class="reader-menu-toggle" id="home-view-btn" type="button" aria-label="Change document view" aria-haspopup="menu" aria-expanded="false" aria-controls="home-view-menu"><span class="view-mode-icon" aria-hidden="true">▦</span></button>
+    <div class="reader-menu home-view-menu" id="home-view-menu" role="menu" hidden>
+      <button type="button" role="menuitem" data-home-view="grid"><span class="ico" aria-hidden="true">▦</span><span class="label">Card grid</span></button>
+      <button type="button" role="menuitem" data-home-view="icons"><span class="ico" aria-hidden="true">⊞</span><span class="label">Small icons</span></button>
+      <button type="button" role="menuitem" data-home-view="list"><span class="ico" aria-hidden="true">☷</span><span class="label">List</span></button>
+    </div>
+  </div>
   <button class="addbtn" id="compose-btn">✦ Compose</button>
   <button class="addbtn" id="add">+ Add document</button>
   <div class="reader-actions" id="reader-actions">
@@ -331,6 +351,7 @@ const LIBRARY = API + 'library';
 const bust = {};                     // docId -> cache-bust token, bumped after a re-render
 const bustq = (id) => bust[id] ? ('?v=' + bust[id]) : '';   // so new pages load, not the cached ones
 const PAGE_W = 1404, PAGE_H = 1872, POLL_MS = 60000;
+const HOME_VIEW_KEY = 'papier-home-view';
 const $ = (id) => document.getElementById(id);
 const $view = $('view');
 const PERF_START = performance.now();
@@ -348,6 +369,7 @@ const state = {
   folders: [],         // folder names
   open: null,          // {id, meta, seq, pages:[...]}
   aiBlue: true,
+  homeView: (() => { try { const v = localStorage.getItem(HOME_VIEW_KEY); return ['grid', 'icons', 'list'].includes(v) ? v : 'grid'; } catch (_) { return 'grid'; } })(),
   sig: '',             // doc-set signature for change detection
 };
 
@@ -615,6 +637,7 @@ async function deleteDocument(d) {
 async function renderHome() {
   closeDocMenu();
   closeReaderMenu();
+  closeHomeViewMenu();
   state.open = null;
   if (openDoc._io) { openDoc._io.disconnect(); openDoc._io = null; }
   $('docside') && $('docside').remove();
@@ -632,7 +655,7 @@ async function renderHome() {
        '<code>make book FILE=paper.pdf</code> also works.') + '</div>';
     return;
   }
-  const grid = document.createElement('div'); grid.className = 'grid';
+  const grid = document.createElement('div'); grid.className = 'grid view-' + state.homeView;
   for (const name of folders) {
     const card = document.createElement('div'); card.className = 'card';
     card.innerHTML = `<div class="thumb folder">${folderGlyph()}</div>
@@ -662,6 +685,7 @@ async function renderHome() {
     $view.appendChild(back);
   }
   $view.appendChild(grid);
+  syncHomeViewMenu();
   perfMark('grid');
 }
 
@@ -678,6 +702,38 @@ function goFiles(options) {
   state.folder = null;
   renderHome();
   if (!fromHistory) history.replaceState({ papier:'home' }, '', location.href);
+}
+function syncHomeViewMenu() {
+  const menu = $('home-view-menu'), trigger = $('home-view-btn');
+  if (!menu || !trigger) return;
+  const icons = { grid:'▦', icons:'⊞', list:'☷' };
+  const labels = { grid:'card grid', icons:'small icons', list:'list' };
+  trigger.querySelector('.view-mode-icon').textContent = icons[state.homeView];
+  trigger.setAttribute('aria-label', 'Change document view. Current view: ' + labels[state.homeView]);
+  menu.querySelectorAll('[data-home-view]').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.homeView === state.homeView));
+  });
+}
+function closeHomeViewMenu(returnFocus) {
+  const menu = $('home-view-menu'), trigger = $('home-view-btn');
+  if (!menu || !trigger || menu.hidden) return;
+  menu.hidden = true; trigger.setAttribute('aria-expanded', 'false');
+  if (returnFocus) trigger.focus({ preventScroll:true });
+}
+function toggleHomeViewMenu() {
+  const menu = $('home-view-menu'), trigger = $('home-view-btn');
+  if (!menu || state.open) return;
+  if (!menu.hidden) { closeHomeViewMenu(true); return; }
+  syncHomeViewMenu();
+  menu.hidden = false; trigger.setAttribute('aria-expanded', 'true');
+  const active = menu.querySelector('[aria-pressed="true"]') || menu.querySelector('button');
+  if (active) active.focus({ preventScroll:true });
+}
+function setHomeView(view) {
+  if (!['grid', 'icons', 'list'].includes(view)) return;
+  state.homeView = view;
+  try { localStorage.setItem(HOME_VIEW_KEY, view); } catch (_) {}
+  renderHome();
 }
 // the sidebar's "Adjust margins" -> open the crop editor for the current book
 function openEditor() {
@@ -1562,7 +1618,8 @@ window.addEventListener('resize', () => {
 });
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if ($('reader-menu') && !$('reader-menu').hidden) closeReaderMenu(true);
+    if ($('home-view-menu') && !$('home-view-menu').hidden) closeHomeViewMenu(true);
+    else if ($('reader-menu') && !$('reader-menu').hidden) closeReaderMenu(true);
     else if ($('docmenu') && $('docmenu').classList.contains('show')) closeDocMenu();
     else if ($('pv').classList.contains('show')) closePdfViewer();  // PDF viewer overlay first
     else if ($('kfmt').classList.contains('show')) kindleModal(false);
@@ -1598,6 +1655,21 @@ function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&
 $('brand').onclick = goFiles;
 $('add').onclick = () => $('file').click();
 $('compose-btn').onclick = () => composeModal(true);
+$('home-view-btn').onclick = toggleHomeViewMenu;
+$('home-view-menu').addEventListener('click', (e) => {
+  const button = e.target.closest('[data-home-view]');
+  if (button) setHomeView(button.dataset.homeView);
+});
+$('home-view-menu').addEventListener('keydown', (e) => {
+  const items = [...$('home-view-menu').querySelectorAll('button')];
+  const at = items.indexOf(document.activeElement);
+  let next = null;
+  if (e.key === 'ArrowDown') next = items[(at + 1) % items.length];
+  else if (e.key === 'ArrowUp') next = items[(at - 1 + items.length) % items.length];
+  else if (e.key === 'Home') next = items[0];
+  else if (e.key === 'End') next = items[items.length - 1];
+  if (next) { e.preventDefault(); next.focus(); }
+});
 $('reader-menu-btn').onclick = toggleReaderMenu;
 $('reader-menu').addEventListener('keydown', (e) => {
   const items = [...$('reader-menu').querySelectorAll('button')].filter(button => button.style.display !== 'none');
@@ -1620,10 +1692,11 @@ $('file').onchange = (e) => upload(e.target.files);
 document.addEventListener('pointerdown', (e) => {
   const menu = $('docmenu'); if (menu && !menu.contains(e.target)) closeDocMenu();
   const actions = $('reader-actions'); if (actions && !actions.contains(e.target)) closeReaderMenu();
+  const homeActions = $('home-view-actions'); if (homeActions && !homeActions.contains(e.target)) closeHomeViewMenu();
 });
-window.addEventListener('blur', () => { closeDocMenu(); closeReaderMenu(); });
-window.addEventListener('resize', () => { closeDocMenu(); closeReaderMenu(); });
-window.addEventListener('scroll', () => { closeDocMenu(); closeReaderMenu(); }, true);
+window.addEventListener('blur', () => { closeDocMenu(); closeReaderMenu(); closeHomeViewMenu(); });
+window.addEventListener('resize', () => { closeDocMenu(); closeReaderMenu(); closeHomeViewMenu(); });
+window.addEventListener('scroll', () => { closeDocMenu(); closeReaderMenu(); closeHomeViewMenu(); }, true);
 window.addEventListener('popstate', (e) => {
   if (e.state && e.state.papier === 'doc') {
     const d = state.docs.find(doc => doc.id === e.state.id);
