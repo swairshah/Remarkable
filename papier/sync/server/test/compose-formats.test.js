@@ -122,6 +122,10 @@ else:
   const readingPrompt = fs.readFileSync(path.join(readingJob, 'prompt.md'), 'utf8');
   assert.match(readingPrompt, /COMPOSITION MODE: SOURCE-PRESERVING READING EDITION/);
   assert.match(readingPrompt, /Preserve the\s+author's wording sentence-for-sentence and paragraph-for-paragraph/);
+  assert.match(readingPrompt, /Begin at the first substantive reader-facing content/);
+  assert.match(readingPrompt, /author affiliations and contact addresses/);
+  assert.match(readingPrompt, /copyright\/copying\s+or reprint permission notices/);
+  assert.match(readingPrompt, /Do not treat an abstract, foreword, preface, epigraph, dedication/);
   assert.match(readingPrompt, /Do not add a new introduction, conclusion, prerequisites, worked example/);
   assert.match(readingPrompt, /For multiple posts, keep the URLs in the user's order/);
 

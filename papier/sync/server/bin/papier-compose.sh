@@ -134,10 +134,18 @@ Produce the document required by the selected composition mode.
   author's wording sentence-for-sentence and paragraph-for-paragraph. Do not
   paraphrase, condense, expand, fact-check, correct, modernize, or improve the
   prose—even when you think a different explanation would be clearer.
-- Preserve the original title, subtitle, byline, publication date, heading
-  order and wording, paragraphs, quotations, lists, footnotes/endnotes,
+- Preserve the original title, subtitle, author names, publication date,
+  heading order and wording, paragraphs, quotations, lists, footnotes/endnotes,
   captions, tables, equations, and code. Convert their presentation to clean
   Markdown, but do not change their content.
+- Begin at the first substantive reader-facing content, such as the abstract,
+  deck, or opening paragraph. Omit front matter that exists only for publication
+  administration: author affiliations and contact addresses, copyright/copying
+  or reprint permission notices, journal or conference identifiers,
+  submission/acceptance metadata, price lines, and publisher boilerplate. Keep
+  author names and the original publication date in a compact byline when
+  useful. Do not treat an abstract, foreword, preface, epigraph, dedication,
+  contents list, or substantive author's note as boilerplate.
 - Remove only website chrome and non-article UI: navigation, share/like/comment
   controls, subscription prompts, cookie banners, repeated publication
   footers, related-post modules, and advertisements. A sponsor passage inside
