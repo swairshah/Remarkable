@@ -59,6 +59,7 @@
   .reader-menu button:active { scale:.96; }
   .reader-menu button[aria-pressed=true] { background:var(--accent); color:var(--card); }
   .reader-menu .ico { width:19px; flex:none; color:var(--muted); text-align:center; font-size:15px; }
+  .reader-menu .ico svg { display:block; width:14px; height:14px; margin:auto; }
   .reader-menu button[aria-pressed=true] .ico { color:inherit; }
   .reader-menu .label { flex:1; min-width:0; }
   .reader-menu .sep { height:1px; margin:5px 7px; background:var(--line); }
@@ -818,6 +819,8 @@ function toggleReaderMenu() {
   const menu = $('reader-menu'), trigger = $('reader-menu-btn');
   if (!menu || !state.open) return;
   if (!menu.hidden) { closeReaderMenu(true); return; }
+  const theme = menu.querySelector('[data-reader-action="theme"]');
+  if (theme) syncReaderThemeAction(theme);
   menu.hidden = false; trigger.setAttribute('aria-expanded', 'true');
   const first = [...menu.querySelectorAll('button')].find(button => button.style.display !== 'none');
   if (first) first.focus({ preventScroll:true });
@@ -826,6 +829,16 @@ function currentReaderTheme() {
   const explicit = document.documentElement.getAttribute('data-theme');
   if (explicit === 'light' || explicit === 'dark') return explicit;
   return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+const READER_THEME_SUN = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
+const READER_THEME_MOON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>';
+function syncReaderThemeAction(button) {
+  const next = currentReaderTheme() === 'light' ? 'dark' : 'light';
+  const sharedToggle = document.querySelector('.rm-theme-toggle');
+  button.querySelector('.ico').innerHTML = sharedToggle && sharedToggle.innerHTML
+    ? sharedToggle.innerHTML
+    : (next === 'dark' ? READER_THEME_MOON : READER_THEME_SUN);
+  button.querySelector('.label').textContent = 'Switch to ' + next + ' theme';
 }
 function toggleReaderTheme(button) {
   const sharedToggle = document.querySelector('.rm-theme-toggle');
@@ -836,8 +849,7 @@ function toggleReaderTheme(button) {
     document.documentElement.setAttribute('data-theme', next);
     document.documentElement.style.colorScheme = next;
   }
-  const next = currentReaderTheme() === 'light' ? 'dark' : 'light';
-  setReaderMenuLabel(button, next === 'dark' ? '☾' : '☀', 'Switch to ' + next + ' theme');
+  syncReaderThemeAction(button);
 }
 function buildReaderMenu(d) {
   const menu = $('reader-menu'); menu.innerHTML = '';
@@ -866,8 +878,10 @@ function buildReaderMenu(d) {
   readerMenuSeparator(menu);
   menu.appendChild(readerMenuItem('✦', 'Compose document', () => composeModal(true)));
   menu.appendChild(readerMenuItem('+', 'Add document', () => $('file').click()));
-  const nextTheme = currentReaderTheme() === 'light' ? 'dark' : 'light';
-  menu.appendChild(readerMenuItem(nextTheme === 'dark' ? '☾' : '☀', 'Switch to ' + nextTheme + ' theme', toggleReaderTheme));
+  const theme = readerMenuItem('', '', toggleReaderTheme);
+  theme.dataset.readerAction = 'theme';
+  syncReaderThemeAction(theme);
+  menu.appendChild(theme);
 }
 // the doc-view sidebar (wide screens): navigation + per-doc actions
 function buildSidebar(d) {
