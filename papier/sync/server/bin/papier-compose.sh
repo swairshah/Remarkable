@@ -128,11 +128,11 @@ cat <<'PROMPT'
 - In TRANSFORMATIVE mode, extract the core claims, equations, results, and
   difficult concepts. In SOURCE-PRESERVING mode, extract the complete main
   article body and its original structure instead of reducing it to claims.
-- In SOURCE-AWARE mode, classify each source before writing. Extract an
-  article or blog post's complete authored body and structure. For a technical
-  paper, report, specification, book, or book chapter, extract the full set of
-  claims, arguments, equations, examples, code, results, and qualifications
-  needed for a faithful pedagogical edition.
+- In SOURCE-AWARE mode, classify each source by its dominant reading experience
+  before writing. Extract a prose-led source's complete authored body and
+  structure. Only for genuinely dense technical-reference material, extract
+  the full set of claims, arguments, equations, examples, code, results, and
+  qualifications needed for a faithful pedagogical edition.
 
 ## Step 2 — Write the article (article.md)
 
@@ -179,10 +179,16 @@ Produce the document required by the selected composition mode.
 
 ### SOURCE-AWARE READING EDITION rules
 
-- First classify each source by what it is, not merely by its URL or file
-  format. An authored essay, blog post, newsletter, interview, or magazine
-  article is prose-led. An academic paper, technical report, specification,
-  manual, textbook, book, or book chapter is technical-reference material.
+- First classify each source by its dominant reading experience, not merely by
+  its URL, file format, venue, or label such as "paper" or "book." Prose-led
+  sources include authored essays, blog posts, newsletters, interviews,
+  magazine articles, narrative nonfiction, and historical, economic,
+  humanities, survey, argumentative, or essayistic academic papers and books.
+- Treat a source as technical-reference material only when its primary value is
+  formal technical instruction or analysis and understanding it depends on
+  dense equations, algorithms, code, formal definitions, specifications, or
+  procedures. Being academic, peer-reviewed, long, or published as a PDF does
+  NOT by itself justify rewriting it.
 - For prose-led sources, follow the SOURCE-PRESERVING rules above: retain the
   author's wording, voice, paragraph order, headings, examples, and complete
   body. Add only occasional, clearly labeled Reader's note asides where a dense
@@ -193,13 +199,18 @@ Produce the document required by the selected composition mode.
   source's claims, results, equations, algorithms, code, important examples,
   limitations, and citations faithfully. Never turn a precise technical claim
   into a looser or stronger one.
+- When a prose-led source contains a few dense technical passages, preserve the
+  surrounding prose and those passages verbatim, then add sparse, clearly
+  labeled Reader's note asides. Do not transform the whole work merely because
+  technical material appears inside it.
 - When the request asks for full or complete coverage, preserve the source's
   full technical scope even if you reorganize it for clarity. Do not collapse a
   paper or book into a short summary.
 - Treat mixed source sets per source. Do not rewrite an essay merely because a
-  linked paper is technical, and do not transcribe a dense paper merely because
-  a linked post is prose-led. If classification is genuinely ambiguous, favor
-  preserving the author's prose and add clearly labeled explanations.
+  linked formal paper is technical, and do not transcribe a dense instructional
+  source merely because a linked post is prose-led. If classification is
+  genuinely ambiguous, favor preserving the author's prose and add clearly
+  labeled explanations.
 
 ### TRANSFORMATIVE ARTICLE rules
 

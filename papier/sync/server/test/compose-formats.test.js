@@ -124,6 +124,9 @@ else:
   assert.match(readingPrompt, /COMPOSITION MODE: SOURCE-AWARE READING EDITION/);
   assert.match(readingPrompt, /For prose-led sources, follow the SOURCE-PRESERVING rules/);
   assert.match(readingPrompt, /For technical-reference material, create a pedagogical edition/);
+  assert.match(readingPrompt, /historical, economic,\s+humanities, survey, argumentative, or essayistic academic papers/);
+  assert.match(readingPrompt, /Being academic, peer-reviewed, long, or published as a PDF does\s+NOT by itself justify rewriting it/);
+  assert.match(readingPrompt, /preserve the\s+surrounding prose and those passages verbatim/);
   assert.match(readingPrompt, /Treat mixed source sets per source/);
   assert.match(readingPrompt, /Reader's note/);
   assert.match(readingPrompt, /Begin at the first substantive reader-facing content/);
