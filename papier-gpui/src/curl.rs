@@ -27,16 +27,57 @@ impl Src {
         Src { img }
     }
 
-    /// Sample at page-local fractions (nearest; this is motion).
-    #[inline]
-    fn at(&self, fx: f32, fy: f32) -> [u8; 4] {
+    fn dims(&self) -> (i32, i32) {
         let sz = self.img.size(0);
-        let (w, h) = (i32::from(sz.width).max(1), i32::from(sz.height).max(1));
-        let x = ((fx * w as f32) as i32).clamp(0, w - 1);
-        let y = ((fy * h as f32) as i32).clamp(0, h - 1);
-        let i = ((y * w + x) * 4) as usize;
-        let b = self.img.as_bytes(0).unwrap_or(&[]);
-        if i + 3 < b.len() { [b[i], b[i + 1], b[i + 2], 255] } else { [0, 0, 0, 0] }
+        (i32::from(sz.width).max(1), i32::from(sz.height).max(1))
+    }
+
+}
+
+/// A source resolved once per frame: bytes and size, no per-pixel lookups.
+#[derive(Clone, Copy)]
+struct View<'a> {
+    b: &'a [u8],
+    w: i32,
+    h: i32,
+}
+
+impl View<'_> {
+    #[inline(always)]
+    fn rgb(&self, x: i32, y: i32) -> [f32; 3] {
+        let i = ((y * self.w + x) * 4) as usize;
+        [self.b[i] as f32, self.b[i + 1] as f32, self.b[i + 2] as f32]
+    }
+
+    #[inline(always)]
+    fn exact(&self, x: f32, y: f32) -> [u8; 4] {
+        let (x, y) = ((x as i32).clamp(0, self.w - 1), (y as i32).clamp(0, self.h - 1));
+        let i = ((y * self.w + x) * 4) as usize;
+        [self.b[i], self.b[i + 1], self.b[i + 2], 255]
+    }
+
+    #[inline(always)]
+    fn smooth(&self, x: f32, y: f32) -> [u8; 4] {
+        let (x, y) = ((x - 0.5).clamp(0.0, (self.w - 1) as f32), (y - 0.5).clamp(0.0, (self.h - 1) as f32));
+        let (x0, y0) = (x as i32, y as i32);
+        let (x1, y1) = ((x0 + 1).min(self.w - 1), (y0 + 1).min(self.h - 1));
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let (a, b, c, d) = (self.rgb(x0, y0), self.rgb(x1, y0), self.rgb(x0, y1), self.rgb(x1, y1));
+        let mut out = [0u8, 0, 0, 255];
+        for k in 0..3 {
+            let top = a[k] + (b[k] - a[k]) * fx;
+            let bot = c[k] + (d[k] - c[k]) * fx;
+            out[k] = (top + (bot - top) * fy) as u8;
+        }
+        out
+    }
+}
+
+impl Src {
+    fn view(&self) -> Option<View<'_>> {
+        let (w, h) = self.dims();
+        let b = self.img.as_bytes(0)?;
+        (b.len() >= (w * h * 4) as usize).then_some(View { b, w, h })
     }
 }
 
@@ -54,6 +95,10 @@ pub struct Curl<'a> {
     /// Paper color (BGRA) for a page whose raster isn't ready.
     pub paper: [u8; 4],
     pub dark: bool,
+    /// > 0: the GPU draws the leaf's flat front itself (crisp, clipped to
+    /// strips along the fold); the buffer only covers this band (in leaf
+    /// px) of flat paper before the fold, plus everything that warps.
+    pub gpu_band: f32,
 }
 
 /// Keep the finger where paper can actually reach: the leaf is bound at
@@ -80,30 +125,70 @@ impl Curl<'_> {
     /// spread underneath shows, translucent black where the leaf's shadow
     /// falls on it.
     pub fn render(&self) -> Vec<u8> {
-        let (w, h) = (self.w, self.h);
-        let (ow, oh) = ((2.0 * w).round() as usize, h.round() as usize);
-        let mut out = vec![0u8; ow * oh * 4];
+        self.render_full().0
+    }
+
+    /// Render, then crop to what's not fully transparent: (pixels, x, y,
+    /// width, height) within the 2w × h spread. Keeps per-frame uploads
+    /// small while the leaf has only just lifted.
+    pub fn render_cropped(&self) -> Option<(Vec<u8>, u32, u32, u32, u32)> {
+        let (buf, ow, oh) = self.render_full();
+        let (mut x0, mut y0, mut x1, mut y1) = (ow, oh, 0usize, 0usize);
+        for y in 0..oh {
+            let row = &buf[y * ow * 4..(y + 1) * ow * 4];
+            let first = (0..ow).find(|&x| row[x * 4 + 3] != 0);
+            if let Some(f) = first {
+                let last = (0..ow).rev().find(|&x| row[x * 4 + 3] != 0).unwrap_or(f);
+                x0 = x0.min(f);
+                x1 = x1.max(last + 1);
+                y0 = y0.min(y);
+                y1 = y1.max(y + 1);
+            }
+        }
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let (cw, ch) = (x1 - x0, y1 - y0);
+        let mut out = Vec::with_capacity(cw * ch * 4);
+        for y in y0..y1 {
+            out.extend_from_slice(&buf[(y * ow + x0) * 4..(y * ow + x1) * 4]);
+        }
+        Some((out, x0 as u32, y0 as u32, cw as u32, ch as u32))
+    }
+
+    /// The fold: where the cylinder starts (leaf frame), the unit normal
+    /// pointing toward the lifted edge, and the cylinder's radius. None
+    /// while the leaf lies flat.
+    pub fn geometry(&self) -> Option<((f32, f32), (f32, f32), f32)> {
         let o = self.origin;
-        let f = constrain(o, self.finger, h);
+        let f = constrain(o, self.finger, self.h);
         let (vx, vy) = (o.0 - f.0, o.1 - f.1);
         let len = vx.hypot(vy);
         if len < 0.5 {
-            // untouched: the flat leaf
-            self.rows(&mut out, ow, (1.0, 0.0), (1.0e6, 0.0), 2.0);
-            return out;
+            return None;
         }
         let n = (vx / len, vy / len);
         // the cylinder shrinks as the leaf nears flat on the far page
-        let r = (w * 0.09).min(len / std::f32::consts::PI * 0.9).max(2.0);
+        let r = (self.w * 0.09).min(len / std::f32::consts::PI * 0.9).max(2.0);
         let pi_r = std::f32::consts::PI * r;
         let mid = ((o.0 + f.0) / 2.0, (o.1 + f.1) / 2.0);
-        let fold = (mid.0 - n.0 * pi_r / 2.0, mid.1 - n.1 * pi_r / 2.0);
-        self.rows(&mut out, ow, n, fold, r);
-        out
+        Some(((mid.0 - n.0 * pi_r / 2.0, mid.1 - n.1 * pi_r / 2.0), n, r))
+    }
+
+    fn render_full(&self) -> (Vec<u8>, usize, usize) {
+        let (w, h) = (self.w, self.h);
+        let (ow, oh) = ((2.0 * w).round() as usize, h.round() as usize);
+        let mut out = vec![0u8; ow * oh * 4];
+        match self.geometry() {
+            Some((fold, n, r)) => self.rows(&mut out, ow, n, fold, r),
+            None => self.rows(&mut out, ow, (1.0, 0.0), (1.0e6, 0.0), 2.0),
+        }
+        (out, ow, oh)
     }
 
     fn rows(&self, out: &mut [u8], ow: usize, n: (f32, f32), fold: (f32, f32), r: f32) {
-        let threads = 6usize;
+        let views = (self.front.and_then(Src::view), self.back.and_then(Src::view));
+        let threads = std::env::var("CURL_THREADS").ok().and_then(|t| t.parse().ok()).unwrap_or(6usize);
         let oh = out.len() / (ow * 4);
         let chunk = oh.div_ceil(threads).max(1);
         std::thread::scope(|scope| {
@@ -115,7 +200,7 @@ impl Curl<'_> {
                             let x = i as f32 + 0.5;
                             // spread x -> leaf frame u (left half of the output is u < 0 for forward)
                             let u = if self.forward { x - self.w } else { self.w - x };
-                            let px = self.pixel(u, y, n, fold, r);
+                            let px = self.pixel(u, y, n, fold, r, views);
                             row[i * 4..i * 4 + 4].copy_from_slice(&px);
                         }
                     }
@@ -129,21 +214,32 @@ impl Curl<'_> {
         s.0 >= 0.0 && s.0 <= self.w && s.1 >= 0.0 && s.1 <= self.h
     }
 
+    /// Sample a face at leaf point `s` (output pixels; the leaf is rendered
+    /// at the page raster's own resolution, so flat paper maps 1:1).
     #[inline]
-    fn sample(&self, back: bool, s: (f32, f32), shade: f32) -> [u8; 4] {
+    fn sample(&self, views: (Option<View>, Option<View>), back: bool, s: (f32, f32), shade: f32, exact: bool) -> [u8; 4] {
         // the back face is the mirror image of the next page
-        let fx = if back == self.forward { 1.0 - s.0 / self.w } else { s.0 / self.w };
-        let src = if back { self.back } else { self.front };
-        let mut px = src.map_or(self.paper, |src| src.at(fx, s.1 / self.h));
-        for c in &mut px[..3] {
-            *c = (*c as f32 * shade).min(255.0) as u8;
+        let x = if back == self.forward { self.w - s.0 } else { s.0 };
+        let src = if back { views.1 } else { views.0 };
+        let mut px = match src {
+            Some(v) => {
+                // map leaf pixels onto the source raster (same size, normally)
+                let (sx, sy) = (x * v.w as f32 / self.w, s.1 * v.h as f32 / self.h);
+                if exact && self.gpu_band <= 0.0 { v.exact(sx, sy) } else { v.smooth(sx, sy) }
+            }
+            None => self.paper,
+        };
+        if shade < 0.999 {
+            for c in &mut px[..3] {
+                *c = (*c as f32 * shade).min(255.0) as u8;
+            }
         }
         px[3] = 255;
         px
     }
 
     #[inline]
-    fn pixel(&self, u: f32, v: f32, n: (f32, f32), fold: (f32, f32), r: f32) -> [u8; 4] {
+    fn pixel(&self, u: f32, v: f32, n: (f32, f32), fold: (f32, f32), r: f32, views: (Option<View>, Option<View>)) -> [u8; 4] {
         let d = (u - fold.0) * n.0 + (v - fold.1) * n.1;
         let pi_r = std::f32::consts::PI * r;
         let src = |s: f32| (u + n.0 * (s - d), v + n.1 * (s - d));
@@ -154,7 +250,7 @@ impl Curl<'_> {
             if pi_r - d > pi_r && self.inside(s) {
                 // a little darker right at the fold
                 let near = (1.0 + d / (r * 1.5)).clamp(0.0, 1.0);
-                return self.sample(true, s, back_tone * (1.0 - 0.18 * near));
+                return self.sample(views, true, s, back_tone * (1.0 - 0.18 * near), false);
             }
         }
         if (0.0..=r).contains(&d) {
@@ -162,18 +258,21 @@ impl Curl<'_> {
             // 2. over the top of the cylinder: the back, rolling into view
             let s = src(r * (std::f32::consts::PI - a));
             if self.inside(s) {
-                return self.sample(true, s, back_tone * (0.78 + 0.22 * (d / r)));
+                return self.sample(views, true, s, back_tone * (0.78 + 0.22 * (d / r)), false);
             }
             // 3. the front, curving away from the light
             let s = src(r * a);
             if self.inside(s) {
-                return self.sample(false, s, 0.62 + 0.38 * a.cos());
+                return self.sample(views, false, s, 0.62 + 0.38 * a.cos(), false);
             }
         }
-        // 4. still flat on the paper
+        // 4. still flat on the paper (the GPU draws it, beyond the band)
+        if self.gpu_band > 0.0 && d < -self.gpu_band {
+            return [0, 0, 0, 0];
+        }
         if d < 0.0 && u >= 0.0 && self.inside((u, v)) {
             let near = (1.0 + d / (r * 2.0)).clamp(0.0, 1.0);
-            return self.sample(false, (u, v), 1.0 - 0.12 * near * near);
+            return self.sample(views, false, (u, v), 1.0 - 0.12 * near * near, true);
         }
         // 5. the page beneath: the leaf's shadow
         if d >= 0.0 && u <= self.w && u >= -self.w {
@@ -198,7 +297,7 @@ mod tests {
 
     #[test]
     fn flat_leaf_is_opaque_on_its_side_only() {
-        let c = Curl { w: 20.0, h: 10.0, forward: true, origin: (20.0, 5.0), finger: (20.0, 5.0), front: None, back: None, paper: [9, 9, 9, 255], dark: false };
+        let c = Curl { w: 20.0, h: 10.0, forward: true, origin: (20.0, 5.0), finger: (20.0, 5.0), front: None, back: None, paper: [9, 9, 9, 255], dark: false, gpu_band: 0.0 };
         let out = c.render();
         let px = |x: usize, y: usize| out[(y * 40 + x) * 4 + 3];
         assert_eq!(px(5, 5), 0); // facing page shows through
@@ -207,7 +306,7 @@ mod tests {
 
     #[test]
     fn half_turn_puts_back_face_over_facing_page() {
-        let c = Curl { w: 40.0, h: 20.0, forward: true, origin: (40.0, 10.0), finger: (-30.0, 10.0), front: None, back: None, paper: [9, 9, 9, 255], dark: false };
+        let c = Curl { w: 40.0, h: 20.0, forward: true, origin: (40.0, 10.0), finger: (-30.0, 10.0), front: None, back: None, paper: [9, 9, 9, 255], dark: false, gpu_band: 0.0 };
         let out = c.render();
         // well over on the left: covered by the back of the leaf
         assert_eq!(out[(10 * 80 + 20) * 4 + 3], 255);
@@ -239,14 +338,18 @@ mod preview {
         // straight pull from mid-edge, a lower-corner peel, a diagonal, nearly done
         let frames = [((w, h * 0.5), (w * 0.55, h * 0.5)), ((w, h * 0.9), (w * 0.5, h * 0.75)), ((w, h * 0.9), (w * 0.05, h * 0.55)), ((w, h * 0.85), (-w * 0.8, h * 0.8))];
         for (k, (o, f)) in frames.into_iter().enumerate() {
-            let c = Curl { w, h, forward: true, origin: o, finger: f, front: Some(&front), back: Some(&back), paper: [242, 248, 250, 255], dark: false };
+            let c = Curl { w, h, forward: true, origin: o, finger: f, front: Some(&front), back: Some(&back), paper: [242, 248, 250, 255], dark: false, gpu_band: 0.0 };
             let t0 = std::time::Instant::now();
             let buf = c.render();
             eprintln!("frame {k}: {:?}", t0.elapsed());
-            let big = Curl { w: 590.0, h: 786.0, ..c };
+            let s = 1290.0 / w;
+            let big = Curl { w: 1290.0, h: 1720.0, origin: (o.0 * s, o.1 * s), finger: (f.0 * s, f.1 * s), ..c };
+            let t2 = std::time::Instant::now();
+            let _ = big.render_full();
+            eprintln!("  render_full alone: {:?}", t2.elapsed());
             let t1 = std::time::Instant::now();
-            let _ = big.render();
-            eprintln!("  full-size spread (1180x786): {:?}", t1.elapsed());
+            let cropped = big.render_cropped();
+            eprintln!("  device-res spread (2580x1720) + crop: {:?}  crop {:?}", t1.elapsed(), cropped.map(|c| (c.3, c.4)));
             let mut canvas = image::RgbaImage::from_pixel(2 * w as u32, h as u32, image::Rgba([233, 232, 228, 255]));
             // the spread underneath: a blank facing page and the next right page
             for y in 0..h as u32 {

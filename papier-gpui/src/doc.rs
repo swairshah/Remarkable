@@ -530,12 +530,14 @@ impl DocView {
             }
             Some(_) => {}
             None if can => {
-                let origin = (w, h * 0.86);
+                // a hand takes the outer edge a little below the middle and
+                // carries it straight over: the fold stays nearly upright
+                let origin = (w, h * 0.62);
                 self.turn = Some(Turn {
                     dir,
                     origin,
                     finger: (w - 1.0, origin.1),
-                    anim: Some(TurnAnim { from: (w - 1.0, origin.1), to: (-w, origin.1), t0: Instant::now(), ms: 640.0, complete: true, lift: true }),
+                    anim: Some(TurnAnim { from: (w - 1.0, origin.1), to: (-w, origin.1), t0: Instant::now(), ms: 480.0, complete: true, lift: true }),
                 });
             }
             None => {}
@@ -672,13 +674,15 @@ impl DocView {
             let Some(a) = t.anim else { return false };
             let k = (a.t0.elapsed().as_secs_f32() * 1000.0 / a.ms).min(1.0);
             let e = if a.lift {
-                if k < 0.5 { 4.0 * k * k * k } else { 1.0 - (-2.0 * k + 2.0).powi(3) / 2.0 }
+                // one smooth sweep (ease in-out sine): no overshoot, no bounce
+                0.5 - 0.5 * (std::f32::consts::PI * k).cos()
             } else {
                 1.0 - (1.0 - k).powi(3)
             };
             let mut f = (a.from.0 + (a.to.0 - a.from.0) * e, a.from.1 + (a.to.1 - a.from.1) * e);
             if a.lift {
-                f.1 -= l.h * 0.22 * (std::f32::consts::PI * k).sin();
+                // the hand rises only a little as it crosses
+                f.1 -= l.h * 0.04 * (std::f32::consts::PI * e).sin();
             }
             t.finger = crate::curl::constrain(t.origin, f, l.h);
             if k >= 1.0 {
@@ -1642,9 +1646,16 @@ impl Papier {
                 let l0 = left as i64;
                 let (base_l, base_r, front, back) =
                     if t.dir > 0 { (page(l0), page(l0 + 3), page(l0 + 1), page(l0 + 2)) } else { (page(l0 - 2), page(l0 + 1), page(l0), page(l0 - 1)) };
+                // The GPU draws both resting pages and the leaf's flat front
+                // (crisp, as the page is when still), clipped to thin strips
+                // along the fold; the CPU buffer holds only what warps — the
+                // roll, the back of the leaf, the shadow — plus a band before
+                // the fold that hides the strips' staircase.
+                const STRIP: f32 = 3.0;
+                let front_img = front.clone();
                 let (fs, bs) = (front.map(crate::curl::Src::new), back.map(crate::curl::Src::new));
                 let [pr, pg, pb] = if crate::theme::dark() { crate::theme::dark_paper(&self.settings.paper) } else { paper(&self.settings.paper) };
-                let curl = crate::curl::Curl {
+                let mut curl = crate::curl::Curl {
                     w: l.w,
                     h: l.h,
                     forward: t.dir > 0,
@@ -1654,17 +1665,42 @@ impl Papier {
                     back: bs.as_ref(),
                     paper: [pb, pg, pr, 255],
                     dark: crate::theme::dark(),
+                    gpu_band: 0.0,
                 };
-                let (ow, oh) = ((2.0 * l.w).round() as u32, l.h.round() as u32);
-                let img = image::RgbaImage::from_raw(ow, oh, curl.render())
-                    .map(|buf| Arc::new(RenderImage::new(vec![image::Frame::new(buf)])));
+                let geo = curl.geometry();
+                // strips need the fold not to be near-horizontal
+                let mut strips: Vec<(f32, f32, f32, f32)> = Vec::new();
+                match geo {
+                    None => strips.push((if t.dir > 0 { spine } else { spine - l.w }, l.top, l.w, l.h)),
+                    Some((fold, n, r)) if n.0 > 0.15 => {
+                        curl.gpu_band = (STRIP * n.1.abs() + 2.0).max(r * 2.0);
+                        let mut v = 0.0;
+                        while v < l.h {
+                            let v1 = (v + STRIP).min(l.h);
+                            // flat front: u < fold.u - (v - fold.v)·n.v / n.u
+                            let lim = |vv: f32| fold.0 - (vv - fold.1) * n.1 / n.0;
+                            let umax = lim(v).min(lim(v1)).clamp(0.0, l.w);
+                            if umax > 0.0 {
+                                let x = if t.dir > 0 { spine } else { spine - umax };
+                                strips.push((x, l.top + v, umax, v1 - v));
+                            }
+                            v = v1;
+                        }
+                    }
+                    Some(_) => {} // steep fold: the buffer draws the whole leaf
+                }
+                let img = (geo.is_some()).then(|| curl.render_cropped()).flatten().and_then(|(buf, x, y, cw, ch)| {
+                    let frame = image::RgbaImage::from_raw(cw, ch, buf)?;
+                    Some((Arc::new(RenderImage::new(vec![image::Frame::new(frame)])), (x as f32, y as f32, cw as f32, ch as f32)))
+                });
+                let front_slot = if t.dir > 0 { spine } else { spine - l.w };
                 let has_right = left + 1 < l.n || t.dir > 0 && left + 3 < l.n;
-                Some(TurnPaint { spine, y: l.top, w: l.w, h: l.h, base_l, base_r, curl: img, has_right })
+                Some(TurnPaint { spine, y: l.top, w: l.w, h: l.h, base_l, base_r, curl: img, has_right, front: front_img, front_slot, strips })
             }
             _ => None,
         };
         if let Some(dv) = self.dv() {
-            let fresh = turn_paint.as_ref().and_then(|tp| tp.curl.clone());
+            let fresh = turn_paint.as_ref().and_then(|tp| tp.curl.as_ref().map(|(img, _)| img.clone()));
             if let Some(old) = std::mem::replace(&mut dv.curl_img, fresh) {
                 self.retired.borrow_mut().push(old);
             }
@@ -2188,8 +2224,13 @@ struct TurnPaint {
     h: f32,
     base_l: Option<Arc<RenderImage>>,
     base_r: Option<Arc<RenderImage>>,
-    curl: Option<Arc<RenderImage>>,
+    /// The curl and where it goes (logical rect within the spread).
+    curl: Option<(Arc<RenderImage>, (f32, f32, f32, f32))>,
     has_right: bool,
+    /// The turning leaf's own page, drawn by the GPU inside `strips`.
+    front: Option<Arc<RenderImage>>,
+    front_slot: f32,
+    strips: Vec<(f32, f32, f32, f32)>,
 }
 
 impl TurnPaint {
@@ -2200,8 +2241,12 @@ impl TurnPaint {
             sheet(window, spine, y, w, h, self.base_r.as_ref(), paper_rgb);
         }
         gutter(window, spine, y, w, h, self.has_right);
-        if let Some(img) = &self.curl {
-            let _ = window.paint_image(rect(spine - w, y, 2.0 * w, h), Corners::default(), img.clone(), 0, false);
+        for &(sx, sy, sw, sh) in &self.strips {
+            let mask = gpui::ContentMask { bounds: rect(sx, sy, sw, sh) };
+            window.with_content_mask(Some(mask), |window| sheet(window, self.front_slot, y, w, h, self.front.as_ref(), paper_rgb));
+        }
+        if let Some((img, (cx, cy, cw, ch))) = &self.curl {
+            let _ = window.paint_image(rect(spine - w + cx, y + cy, *cw, *ch), Corners::default(), img.clone(), 0, false);
         }
     }
 }
