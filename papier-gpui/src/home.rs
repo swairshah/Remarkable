@@ -57,6 +57,12 @@ impl Papier {
                 Sync::Error(_) => ("offline", "Kept locally".to_owned()),
                 _ => ("check", String::new()),
             },
+            None if self.mirror.is_some() && self.lib_error.is_none() => {
+                use std::sync::atomic::Ordering::Relaxed;
+                let m = self.mirror.as_ref().unwrap();
+                let (done, total) = (m.0.load(Relaxed), m.1.load(Relaxed));
+                if total == 0 { ("sync", "Synced".to_owned()) } else { ("sync", format!("Saving for offline {done}/{total}")) }
+            }
             None => match (&self.lib_error, self.synced_at) {
                 (Some(_), Some(at)) => ("offline", format!("Offline · synced {}", ago(at))),
                 (Some(_), None) => ("offline", "Offline".to_owned()),

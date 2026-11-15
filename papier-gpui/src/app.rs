@@ -188,6 +188,9 @@ pub struct Papier {
     /// Pages rendered from them: (doc, pdf page, pixel width).
     pdf_prints: HashMap<(String, u32, u32), Load<Arc<ink::Print>>>,
     pdf_order: Vec<(String, u32, u32)>,
+    /// The local mirror: (documents done, documents to fetch) while a pass
+    /// runs, None when idle.
+    pub mirror: Option<Arc<(std::sync::atomic::AtomicUsize, std::sync::atomic::AtomicUsize)>>,
     print_order: Vec<String>,
     // views
     pub screen: Screen,
@@ -326,6 +329,7 @@ impl Papier {
             pdfs: HashMap::new(),
             pdf_prints: HashMap::new(),
             pdf_order: Vec::new(),
+            mirror: None,
             print_order: Vec::new(),
             screen: Screen::Home,
             folder: None,
@@ -421,10 +425,12 @@ impl Papier {
                         this.synced_at = Some(now);
                         this.lib_error = None;
                         this.library_changed(cx);
+                        this.start_mirror(cx);
                     }
                     Ok(Fetched::NotModified) => {
                         this.synced_at = Some(store::now_ms());
                         this.lib_error = None;
+                        this.start_mirror(cx);
                     }
                     Err(e) => this.lib_error = Some(e.to_string()),
                 }
@@ -443,6 +449,62 @@ impl Papier {
             dv.adopt_version(fresh);
             self.reload_clean_pages(cx);
         }
+    }
+
+    /// Keep every document on this laptop: ink, the source PDF (or page
+    /// images), the cover — fetching only documents whose version moved
+    /// since the last pass. Runs after each good library sync, one doc at
+    /// a time on its own thread; stops when the network goes and resumes
+    /// at the next sync.
+    fn start_mirror(&mut self, cx: &mut Context<Self>) {
+        if self.mirror.is_some() || std::env::var_os("PAPIER_NO_MIRROR").is_some() {
+            return;
+        }
+        let progress = Arc::new((std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicUsize::new(0)));
+        self.mirror = Some(progress.clone());
+        let (client, docs) = (self.client.clone(), self.docs.clone());
+        let work = net(cx, move || {
+            use std::sync::atomic::Ordering::Relaxed;
+            let mut synced = store::load_synced(&client.root);
+            // documents the server no longer lists
+            let gone: Vec<String> = synced.keys().filter(|id| !docs.iter().any(|d| &d.id == *id)).cloned().collect();
+            for id in gone {
+                store::forget_offline_doc(&client.root, &id);
+                synced.remove(&id);
+            }
+            let want = |d: &Doc| (d.version.clone(), d.src_version.clone().unwrap_or_default());
+            let todo: Vec<&Doc> = docs.iter().filter(|d| synced.get(&d.id) != Some(&want(d))).collect();
+            progress.1.store(todo.len(), Relaxed);
+            for doc in todo {
+                if crate::api::offline() {
+                    break;
+                }
+                let before = synced.get(&doc.id).cloned();
+                if mirror_doc(&client, doc, before.as_ref().map(|b| b.1.as_str())) {
+                    synced.insert(doc.id.clone(), want(doc));
+                    store::save_synced(&client.root, &synced);
+                }
+                progress.0.fetch_add(1, Relaxed);
+            }
+            store::save_synced(&client.root, &synced);
+        });
+        cx.spawn_in_window_free(work, |this, (), _| this.mirror = None);
+        // repaint the progress now and then while it runs
+        cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(Duration::from_millis(700)).await;
+                let Ok(running) = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.mirror.is_some()
+                }) else {
+                    break;
+                };
+                if !running {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     pub fn doc_by_id(&self, id: &str) -> Option<&Doc> {
@@ -1355,6 +1417,52 @@ impl Papier {
             }
         });
     }
+}
+
+/// Fetch one document's files to disk. `old_src`: the source-PDF version
+/// last mirrored (its file is deleted when the PDF changed). Returns false
+/// if anything failed (it's retried next pass).
+fn mirror_doc(client: &Client, doc: &Doc, old_src: Option<&str>) -> bool {
+    let fetch = |url: &str, check: &dyn Fn(&[u8]) -> bool| -> bool {
+        if store::cached_asset(url).is_some() {
+            return true;
+        }
+        match client.get_bytes(url) {
+            Ok(b) if check(&b) => {
+                store::store_asset(url, &b);
+                true
+            }
+            Ok(_) => false,
+            Err(e) => e.to_string().contains("HTTP 404"), // nothing to fetch
+        }
+    };
+    for key in doc.ink.clone().unwrap_or_default() {
+        match client.fetch_ink(&doc.id, &key) {
+            Ok(Some(page)) => store::save_offline_ink(&client.root, &doc.id, &key, &page),
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+    }
+    let mut ok = true;
+    if doc.has_source {
+        let url = client.source_pdf_url(doc);
+        if let Some(old) = old_src.filter(|o| !o.is_empty() && Some(*o) != doc.src_version.as_deref()) {
+            let mut stale = doc.clone();
+            stale.src_version = Some(old.to_owned());
+            let _ = std::fs::remove_file(store::asset_path(&client.source_pdf_url(&stale)));
+        }
+        ok &= fetch(&url, &|b| b.starts_with(b"%PDF"));
+    } else {
+        for e in &doc.seq {
+            if let crate::model::SeqEntry::Pdf(p) = e {
+                ok &= fetch(&client.page_url(doc, *p), &|b| !b.is_empty());
+            }
+        }
+    }
+    if let Some(cover) = &doc.cover {
+        ok &= fetch(&client.url(cover), &|b| !b.is_empty());
+    }
+    ok
 }
 
 fn edit_text(text: &mut String, key: &str, typed: Option<String>) {

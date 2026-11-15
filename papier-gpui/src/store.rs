@@ -141,6 +141,29 @@ pub fn load_library(server: &str) -> Option<Snapshot> {
     })
 }
 
+// ---------------------------------------------------------- local mirror
+
+/// Which version of each document is on disk: doc id -> (version, source
+/// PDF version). The mirror re-fetches only documents whose version moved.
+pub type Synced = std::collections::HashMap<String, (String, String)>;
+
+fn synced_path(server: &str) -> PathBuf {
+    cache_dir().join(hash(server)).join("synced.json")
+}
+
+pub fn load_synced(server: &str) -> Synced {
+    fs::read(synced_path(server)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+pub fn save_synced(server: &str, synced: &Synced) {
+    write_atomic(&synced_path(server), &serde_json::to_vec(synced).unwrap_or_default());
+}
+
+/// A document left the library: drop its cached ink.
+pub fn forget_offline_doc(server: &str, doc: &str) {
+    let _ = fs::remove_dir_all(cache_dir().join(hash(server)).join("ink").join(hash(doc)));
+}
+
 // ------------------------------------------------------------ asset cache
 
 /// Versioned URLs (covers, page rasters) are immutable: cache by URL.

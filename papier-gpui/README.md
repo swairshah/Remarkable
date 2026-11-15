@@ -15,6 +15,17 @@ make test
 
 ## Sync
 
+Local-first: every document lives on this laptop. After each good library
+sync a background pass mirrors the whole library to disk — ink, the
+source PDF (or page images), covers — and afterwards only re-fetches
+documents whose version changed (`~/.cache/papier-gpui/<server>/synced.json`
+records what's on disk; a replaced PDF's old file is deleted). Pages
+always open from disk first and refresh when the server answers; with no
+network, requests fail fast and everything reads from the mirror. Your
+writes are kept locally and sent when the server is reachable.
+`PAPIER_NO_MIRROR=1` turns the background pass off.
+
+
 Same endpoints as the iPad app (`papier-ios`), over the tailnet
 (`http://100.90.235.68:8000` by default; change it in Settings):
 

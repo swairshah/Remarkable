@@ -1845,12 +1845,23 @@ impl Papier {
                         curl.gpu_band = (band * n.1.abs() + 2.0).max(r * 2.0);
                         // flat front: u < fold.u - (v - fold.v)·n.v / n.u
                         let lim = |vv: f32| fold.0 - (vv - fold.1) * n.1 / n.0;
+                        // Lay slices on whole device pixels from the page's own
+                        // (floored) top edge, so each maps 1:1 onto the screen:
+                        // fractional edges made neighbours overlap or gap and
+                        // sample their atlas neighbours (thin lines in the text).
+                        let dev_top = (l.top * sf).floor();
+                        let img_rows = i32::from(img.size(0).height) as f32;
                         for i in 0..slices.len() {
-                            let (v0, v1) = (i as f32 * band, ((i + 1) as f32 * band).min(l.h));
+                            let d0 = i as f32 * bh as f32;
+                            let d1 = (d0 + bh as f32).min(img_rows);
+                            // a hair inside the pixel grid survives GPUI's floor/ceil
+                            let sy = (dev_top + d0 + 0.01) / sf;
+                            let sh = (d1 - d0 - 0.02) / sf;
+                            let (v0, v1) = (sy - l.top, sy - l.top + sh);
                             let umax = lim(v0).min(lim(v1)).clamp(0.0, l.w);
                             if umax > 0.0 {
                                 let x = if t.dir > 0 { spine } else { spine - umax };
-                                strips.push((i, x, v0, umax, v1 - v0));
+                                strips.push((i, x, v0, umax, sh));
                             }
                         }
                     }
