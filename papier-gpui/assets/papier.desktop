@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Papier
+Comment=reMarkable papier — notebooks and books with pi, on the pen touchscreen
+Exec=papier
+Icon=accessories-text-editor
+Terminal=false
+Categories=Office;Graphics;
+StartupWMClass=papier
