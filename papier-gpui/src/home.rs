@@ -133,7 +133,10 @@ impl Papier {
         let folders = self.folders();
         let inner = (vw - 2.0 * SIDE_PAD).max(CELL_W);
         let cols = ((inner / CELL_W).floor() as usize).max(1);
-        let cell_w = inner / cols as f32;
+        // Leave slack: cells that exactly fill the row overflow by a hair
+        // once layout rounds them to device pixels, and the last one wraps
+        // (fullscreen showed 4 per row where a smaller window showed 5).
+        let cell_w = (inner / cols as f32).floor() - 1.0;
 
         let title: AnyElement = match &self.folder {
             None => div().child("My files").into_any_element(),
