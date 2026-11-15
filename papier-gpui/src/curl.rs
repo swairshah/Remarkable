@@ -358,7 +358,9 @@ impl Curl<'_> {
             return self.sample(views, false, (u, v), 1.0 - 0.12 * near * near, self.gpu_band <= 0.0);
         }
         // 5. the page beneath: the leaf's shadow
-        if d >= 0.0 && u <= self.w && u >= -self.w {
+        // the shadow falls only on the page the leaf is lifting off (u ≥ 0),
+        // never across the spine onto the facing page
+        if d >= 0.0 && u <= self.w && u >= 0.0 {
             if self.gpu_shading {
                 return [0, 0, 0, 0];
             }
