@@ -175,7 +175,10 @@ impl Curl<'_> {
         }
         let n = (vx / len, vy / len);
         // the cylinder shrinks as the leaf nears flat on the far page
-        let r = (self.w * 0.09).min(len / std::f32::consts::PI * 0.9).max(2.0);
+        // ...and flattens away as the leaf lands, so the last frame is the
+        // page lying flat (no leftover roll at the spine)
+        let land = self.land.clamp(0.0, 1.0);
+        let r = ((self.w * 0.09).min(len / std::f32::consts::PI * 0.9) * (1.0 - land)).max(0.5);
         let pi_r = std::f32::consts::PI * r;
         let mid = ((o.0 + f.0) / 2.0, (o.1 + f.1) / 2.0);
         Some(((mid.0 - n.0 * pi_r / 2.0, mid.1 - n.1 * pi_r / 2.0), n, r))
@@ -194,6 +197,11 @@ impl Curl<'_> {
 
     fn rows(&self, out: &mut [u8], ow: usize, n: (f32, f32), fold: (f32, f32), r: f32) {
         let views = (self.front.and_then(Src::view), self.back.and_then(Src::view));
+        // how far the leaf stands off the paper: 0 at rest, 1 mid-turn
+        let o = self.origin;
+        let f = constrain(o, self.finger, self.h);
+        let travel = ((o.0 - f.0).hypot(o.1 - f.1) / (2.0 * self.w)).clamp(0.0, 1.0);
+        let lift = (std::f32::consts::PI * travel).sin() * (1.0 - self.land.clamp(0.0, 1.0));
         let threads = std::env::var("CURL_THREADS").ok().and_then(|t| t.parse().ok()).unwrap_or(6usize);
         let oh = out.len() / (ow * 4);
         let chunk = oh.div_ceil(threads).max(1);
@@ -206,7 +214,7 @@ impl Curl<'_> {
                             let x = i as f32 + 0.5;
                             // spread x -> leaf frame u (left half of the output is u < 0 for forward)
                             let u = if self.forward { x - self.w } else { self.w - x };
-                            let px = self.pixel(u, y, n, fold, r, views);
+                            let px = self.pixel(u, y, n, fold, r, views, lift);
                             row[i * 4..i * 4 + 4].copy_from_slice(&px);
                         }
                     }
@@ -245,7 +253,7 @@ impl Curl<'_> {
     }
 
     #[inline]
-    fn pixel(&self, u: f32, v: f32, n: (f32, f32), fold: (f32, f32), r: f32, views: (Option<View>, Option<View>)) -> [u8; 4] {
+    fn pixel(&self, u: f32, v: f32, n: (f32, f32), fold: (f32, f32), r: f32, views: (Option<View>, Option<View>), lift: f32) -> [u8; 4] {
         let d = (u - fold.0) * n.0 + (v - fold.1) * n.1;
         let pi_r = std::f32::consts::PI * r;
         let src = |s: f32| (u + n.0 * (s - d), v + n.1 * (s - d));
@@ -271,12 +279,12 @@ impl Curl<'_> {
             // 2. over the top of the cylinder: the back, rolling into view
             let s = src(r * (std::f32::consts::PI - a));
             if self.inside(s) {
-                return self.sample(views, true, s, back_tone * (0.78 + 0.22 * (d / r)), false);
+                return self.sample(views, true, s, back_tone * (0.90 + 0.10 * (d / r)), false);
             }
             // 3. the front, curving away from the light
             let s = src(r * a);
             if self.inside(s) {
-                return self.sample(views, false, s, 0.62 + 0.38 * a.cos(), false);
+                return self.sample(views, false, s, 0.80 + 0.20 * a.cos(), false);
             }
         }
         // 4. still flat on the paper (the GPU draws it, beyond the band)
@@ -289,8 +297,8 @@ impl Curl<'_> {
         }
         // 5. the page beneath: the leaf's shadow
         if d >= 0.0 && u <= self.w && u >= -self.w {
-            let k = 1.0 - ((d - r * 0.3) / (self.w * 0.18)).clamp(0.0, 1.0);
-            let a = (if self.dark { 0.55 } else { 0.32 }) * k * k;
+            let k = 1.0 - ((d - r * 0.3) / (self.w * 0.14)).clamp(0.0, 1.0);
+            let a = (if self.dark { 0.40 } else { 0.20 }) * k * k * lift;
             return [0, 0, 0, (a * 255.0) as u8];
         }
         [0, 0, 0, 0]
