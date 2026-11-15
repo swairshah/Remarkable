@@ -295,6 +295,9 @@ pub struct DocView {
     leaf_size: (f32, f32),
     /// The curl rendered for the last frame (retired when replaced).
     curl_img: Option<Arc<RenderImage>>,
+    /// The turning page cut into thin horizontal slices (see TurnPaint):
+    /// keyed by the page image they came from.
+    slices: Option<(usize, Vec<Arc<RenderImage>>, u32)>,
     /// The page index last acted on (loads, pi, saved position): a turn,
     /// a scroll or a jump all funnel through the comparison with this.
     reported: Option<usize>,
@@ -334,6 +337,7 @@ impl DocView {
             turn_start_y: 0.0,
             leaf_size: (400.0, 530.0),
             curl_img: None,
+            slices: None,
             pitch: 0.0,
         }
     }
@@ -354,7 +358,35 @@ impl DocView {
     pub fn into_images(self) -> Vec<Arc<RenderImage>> {
         let mut v: Vec<Arc<RenderImage>> = self.pages.into_values().filter_map(|m| m.raster.and_then(|r| r.image)).collect();
         v.extend(self.curl_img);
+        v.extend(self.slices.into_iter().flat_map(|(_, s, _)| s));
         v
+    }
+
+    /// Slices of `img`, `bh` device rows each, cut once per page image.
+    /// Returns them and any slices they replace (to retire).
+    fn slices_for(&mut self, img: &Arc<RenderImage>, bh: u32) -> (Vec<Arc<RenderImage>>, Vec<Arc<RenderImage>>) {
+        let key = Arc::as_ptr(img) as usize;
+        if let Some((k, s, b)) = &self.slices {
+            if *k == key && *b == bh {
+                return (s.clone(), Vec::new());
+            }
+        }
+        let sz = img.size(0);
+        let (w, h) = (i32::from(sz.width) as u32, i32::from(sz.height) as u32);
+        let bytes = img.as_bytes(0).unwrap_or(&[]);
+        let mut out = Vec::new();
+        let mut y = 0;
+        while y < h && bytes.len() >= (w * h * 4) as usize {
+            let rows = bh.min(h - y);
+            let a = (y * w * 4) as usize;
+            let data = bytes[a..a + (rows * w * 4) as usize].to_vec();
+            if let Some(buf) = image::RgbaImage::from_raw(w, rows, data) {
+                out.push(Arc::new(RenderImage::new(vec![image::Frame::new(buf)])));
+            }
+            y += rows;
+        }
+        let old = self.slices.replace((key, out.clone(), bh)).map(|(_, s, _)| s).unwrap_or_default();
+        (out, old)
     }
 
     // ------------------------------------------------------------ layout
@@ -1624,6 +1656,17 @@ impl Papier {
     }
 
     pub fn render_doc(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t_frame = Instant::now();
+        let el = self.render_doc_inner(window, cx);
+        if std::env::var_os("PAPIER_TRACE").is_some() && self.dv().is_some_and(|d| d.turn.is_some()) {
+            thread_local!(static LAST: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) });
+            let gap = LAST.with(|l| l.replace(Some(Instant::now()))).map(|t| t.elapsed());
+            eprintln!("turn frame: build {:?} gap {:?}", t_frame.elapsed(), gap);
+        }
+        el
+    }
+
+    fn render_doc_inner(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let vp = self.viewport;
         let sf = window.scale_factor();
         let Some(dv) = self.dv() else { return div().into_any_element() };
@@ -1672,9 +1715,12 @@ impl Papier {
                 // along the fold; the CPU buffer holds only what warps — the
                 // roll, the back of the leaf, the shadow — plus a band before
                 // the fold that hides the strips' staircase.
+                // Slices are cut once per turn; each strip draws only its own
+                // slice, so the GPU shades about one page of pixels per frame
+                // (clipping a full-page quad per strip shaded hundreds).
                 const STRIP: f32 = 3.0;
                 let front_img = front.clone();
-                let (fs, bs) = (front.map(crate::curl::Src::new), back.map(crate::curl::Src::new));
+                let (fs, bs) = (front.clone().map(crate::curl::Src::new), back.map(crate::curl::Src::new));
                 let [pr, pg, pb] = if crate::theme::dark() { crate::theme::dark_paper(&self.settings.paper) } else { paper(&self.settings.paper) };
                 let mut curl = crate::curl::Curl {
                     w: l.w,
@@ -1689,34 +1735,48 @@ impl Papier {
                     gpu_band: 0.0,
                 };
                 let geo = curl.geometry();
-                // strips need the fold not to be near-horizontal
-                let mut strips: Vec<(f32, f32, f32, f32)> = Vec::new();
-                match geo {
-                    None => strips.push((if t.dir > 0 { spine } else { spine - l.w }, l.top, l.w, l.h)),
-                    Some((fold, n, r)) if n.0 > 0.15 => {
-                        curl.gpu_band = (STRIP * n.1.abs() + 2.0).max(r * 2.0);
-                        let mut v = 0.0;
-                        while v < l.h {
-                            let v1 = (v + STRIP).min(l.h);
-                            // flat front: u < fold.u - (v - fold.v)·n.v / n.u
-                            let lim = |vv: f32| fold.0 - (vv - fold.1) * n.1 / n.0;
-                            let umax = lim(v).min(lim(v1)).clamp(0.0, l.w);
+                let mut strips: Vec<(usize, f32, f32, f32, f32)> = Vec::new();
+                let mut slices = Vec::new();
+                let mut front_full = false;
+                match (geo, &front) {
+                    (None, _) => front_full = true,
+                    // strips need the fold not to be near-horizontal
+                    (Some((fold, n, r)), Some(img)) if n.0 > 0.15 => {
+                        let k = i32::from(img.size(0).height) as f32 / l.h;
+                        let bh = ((STRIP * k).round() as u32).max(2);
+                        let (sl, old) = match self.dv() {
+                            Some(dv) => dv.slices_for(img, bh),
+                            None => (Vec::new(), Vec::new()),
+                        };
+                        self.retired.borrow_mut().extend(old);
+                        slices = sl;
+                        let band = bh as f32 / k;
+                        curl.gpu_band = (band * n.1.abs() + 2.0).max(r * 2.0);
+                        // flat front: u < fold.u - (v - fold.v)·n.v / n.u
+                        let lim = |vv: f32| fold.0 - (vv - fold.1) * n.1 / n.0;
+                        for i in 0..slices.len() {
+                            let (v0, v1) = (i as f32 * band, ((i + 1) as f32 * band).min(l.h));
+                            let umax = lim(v0).min(lim(v1)).clamp(0.0, l.w);
                             if umax > 0.0 {
                                 let x = if t.dir > 0 { spine } else { spine - umax };
-                                strips.push((x, l.top + v, umax, v1 - v));
+                                strips.push((i, x, v0, umax, v1 - v0));
                             }
-                            v = v1;
                         }
                     }
-                    Some(_) => {} // steep fold: the buffer draws the whole leaf
+                    _ => {} // steep fold, or no image yet: the buffer draws the whole leaf
                 }
-                let img = (geo.is_some()).then(|| curl.render_cropped()).flatten().and_then(|(buf, x, y, cw, ch)| {
+                let t_curl = Instant::now();
+                let cropped = (geo.is_some()).then(|| curl.render_cropped()).flatten();
+                if std::env::var_os("PAPIER_TRACE").is_some() {
+                    eprintln!("  curl {:?} crop {:?} strips {}", t_curl.elapsed(), cropped.as_ref().map(|c| (c.3, c.4)), strips.len());
+                }
+                let img = cropped.and_then(|(buf, x, y, cw, ch)| {
                     let frame = image::RgbaImage::from_raw(cw, ch, buf)?;
                     Some((Arc::new(RenderImage::new(vec![image::Frame::new(frame)])), (x as f32, y as f32, cw as f32, ch as f32)))
                 });
                 let front_slot = if t.dir > 0 { spine } else { spine - l.w };
                 let has_right = left + 1 < l.n || t.dir > 0 && left + 3 < l.n;
-                Some(TurnPaint { spine, y: l.top, w: l.w, h: l.h, base_l, base_r, curl: img, has_right, front: front_img, front_slot, strips })
+                Some(TurnPaint { spine, y: l.top, w: l.w, h: l.h, base_l, base_r, curl: img, has_right, front: front_img, front_slot, strips, slices, front_full })
             }
             _ => None,
         };
@@ -2260,7 +2320,12 @@ struct TurnPaint {
     /// The turning leaf's own page, drawn by the GPU inside `strips`.
     front: Option<Arc<RenderImage>>,
     front_slot: f32,
-    strips: Vec<(f32, f32, f32, f32)>,
+    /// (slice, x, v, visible width, height): each slice clipped to the part
+    /// of its row that lies flat before the fold.
+    strips: Vec<(usize, f32, f32, f32, f32)>,
+    slices: Vec<Arc<RenderImage>>,
+    /// The leaf lies flat: draw it whole.
+    front_full: bool,
 }
 
 impl TurnPaint {
@@ -2271,9 +2336,15 @@ impl TurnPaint {
             sheet(window, spine, y, w, h, self.base_r.as_ref(), paper_rgb);
         }
         gutter(window, spine, y, w, h, self.has_right);
-        for &(sx, sy, sw, sh) in &self.strips {
-            let mask = gpui::ContentMask { bounds: rect(sx, sy, sw, sh) };
-            window.with_content_mask(Some(mask), |window| sheet(window, self.front_slot, y, w, h, self.front.as_ref(), paper_rgb));
+        if self.front_full {
+            sheet(window, self.front_slot, y, w, h, self.front.as_ref(), paper_rgb);
+        }
+        for &(i, sx, v, sw, sh) in &self.strips {
+            let Some(slice) = self.slices.get(i) else { continue };
+            let mask = gpui::ContentMask { bounds: rect(sx, y + v, sw, sh) };
+            window.with_content_mask(Some(mask), |window| {
+                let _ = window.paint_image(rect(self.front_slot, y + v, w, sh), Corners::default(), slice.clone(), 0, false);
+            });
         }
         if let Some((img, (cx, cy, cw, ch))) = &self.curl {
             let _ = window.paint_image(rect(spine - w + cx, y + cy, *cw, *ch), Corners::default(), img.clone(), 0, false);
