@@ -304,6 +304,11 @@ impl PageRaster {
         Some(PageRaster { w, h, scale, bgra: vec![0; (w * h * 4) as usize], pixmap, paper, print, dark, image: None, dirty: None })
     }
 
+    /// The book page under the ink (for highlighter snapping).
+    pub fn print(&self) -> Option<&Arc<Print>> {
+        self.print.as_ref()
+    }
+
     pub fn same_setup(&self, w: u32, h: u32, paper: [u8; 3], print: &Option<Arc<Print>>, dark: Option<[u8; 3]>) -> bool {
         self.w == w
             && self.h == h
@@ -609,6 +614,23 @@ pub fn place_preview(bytes: &[u8], crop: Option<&[f64]>, margins: Option<&[f64]>
     let ts = Transform::from_translate(ox - sx * k, oy - sy * k).pre_scale(k, k);
     page.draw_pixmap(0, 0, raw.as_ref(), &PixmapPaint { quality: FilterQuality::Bicubic, ..Default::default() }, ts, None);
     Some(Print::segment(page))
+}
+
+impl crate::snap::Ink for Print {
+    fn dark(&self, x: f32, y: f32) -> bool {
+        let (w, h) = (self.pixmap.width() as f32, self.pixmap.height() as f32);
+        let (px, py) = ((x * w / 1404.0) as i64, (y * h / 1872.0) as i64);
+        if px < 0 || py < 0 || px >= w as i64 || py >= h as i64 {
+            return false;
+        }
+        let i = ((py as usize) * (w as usize) + px as usize) * 4;
+        let d = self.pixmap.data();
+        (d[i] as u32 * 299 + d[i + 1] as u32 * 587 + d[i + 2] as u32 * 114) / 1000 < 150
+    }
+
+    fn step(&self) -> f32 {
+        1404.0 / self.pixmap.width() as f32
+    }
 }
 
 /// Decode a book page PNG, ready to be multiplied onto paper.

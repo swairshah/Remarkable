@@ -876,20 +876,38 @@ impl DocView {
                 let id = m.next_id();
                 let mut stroke = live.finish(id);
                 let wash = li.tool == Tool::Highlighter;
+                m.history.checkpoint(li.before);
+                let mut strokes = vec![];
                 if wash {
                     stroke.gray = HL_GRAY;
-                    for p in &mut stroke.points {
-                        p.r = HL_R;
+                    // near printed text: one clean band per line, word to word
+                    let snapped = m.raster.as_ref().and_then(|r| r.print()).and_then(|p| crate::snap::snap(p.as_ref(), &stroke.points));
+                    match snapped {
+                        Some(lines) => {
+                            for (k, points) in lines.into_iter().enumerate() {
+                                let id = if k == 0 { stroke.id } else { m.next_id() };
+                                strokes.push(crate::model::InkStroke { id, gray: HL_GRAY, points });
+                            }
+                        }
+                        None => {
+                            for p in &mut stroke.points {
+                                p.r = HL_R;
+                            }
+                            strokes.push(stroke);
+                        }
                     }
-                }
-                m.history.checkpoint(li.before);
-                if let Some(r) = m.raster.as_mut() {
-                    r.add_mark(Mark { stroke: &stroke, rgb: if wash { 0xb4b4b4 } else { ink::ink_rgb(0) }, wash });
-                }
-                if wash {
-                    m.base.highlights.push(stroke);
                 } else {
-                    m.base.strokes.push(stroke);
+                    strokes.push(stroke);
+                }
+                for stroke in strokes {
+                    if let Some(r) = m.raster.as_mut() {
+                        r.add_mark(Mark { stroke: &stroke, rgb: if wash { 0xb4b4b4 } else { ink::ink_rgb(0) }, wash });
+                    }
+                    if wash {
+                        m.base.highlights.push(stroke);
+                    } else {
+                        m.base.strokes.push(stroke);
+                    }
                 }
                 m.edit_gen += 1;
             }
@@ -1530,6 +1548,9 @@ impl Papier {
         let paper = paper(&self.settings.paper);
         let dark = crate::theme::dark().then(|| crate::theme::dark_paper(&self.settings.paper));
         let pinching = self.dv()?.pinching_at.is_some();
+        // mid-turn the CPU belongs to the curl: no new renders or rebuilds
+        // start (they're done ahead, while the spread is at rest)
+        let turning = self.dv()?.turn.is_some();
         let k = (l.h * sf).min(MAX_RASTER) / l.h;
         let (w, h) = ((l.w * k).round() as u32, (l.h * k).round() as u32);
         let (key, print_url, fallback, pdf) = {
@@ -1547,7 +1568,7 @@ impl Papier {
         };
         // the source PDF at screen resolution when the book has one; the
         // tablet's raster (or the server's preview) until it lands
-        let sharp = pdf.and_then(|(doc, p)| self.pdf_print(&doc, p, w, h, !pinching, cx));
+        let sharp = pdf.and_then(|(doc, p)| self.pdf_print(&doc, p, w, h, !pinching && !turning, cx));
         let print = sharp.or_else(|| print_url.and_then(|u| self.print(&u, fallback, cx)));
         let page_scale = w as f32 / self.dv()?.doc.page_w();
         let doc_id = self.dv()?.doc.id.clone();
@@ -1555,7 +1576,7 @@ impl Papier {
         let dv = self.dv()?;
         let m = dv.pages.get_mut(&key).filter(|m| m.ready)?;
         let stale = m.raster.as_ref().is_none_or(|r| !r.same_setup(w, h, paper, &print, dark));
-        if (stale || m.full_dirty) && !m.building && !(pinching && m.raster.is_some()) {
+        if (stale || m.full_dirty) && !m.building && !((pinching || turning) && m.raster.is_some()) {
             m.building = true;
             let generation = m.edit_gen;
             let base = m.base.clone();
@@ -1713,16 +1734,23 @@ impl Papier {
         let loading: Vec<usize> = visible.clone().filter(|i| !dv.pages.get(&dv.seq[*i].ink_key()).is_some_and(|m| m.ready)).collect();
 
         // live stroke, as a screen-space polygon on its page
-        let live_poly: Option<(Vec<(f32, f32)>, u32, f32)> = dv.live.as_ref().and_then(|li| {
+        // live stroke(s), as screen-space polygons on their page; a
+        // highlighter near text previews the snapped bands as you draw
+        let live_poly: Option<(Vec<Vec<(f32, f32)>>, u32, f32)> = dv.live.as_ref().and_then(|li| {
             let lv = li.live.as_ref()?;
-            let (pts, rgb, a) = if li.tool == Tool::Highlighter {
-                (lv.points.iter().map(|p| crate::model::InkPoint { r: HL_R, ..*p }).collect::<Vec<_>>(), 0x9a9a9a, 0.45)
-            } else {
-                (lv.points.clone(), ink::ink_rgb(0), 1.0)
-            };
             let (pxx, py) = (l.page_x(li.page), l.page_y(li.page));
-            let poly = ink::outline(&pts, 0.5 / l.s);
-            Some((poly.into_iter().map(|(x, y)| (pxx + x * l.s, py + y * l.s)).collect(), rgb, a))
+            let to_screen = |pts: &[crate::model::InkPoint]| -> Vec<(f32, f32)> {
+                ink::outline(pts, 0.5 / l.s).into_iter().map(|(x, y)| (pxx + x * l.s, py + y * l.s)).collect()
+            };
+            if li.tool == Tool::Highlighter {
+                let print = dv.pages.get(&li.key).and_then(|m| m.raster.as_ref()).and_then(|r| r.print());
+                if let Some(lines) = print.and_then(|p| crate::snap::snap(p.as_ref(), &lv.points)) {
+                    return Some((lines.iter().map(|ln| to_screen(ln)).collect(), 0x9a9a9a, 0.45));
+                }
+                let pts: Vec<_> = lv.points.iter().map(|p| crate::model::InkPoint { r: HL_R, ..*p }).collect();
+                return Some((vec![to_screen(&pts)], 0x9a9a9a, 0.45));
+            }
+            Some((vec![to_screen(&lv.points)], ink::ink_rgb(0), 1.0))
         });
 
         // pi's typeset text, and patches still drawing themselves in
@@ -1787,8 +1815,10 @@ impl Papier {
                     let line = ts.shape_line(SharedString::from(text.clone()), px(*sz), &[run], None);
                     let _ = line.paint(point(px(*x), px(*y - ascent)), px(ascent + descent), window, cx);
                 }
-                if let Some((poly, rgb, a)) = &live_poly {
-                    fill(window, poly, *rgb, *a);
+                if let Some((polys, rgb, a)) = &live_poly {
+                    for poly in polys {
+                        fill(window, poly, *rgb, *a);
+                    }
                 }
                 if let Some(((x, y), r)) = eraser_ring {
                     ring(window, x, y, r, 0x555555);

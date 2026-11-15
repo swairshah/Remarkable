@@ -64,7 +64,9 @@ pub fn render(pdf: &Path, page0: u32, size: (f32, f32), crop: Option<&[f64]>, ma
     let (x, y) = ((c[0] * rw).round(), (c[1] * rh).round());
     let (w, h) = (((c[2] - c[0]) * rw).round().max(1.0), ((c[3] - c[1]) * rh).round().max(1.0));
     let n = (page0 + 1).to_string();
-    let out = Command::new("pdftoppm")
+    // low priority: rendering ahead must never steal frames from the reader
+    let out = Command::new("nice")
+        .args(["-n", "15", "pdftoppm"])
         .args(["-f", &n, "-l", &n, "-aa", "yes", "-aaVector", "yes"])
         .args(["-scale-to-x", &(rw as u32).to_string(), "-scale-to-y", &(rh as u32).to_string()])
         .args(["-x", &(x as u32).to_string(), "-y", &(y as u32).to_string(), "-W", &(w as u32).to_string(), "-H", &(h as u32).to_string()])

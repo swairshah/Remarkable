@@ -10,6 +10,7 @@
 //!   ink       outlines, page raster, eraser, undo
 //!   curl      the two-page view's page curl (CPU-rendered cylinder)
 //!   pdf       book pages from the source PDF at screen resolution (poppler)
+//!   snap      highlighter snapping to text lines, read off the page image
 //!   input     raw evdev pen + touch (GPUI has neither on Wayland)
 //!   geometry  where our window sits, so ink lands under the nib
 //!   app       the root view: input routing, gestures, sync, dialogs
@@ -27,6 +28,7 @@ mod ink;
 mod input;
 mod model;
 mod pdf;
+mod snap;
 mod status;
 mod store;
 mod theme;
