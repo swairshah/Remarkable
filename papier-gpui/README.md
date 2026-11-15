@@ -9,7 +9,7 @@ everything in the web app is here and what you write here reaches the rest.
 ```
 make run          # release build, windowed
 make fullscreen   # the tablet feel (F11 toggles too)
-make install      # ~/.local/bin/papier + a launcher entry
+make install      # symlinks ~/.local/bin/papier + launcher entry + icon
 make test
 ```
 
