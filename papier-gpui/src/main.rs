@@ -9,6 +9,7 @@
 //!   store     settings, offline caches, pending/unsent ink
 //!   ink       outlines, page raster, eraser, undo
 //!   curl      the two-page view's page curl (CPU-rendered cylinder)
+//!   pdf       book pages from the source PDF at screen resolution (poppler)
 //!   input     raw evdev pen + touch (GPUI has neither on Wayland)
 //!   geometry  where our window sits, so ink lands under the nib
 //!   app       the root view: input routing, gestures, sync, dialogs
@@ -25,6 +26,7 @@ mod home;
 mod ink;
 mod input;
 mod model;
+mod pdf;
 mod status;
 mod store;
 mod theme;

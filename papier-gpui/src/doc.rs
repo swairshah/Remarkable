@@ -1525,22 +1525,26 @@ impl Papier {
     fn page_image(&mut self, index: usize, l: &Layout, sf: f32, cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
         let paper = paper(&self.settings.paper);
         let dark = crate::theme::dark().then(|| crate::theme::dark_paper(&self.settings.paper));
-        let (key, print_url, fallback) = {
-            let Screen::Doc(dv) = &self.screen else { return None };
-            let e = *dv.seq.get(index)?;
-            let (url, fallback) = match e {
-                SeqEntry::Pdf(p) => (
-                    Some(self.client.page_url(&dv.doc, p)),
-                    dv.doc.has_source.then(|| (self.client.preview_url(&dv.doc, p), dv.doc.meta.crop.clone(), dv.doc.meta.margins.clone())),
-                ),
-                SeqEntry::Note(_) => (None, None),
-            };
-            (e.ink_key(), url, fallback)
-        };
-        let print = print_url.and_then(|u| self.print(&u, fallback, cx));
         let pinching = self.dv()?.pinching_at.is_some();
         let k = (l.h * sf).min(MAX_RASTER) / l.h;
         let (w, h) = ((l.w * k).round() as u32, (l.h * k).round() as u32);
+        let (key, print_url, fallback, pdf) = {
+            let Screen::Doc(dv) = &self.screen else { return None };
+            let e = *dv.seq.get(index)?;
+            let (url, fallback, pdf) = match e {
+                SeqEntry::Pdf(p) => (
+                    Some(self.client.page_url(&dv.doc, p)),
+                    dv.doc.has_source.then(|| (self.client.preview_url(&dv.doc, p), dv.doc.meta.crop.clone(), dv.doc.meta.margins.clone())),
+                    dv.doc.has_source.then(|| (dv.doc.clone(), p)),
+                ),
+                SeqEntry::Note(_) => (None, None, None),
+            };
+            (e.ink_key(), url, fallback, pdf)
+        };
+        // the source PDF at screen resolution when the book has one; the
+        // tablet's raster (or the server's preview) until it lands
+        let sharp = pdf.and_then(|(doc, p)| self.pdf_print(&doc, p, w, h, !pinching, cx));
+        let print = sharp.or_else(|| print_url.and_then(|u| self.print(&u, fallback, cx)));
         let page_scale = w as f32 / self.dv()?.doc.page_w();
         let doc_id = self.dv()?.doc.id.clone();
         let mut retired = Vec::new();

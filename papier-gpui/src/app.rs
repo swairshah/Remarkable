@@ -183,6 +183,11 @@ pub struct Papier {
     refresh_id: u64,
     pub covers: HashMap<String, Load<Arc<RenderImage>>>,
     pub prints: HashMap<String, Load<Arc<ink::Print>>>,
+    /// Source PDFs on disk with their page sizes, by doc id.
+    pdfs: HashMap<String, Load<Arc<(std::path::PathBuf, Vec<(f32, f32)>)>>>,
+    /// Pages rendered from them: (doc, pdf page, pixel width).
+    pdf_prints: HashMap<(String, u32, u32), Load<Arc<ink::Print>>>,
+    pdf_order: Vec<(String, u32, u32)>,
     print_order: Vec<String>,
     // views
     pub screen: Screen,
@@ -303,6 +308,9 @@ impl Papier {
             refresh_id: 0,
             covers: HashMap::new(),
             prints: HashMap::new(),
+            pdfs: HashMap::new(),
+            pdf_prints: HashMap::new(),
+            pdf_order: Vec::new(),
             print_order: Vec::new(),
             screen: Screen::Home,
             folder: None,
@@ -520,6 +528,77 @@ impl Papier {
         })
         .detach();
         None
+    }
+
+    /// A book page rendered from its source PDF at `w`×`h` pixels — the
+    /// exact size it's shown, so text is crisp. Until that render lands,
+    /// the nearest size already rendered stands in (None: use the PNG).
+    /// `render: false` (mid-pinch) only looks, so a gesture doesn't spawn a
+    /// render per frame.
+    pub fn pdf_print(&mut self, doc: &Doc, page: u32, w: u32, h: u32, render: bool, cx: &mut Context<Self>) -> Option<Arc<ink::Print>> {
+        let source = match self.pdfs.get(&doc.id) {
+            Some(Load::Ready(src)) => src.clone(),
+            Some(_) => return None,
+            None => {
+                self.pdfs.insert(doc.id.clone(), Load::Loading);
+                let url = self.client.source_pdf_url(doc);
+                let client = self.client.clone();
+                let id = doc.id.clone();
+                let work = bg(cx, move || {
+                    let path = store::asset_path(&url);
+                    if !path.exists() {
+                        let bytes = client.get_bytes(&url).ok().filter(|b| b.starts_with(b"%PDF"))?;
+                        store::store_asset(&url, &bytes);
+                    }
+                    let sizes = crate::pdf::page_sizes(&path)?;
+                    Some(Arc::new((path, sizes)))
+                });
+                cx.spawn_in_window_free(work, move |this, src, _| {
+                    this.pdfs.insert(id, src.map(Load::Ready).unwrap_or(Load::Failed));
+                });
+                return None;
+            }
+        };
+        let key = (doc.id.clone(), page, w);
+        match self.pdf_prints.get(&key) {
+            Some(Load::Ready(p)) => {
+                let p = p.clone();
+                self.pdf_order.retain(|k| *k != key);
+                self.pdf_order.push(key);
+                return Some(p);
+            }
+            Some(_) => {}
+            None if render => {
+                self.pdf_prints.insert(key.clone(), Load::Loading);
+                let size = source.1.get(page as usize).copied().unwrap_or((612.0, 792.0));
+                let (crop, margins) = (doc.meta.crop.clone(), doc.meta.margins.clone());
+                let work = bg(cx, move || {
+                    crate::pdf::render(&source.0, page, size, crop.as_deref(), margins.as_deref(), w, h).map(|px| Arc::new(ink::Print::segment(px)))
+                });
+                let k = key.clone();
+                cx.spawn_in_window_free(work, move |this, print, _| {
+                    this.pdf_prints.insert(k.clone(), print.map(Load::Ready).unwrap_or(Load::Failed));
+                    this.pdf_order.push(k);
+                    // keep the pages around the reader, a few sizes each
+                    while this.pdf_order.len() > 14 {
+                        let old = this.pdf_order.remove(0);
+                        if !this.pdf_order.contains(&old) {
+                            this.pdf_prints.remove(&old);
+                        }
+                    }
+                });
+            }
+            None => {}
+        }
+        // stand-in: the closest width already rendered for this page
+        self.pdf_prints
+            .iter()
+            .filter_map(|((d, p, pw), l)| match l {
+                Load::Ready(print) if *d == doc.id && *p == page => Some((pw.abs_diff(w), print.clone())),
+                _ => None,
+            })
+            .min_by_key(|(d, _)| *d)
+            .map(|(_, p)| p)
     }
 
     // ---------------------------------------------------------- navigation

@@ -112,6 +112,11 @@ impl Client {
         format!("{}/papier/api/preview?id={}&page={pdf_page}&v={}", self.root, enc(&doc.id), doc.src_version.as_deref().unwrap_or(""))
     }
 
+    /// The book's original PDF (what the web viewer renders with PDF.js).
+    pub fn source_pdf_url(&self, doc: &Doc) -> String {
+        format!("{}/papier/api/source-pdf?id={}&v={}", self.root, enc(&doc.id), doc.src_version.as_deref().unwrap_or(""))
+    }
+
     pub fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
         body(agent().get(url).call().map_err(describe)?)
     }

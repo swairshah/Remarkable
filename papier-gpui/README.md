@@ -98,6 +98,18 @@ mid-tone or ink cells → connected boxes → merged → tightened to the
 exact pixel and grown over a scan's plate), so every figure stays one
 clean rectangle.
 
+## Book pages from the PDF
+
+When a book has its source PDF on the server (as the web viewer uses with
+PDF.js), each page is rendered locally with poppler's `pdftoppm` at exactly
+the size it's shown, and re-rendered after a zoom settles: vector text,
+crisp at any size, in both views and through the page curl. Pages are laid
+onto the 1404×1872 papier page exactly as mkbook does (crop inside a 30px
+border, or the page inside its margins), so tablet ink lines up. The
+tablet's pre-rendered PNG shows instantly until the sharp render lands,
+and is the fallback for books without a source PDF. Needs `poppler`
+(`pdftoppm`, `pdfinfo`).
+
 ## Rendering
 
 Committed ink is composited with the paper tone and the book raster into

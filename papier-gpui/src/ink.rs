@@ -439,9 +439,11 @@ impl Print {
     /// smoothed, connected cells become boxes, boxes that touch or nearly
     /// touch merge (a sparse engraving is one figure), and each box edge is
     /// tightened to the exact pixel where the picture's content starts.
-    fn segment(pixmap: Pixmap) -> Print {
+    pub(crate) fn segment(pixmap: Pixmap) -> Print {
         let (w, h) = (pixmap.width(), pixmap.height());
-        let (cols, rows) = (w.div_ceil(CELL) as usize, h.div_ceil(CELL) as usize);
+        // cells keep the same size on the page at any render resolution
+        let cell = ((CELL as f32 * w as f32 / 1404.0).round() as u32).max(8);
+        let (cols, rows) = (w.div_ceil(cell) as usize, h.div_ceil(cell) as usize);
         let data = pixmap.data();
         let luma_at = |x: u32, y: u32| {
             let i = ((y * w + x) * 4) as usize;
@@ -451,8 +453,8 @@ impl Print {
         for r in 0..rows {
             for c in 0..cols {
                 let (mut mid, mut ink, mut n) = (0u32, 0u32, 0u32);
-                for y in (r as u32 * CELL)..((r as u32 + 1) * CELL).min(h) {
-                    for x in (c as u32 * CELL)..((c as u32 + 1) * CELL).min(w) {
+                for y in (r as u32 * cell)..((r as u32 + 1) * cell).min(h) {
+                    for x in (c as u32 * cell)..((c as u32 + 1) * cell).min(w) {
                         let i = ((y * w + x) * 4) as usize;
                         let (pr, pg, pb) = (data[i] as i32, data[i + 1] as i32, data[i + 2] as i32);
                         let l = (pr * 299 + pg * 587 + pb * 114) / 1000;
@@ -531,10 +533,10 @@ impl Print {
                 continue; // a stray dense glyph cluster, not a figure
             }
             // tighten to content pixels, searching one cell beyond the box
-            let x0 = (b[0].saturating_sub(1) as u32) * CELL;
-            let y0 = (b[1].saturating_sub(1) as u32) * CELL;
-            let x1 = ((b[2] as u32 + 2) * CELL).min(w);
-            let y1 = ((b[3] as u32 + 2) * CELL).min(h);
+            let x0 = (b[0].saturating_sub(1) as u32) * cell;
+            let y0 = (b[1].saturating_sub(1) as u32) * cell;
+            let x1 = ((b[2] as u32 + 2) * cell).min(w);
+            let y1 = ((b[3] as u32 + 2) * cell).min(h);
             let mut t = [u32::MAX, u32::MAX, 0, 0];
             for y in (y0..y1).step_by(2) {
                 for x in (x0..x1).step_by(2) {
@@ -560,7 +562,7 @@ impl Print {
                 }
                 n > 0 && hit * 10 >= n * 7
             };
-            let reach = 8 * CELL;
+            let reach = 8 * cell;
             let (ox0, oy0, ox1, oy1) = (t[0], t[1], t[2], t[3]);
             while t[0] >= 2 && ox0 - t[0] < reach && off_paper(t[0] - 2, t[1], t[0], t[3]) {
                 t[0] -= 2;

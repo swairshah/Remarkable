@@ -144,7 +144,7 @@ pub fn load_library(server: &str) -> Option<Snapshot> {
 // ------------------------------------------------------------ asset cache
 
 /// Versioned URLs (covers, page rasters) are immutable: cache by URL.
-fn asset_path(url: &str) -> PathBuf {
+pub fn asset_path(url: &str) -> PathBuf {
     cache_dir().join("assets").join(hash(url))
 }
 
