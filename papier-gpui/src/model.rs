@@ -299,9 +299,10 @@ impl InkPage {
             "patches": self.patches.iter().map(patch_json).collect::<Vec<_>>(),
         });
         let obj = v.as_object_mut().unwrap();
-        if !self.highlights.is_empty() {
-            obj.insert("highlights".into(), Value::Array(self.highlights.iter().map(stroke_json).collect()));
-        }
+        // Always present, even empty: the server keeps the stored highlights
+        // when a write has no `highlights` key (a client that doesn't know
+        // the layer), so leaving it out would resurrect erased ones.
+        obj.insert("highlights".into(), Value::Array(self.highlights.iter().map(stroke_json).collect()));
         for (k, val) in &self.extra {
             obj.insert(k.clone(), val.clone());
         }
@@ -386,6 +387,13 @@ mod tests {
         assert!(page.extra.contains_key("zz"));
         let again = InkPage::parse(&page.serialized()).unwrap();
         assert_eq!(page, again);
+    }
+
+    #[test]
+    fn erased_highlights_are_sent_as_empty() {
+        let page = InkPage::default();
+        let v: Value = serde_json::from_slice(&page.serialized()).unwrap();
+        assert_eq!(v.get("highlights"), Some(&Value::Array(vec![])));
     }
 
     #[test]
