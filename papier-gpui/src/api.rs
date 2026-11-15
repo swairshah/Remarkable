@@ -10,11 +10,26 @@ use serde::Deserialize;
 
 use crate::model::{Doc, DocState, InkPage, InkPatch, Library, patch_json};
 
+/// When the server last failed to answer (connection refused, no route,
+/// timeout): until then + OFFLINE_FOR, requests fail at once and callers
+/// use their caches instead of each waiting out a timeout. The library
+/// sync ignores this — it's the probe that notices we're back.
+static OFFLINE_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const OFFLINE_FOR: u64 = 10_000;
+
+pub fn offline() -> bool {
+    crate::store::now_ms() < OFFLINE_UNTIL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn guard() -> Result<()> {
+    if offline() { Err(anyhow!("offline")) } else { Ok(()) }
+}
+
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(6))
+            .timeout_connect(Duration::from_secs(3))
             .timeout(Duration::from_secs(25))
             .user_agent("papier-gpui")
             .build()
@@ -91,6 +106,7 @@ impl Client {
         if resp.status() == 304 {
             return Ok(Fetched::NotModified);
         }
+        OFFLINE_UNTIL.store(0, std::sync::atomic::Ordering::Relaxed);
         let tag = resp.header("ETag").map(str::to_owned);
         let lib: Library = serde_json::from_slice(&body(resp)?)?;
         Ok(Fetched::Fresh(lib, tag))
@@ -118,6 +134,7 @@ impl Client {
     }
 
     pub fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        guard()?;
         body(agent().get(url).call().map_err(describe)?)
     }
 
@@ -125,6 +142,7 @@ impl Client {
     /// and cloud-pi writes land, falling back to the tablet mirror).
     pub fn fetch_ink(&self, doc_id: &str, key: &str) -> Result<Option<InkPage>> {
         let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+        guard()?;
         let url = self.api(&format!("/ink?id={}&file={}.json&t={t}", enc(doc_id), enc(key)));
         match agent().get(&url).set("Cache-Control", "no-cache").call() {
             Ok(resp) => Ok(InkPage::parse(&body(resp)?)),
@@ -134,6 +152,7 @@ impl Client {
     }
 
     fn post(&self, path: &str, data: &[u8]) -> Result<Vec<u8>> {
+        guard()?;
         let resp = agent().post(&self.api(path)).set("Content-Type", "application/json").send_bytes(data).map_err(describe)?;
         body(resp)
     }
@@ -171,6 +190,7 @@ impl Client {
 
     /// The remote pi session service. GET for events, POST for the rest.
     pub fn pi(&self, path_and_query: &str, post: bool) -> Result<PiState> {
+        guard()?;
         let url = self.api(&format!("/pi/{path_and_query}"));
         let req = if post { agent().post(&url) } else { agent().get(&url) }.timeout(Duration::from_secs(15));
         let resp = if post { req.send_bytes(b"") } else { req.call() }.map_err(describe)?;
@@ -193,6 +213,9 @@ pub fn pi_query(doc_id: &str) -> String {
 }
 
 fn describe(e: ureq::Error) -> anyhow::Error {
+    if let ureq::Error::Transport(_) = &e {
+        OFFLINE_UNTIL.store(crate::store::now_ms() + OFFLINE_FOR, std::sync::atomic::Ordering::Relaxed);
+    }
     match e {
         ureq::Error::Status(code, resp) => {
             let text = resp.into_string().unwrap_or_default();

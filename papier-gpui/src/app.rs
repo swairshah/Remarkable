@@ -224,8 +224,23 @@ pub struct Papier {
     _loops: Vec<Task<()>>,
 }
 
+/// CPU work (rasters, PDF renders) on GPUI's background pool.
 pub fn bg<T: Send + 'static>(cx: &mut App, work: impl FnOnce() -> T + Send + 'static) -> Task<T> {
     cx.background_executor().spawn(async move { work() })
+}
+
+/// Network work on its own thread: a request stuck waiting on a dead
+/// connection must never hold a pool thread that renders pages.
+pub fn net<T: Send + 'static>(cx: &mut App, work: impl FnOnce() -> T + Send + 'static) -> Task<T> {
+    net_on(cx.background_executor(), work)
+}
+
+pub fn net_on<T: Send + 'static>(ex: &gpui::BackgroundExecutor, work: impl FnOnce() -> T + Send + 'static) -> Task<T> {
+    let (tx, rx) = futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    ex.spawn(async move { rx.await.expect("network thread") })
 }
 
 impl Papier {
@@ -377,7 +392,7 @@ impl Papier {
         self.loading = self.docs.is_empty();
         let client = self.client.clone();
         let etag = self.etag.clone();
-        let work = bg(cx, move || {
+        let work = net(cx, move || {
             let r = client.library(etag.as_deref());
             // Offline writes waiting for the server go out on a good sync.
             if r.is_ok() {
@@ -445,7 +460,7 @@ impl Papier {
         self.covers.insert(url.clone(), Load::Loading);
         let client = self.client.clone();
         let fetch_url = url.clone();
-        let work = bg(cx, move || {
+        let work = net(cx, move || {
             let bytes = store::cached_asset(&fetch_url).or_else(|| {
                 let b = client.get_bytes(&fetch_url).ok()?;
                 store::store_asset(&fetch_url, &b);
@@ -483,7 +498,7 @@ impl Papier {
         self.prints.insert(url.to_owned(), Load::Loading);
         let client = self.client.clone();
         let fetch_url = url.to_owned();
-        let work = bg(cx, move || {
+        let work = net(cx, move || {
             let fetch = |u: &str| {
                 store::cached_asset(u).or_else(|| {
                     let b = client.get_bytes(u).ok()?;
@@ -544,7 +559,7 @@ impl Papier {
                 let url = self.client.source_pdf_url(doc);
                 let client = self.client.clone();
                 let id = doc.id.clone();
-                let work = bg(cx, move || {
+                let work = net(cx, move || {
                     let path = store::asset_path(&url);
                     if !path.exists() {
                         let bytes = client.get_bytes(&url).ok().filter(|b| b.starts_with(b"%PDF"))?;
@@ -553,8 +568,22 @@ impl Papier {
                     let sizes = crate::pdf::page_sizes(&path)?;
                     Some(Arc::new((path, sizes)))
                 });
-                cx.spawn_in_window_free(work, move |this, src, _| {
-                    this.pdfs.insert(id, src.map(Load::Ready).unwrap_or(Load::Failed));
+                cx.spawn_in_window_free(work, move |this, src, cx| {
+                    let failed = src.is_none();
+                    this.pdfs.insert(id.clone(), src.map(Load::Ready).unwrap_or(Load::Failed));
+                    if failed {
+                        // offline, probably: try again in a while
+                        cx.spawn(async move |this, cx| {
+                            Timer::after(Duration::from_secs(20)).await;
+                            let _ = this.update(cx, |this, cx| {
+                                if matches!(this.pdfs.get(&id), Some(Load::Failed)) {
+                                    this.pdfs.remove(&id);
+                                    cx.notify();
+                                }
+                            });
+                        })
+                        .detach();
+                    }
                 });
                 return None;
             }
@@ -654,7 +683,7 @@ impl Papier {
 
     pub fn create_notebook(&mut self, title: String, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        let work = bg(cx, move || client.create_notebook(&title));
+        let work = net(cx, move || client.create_notebook(&title));
         cx.spawn_in_window_free(work, |this, result, cx| match result {
             Ok(_) => {
                 this.toast("Notebook created");
@@ -668,7 +697,7 @@ impl Papier {
     pub fn delete_doc(&mut self, id: String, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let doc_id = id.clone();
-        let work = bg(cx, move || client.delete_document(&doc_id));
+        let work = net(cx, move || client.delete_document(&doc_id));
         cx.spawn_in_window_free(work, move |this, result, cx| match result {
             Ok(()) => {
                 this.docs.retain(|d| d.id != id);
@@ -1315,7 +1344,7 @@ impl Papier {
     }
 
     pub fn test_server(&mut self, server: String, cx: &mut Context<Self>) {
-        let work = bg(cx, move || crate::api::check(&server));
+        let work = net(cx, move || crate::api::check(&server));
         cx.spawn_in_window_free(work, |this, result, _cx| {
             let msg = match result {
                 Ok(n) => format!("Connected — {n} documents"),

@@ -15,7 +15,7 @@ use gpui::{
 
 use crate::{
     api::{PiState, pi_query},
-    app::{Dialog, Papier, Screen, bg},
+    app::{Dialog, Papier, Screen, bg, net},
     assets::icon,
     ink::{self, History, Live, Mark, PI_BLUE, PageRaster, Snap, Width},
     model::{Doc, DocState, HL_GRAY, HL_R, InkPage, SeqEntry},
@@ -293,6 +293,10 @@ pub struct DocView {
     turn_start_y: f32,
     /// The leaf's size at the last layout (for keyboard turns).
     leaf_size: (f32, f32),
+    /// Which page each undoable edit was on, in order: undo/redo follow
+    /// your edits across pages (each page keeps its own snapshots).
+    undo_keys: Vec<String>,
+    redo_keys: Vec<String>,
     /// The curl rendered for the last frame (retired when replaced).
     curl_img: Option<Arc<RenderImage>>,
     /// The turning page cut into thin horizontal slices (see TurnPaint):
@@ -338,6 +342,8 @@ impl DocView {
             leaf_size: (400.0, 530.0),
             curl_img: None,
             slices: None,
+            undo_keys: Vec::new(),
+            redo_keys: Vec::new(),
             pitch: 0.0,
         }
     }
@@ -950,7 +956,17 @@ impl DocView {
                 m.history.checkpoint(li.before);
             }
         }
+        self.edited(&li.key);
         Some(li.key)
+    }
+
+    /// An undoable edit landed on `key`.
+    fn edited(&mut self, key: &str) {
+        self.undo_keys.push(key.to_owned());
+        self.redo_keys.clear();
+        if self.undo_keys.len() > 400 {
+            self.undo_keys.remove(0);
+        }
     }
 
     pub fn ink_cancel(&mut self) {
@@ -965,19 +981,24 @@ impl DocView {
         }
     }
 
+    /// Undo (or redo) the last edit, on whichever page it was made.
     fn undo_redo(&mut self, redo: bool) -> Option<String> {
-        let key = self.key();
-        let m = self.pages.get_mut(&key)?;
-        let cur = m.snap();
-        let snap = if redo { m.history.redo(cur) } else { m.history.undo(cur) }?;
-        (m.base.strokes, m.base.highlights) = snap;
-        m.full_dirty = true;
-        m.edit_gen += 1;
-        Some(key)
+        loop {
+            let key = if redo { self.redo_keys.pop() } else { self.undo_keys.pop() }?;
+            // a page dropped from memory took its snapshots with it: skip
+            let Some(m) = self.pages.get_mut(&key) else { continue };
+            let cur = m.snap();
+            let Some(snap) = (if redo { m.history.redo(cur) } else { m.history.undo(cur) }) else { continue };
+            (m.base.strokes, m.base.highlights) = snap;
+            m.full_dirty = true;
+            m.edit_gen += 1;
+            if redo { self.undo_keys.push(key.clone()) } else { self.redo_keys.push(key.clone()) }
+            return Some(key);
+        }
     }
 
     fn can_undo(&self) -> (bool, bool) {
-        self.pages.get(&self.key()).map_or((false, false), |m| (m.history.can_undo(), m.history.can_redo()))
+        (!self.undo_keys.is_empty(), !self.redo_keys.is_empty())
     }
 }
 
@@ -993,6 +1014,7 @@ impl Papier {
 
     pub fn doc_opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_pages(cx);
+        self.cache_doc(cx);
         self.start_pi(cx);
         let _ = window;
     }
@@ -1028,18 +1050,44 @@ impl Papier {
     fn load_page(&mut self, key: String, reload: bool, cx: &mut Context<Self>) {
         let Some(dv) = self.dv() else { return };
         let (doc_id, version) = (dv.doc.id.clone(), dv.doc.version.clone());
+        let root = self.client.root.clone();
+        // 1. what's on disk, at once: pending writes, else the last copy
+        //    seen — so a page shows instantly, network or not
+        if !reload {
+            let (d, k) = (doc_id.clone(), key.clone());
+            let local = bg(cx, move || store::pending_ink(&d, &k, &version).or_else(|| store::load_offline_ink(&root, &d, &k)));
+            let (d, k) = (doc_id.clone(), key.clone());
+            cx.spawn(async move |this, cx| {
+                let Some(page) = local.await else { return };
+                let _ = this.update(cx, |this, cx| {
+                    let Some(m) = this.dv().filter(|dv| dv.doc.id == d).and_then(|dv| dv.pages.get_mut(&k)) else { return };
+                    if !m.ready {
+                        m.base = page;
+                        m.full_dirty = true;
+                        m.edit_gen += 1;
+                        m.ready = true;
+                        m.sync = Sync::Clean;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        // 2. the merged truth from the server, when it answers
+        let Some(dv) = self.dv() else { return };
+        let version = dv.doc.version.clone();
         let client = self.client.clone();
-        let k = key.clone();
-        let work = bg(cx, move || {
-            let remote = client.fetch_ink(&doc_id, &k);
+        let (d, k) = (doc_id.clone(), key.clone());
+        let work = net(cx, move || {
+            let remote = client.fetch_ink(&d, &k);
             if let Ok(Some(p)) = &remote {
-                store::save_offline_ink(&client.root, &doc_id, &k, p);
+                store::save_offline_ink(&client.root, &d, &k, p);
             }
             let remote = match remote {
                 Ok(r) => Ok(r),
-                Err(e) => store::load_offline_ink(&client.root, &doc_id, &k).map(Some).ok_or(e),
+                Err(e) => store::load_offline_ink(&client.root, &d, &k).map(Some).ok_or(e),
             };
-            match store::pending_ink(&doc_id, &k, &version) {
+            match store::pending_ink(&d, &k, &version) {
                 Some(mut local) => {
                     if let Ok(Some(r)) = &remote {
                         local.patches = r.patches.clone();
@@ -1050,14 +1098,15 @@ impl Papier {
                 None => remote.map(Option::unwrap_or_default),
             }
         });
-        let doc_id = self.dv().map(|d| d.doc.id.clone()).unwrap_or_default();
         cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
                 let Some(dv) = this.dv().filter(|d| d.doc.id == doc_id) else { return };
                 let busy_here = dv.live.as_ref().is_some_and(|l| l.key == key);
                 let Some(m) = dv.pages.get_mut(&key) else { return };
-                if reload && (busy_here || !matches!(m.sync, Sync::Clean | Sync::Saved)) {
+                // shown from cache already, or being edited: only take the
+                // server's copy over a page nobody has touched
+                if (reload || m.ready) && (busy_here || !matches!(m.sync, Sync::Clean | Sync::Saved)) {
                     return; // the user is mid-edit here: their copy wins, it syncs next
                 }
                 match result {
@@ -1072,13 +1121,54 @@ impl Papier {
                             m.sync = Sync::Clean;
                         }
                     }
-                    Err(e) => {
-                        m.ready = true; // a blank page you can still write on
-                        m.sync = Sync::Error(e.to_string());
+                    // offline with nothing cached: a blank page you can
+                    // still write on (it's kept locally and synced later)
+                    Err(_) if !m.ready => {
+                        m.ready = true;
+                        m.sync = Sync::Clean;
                     }
+                    Err(_) => {}
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// Opened while online: keep the whole document on disk — every page's
+    /// ink and, for books without a source PDF, every page image — so it
+    /// reads fully offline later. (The PDF itself is fetched when its
+    /// first page is shown.)
+    fn cache_doc(&mut self, cx: &mut Context<Self>) {
+        let Some(dv) = self.dv() else { return };
+        let doc = dv.doc.clone();
+        let client = self.client.clone();
+        net(cx, move || {
+            for key in doc.ink.clone().unwrap_or_default() {
+                if crate::api::offline() {
+                    return;
+                }
+                if store::load_offline_ink(&client.root, &doc.id, &key).is_none() {
+                    if let Ok(Some(p)) = client.fetch_ink(&doc.id, &key) {
+                        store::save_offline_ink(&client.root, &doc.id, &key, &p);
+                    }
+                }
+            }
+            if !doc.has_source {
+                for e in &doc.seq {
+                    if let SeqEntry::Pdf(p) = e {
+                        let url = client.page_url(&doc, *p);
+                        if crate::api::offline() {
+                            return;
+                        }
+                        if store::cached_asset(&url).is_none() {
+                            if let Ok(b) = client.get_bytes(&url) {
+                                store::store_asset(&url, &b);
+                            }
+                        }
+                    }
+                }
+            }
         })
         .detach();
     }
@@ -1110,7 +1200,7 @@ impl Papier {
             let client = self.client.clone();
             let k = key.to_owned();
             let d = doc_id.clone();
-            bg(cx, move || {
+            net(cx, move || {
                 for (id, patch) in patches {
                     let _ = match patch {
                         Some(p) => client.replace_patch(&d, &k, &p, next_stroke),
@@ -1150,7 +1240,7 @@ impl Papier {
         // Persist locally inside the background job itself, so a save that
         // outlives the document view (closing, quitting) still lands.
         let readonly = std::env::var_os("PAPIER_READONLY").is_some();
-        let work = bg(cx, move || match if readonly { Ok(()) } else { client.post_ink(&d, &k, &page) } {
+        let work = net(cx, move || match if readonly { Ok(()) } else { client.post_ink(&d, &k, &page) } {
             Ok(()) if readonly => Ok(()),
             Ok(()) => {
                 store::remember_pending(&d, &k, &page, &version, false);
@@ -1237,7 +1327,7 @@ impl Papier {
         let i = dv.index + 1;
         let client = self.client.clone();
         let readonly = std::env::var_os("PAPIER_READONLY").is_some();
-        let work = bg(cx, move || if readonly { Ok(()) } else { client.post_state(&id, &state) });
+        let work = net(cx, move || if readonly { Ok(()) } else { client.post_state(&id, &state) });
         cx.spawn(async move |this, cx| {
             if let Err(e) = work.await {
                 let _ = this.update(cx, |this, cx| {
@@ -1267,6 +1357,7 @@ impl Papier {
             m.history.checkpoint(before);
             m.full_dirty = true;
             m.edit_gen += 1;
+            dv.edited(&key);
             self.page_edited(&key, cx);
         }
     }
@@ -1313,7 +1404,7 @@ impl Papier {
         let Some(id) = self.dv().map(|d| d.doc.id.clone()) else { return };
         let client = self.client.clone();
         let path = path.to_owned();
-        let work = bg(cx, move || client.pi(&path, true).ok());
+        let work = net(cx, move || client.pi(&path, true).ok());
         cx.spawn(async move |this, cx| {
             if let Some(st) = work.await {
                 let _ = this.update(cx, |this, cx| {
@@ -1345,7 +1436,7 @@ impl Papier {
                     break;
                 };
                 let path = format!("events?{}&since={since}", pi_query(&id));
-                let st = bg_async(cx, move || client.pi(&path, false).ok()).await;
+                let st = crate::app::net_on(cx.background_executor(), move || client.pi(&path, false).ok()).await;
                 if let Some(st) = st {
                     let id = id.clone();
                     if this.update(cx, |this, cx| {
@@ -1433,7 +1524,7 @@ impl Papier {
         let doc_id = dv.doc.id.clone();
         let client = self.client.clone();
         let (d, k) = (doc_id.clone(), key.clone());
-        let work = bg(cx, move || client.fetch_ink(&d, &k).ok().flatten());
+        let work = net(cx, move || client.fetch_ink(&d, &k).ok().flatten());
         cx.spawn(async move |this, cx| {
             let Some(remote) = work.await else { return };
             let _ = this.update(cx, |this, cx| {
@@ -2382,6 +2473,3 @@ fn ring(window: &mut Window, x: f32, y: f32, r: f32, rgb: u32) {
     }
 }
 
-fn bg_async<T: Send + 'static>(cx: &mut gpui::AsyncApp, work: impl FnOnce() -> T + Send + 'static) -> Task<T> {
-    cx.background_executor().spawn(async move { work() })
-}
