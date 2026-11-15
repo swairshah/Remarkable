@@ -99,6 +99,12 @@ pub struct Curl<'a> {
     /// strips along the fold); the buffer only covers this band (in leaf
     /// px) of flat paper before the fold, plus everything that warps.
     pub gpu_band: f32,
+    /// 0 → 1 as the leaf settles on the far page: the back's shading fades
+    /// out, so the last frame matches the page at rest (no tone jump).
+    pub land: f32,
+    /// The GPU draws the flat back (only with a vertical fold, where it is a
+    /// pure shift of the next page): leave those pixels transparent.
+    pub gpu_back: bool,
 }
 
 /// Keep the finger where paper can actually reach: the leaf is bound at
@@ -225,7 +231,7 @@ impl Curl<'_> {
             Some(v) => {
                 // map leaf pixels onto the source raster (same size, normally)
                 let (sx, sy) = (x * v.w as f32 / self.w, s.1 * v.h as f32 / self.h);
-                if exact && self.gpu_band <= 0.0 { v.exact(sx, sy) } else { v.smooth(sx, sy) }
+                if exact { v.exact(sx, sy) } else { v.smooth(sx, sy) }
             }
             None => self.paper,
         };
@@ -243,14 +249,21 @@ impl Curl<'_> {
         let d = (u - fold.0) * n.0 + (v - fold.1) * n.1;
         let pi_r = std::f32::consts::PI * r;
         let src = |s: f32| (u + n.0 * (s - d), v + n.1 * (s - d));
-        let back_tone = if self.dark { 0.86 } else { 0.94 };
+        let land = self.land.clamp(0.0, 1.0);
+        let back_tone = (if self.dark { 0.86 } else { 0.94 }) * (1.0 - land) + land;
+        // a near-vertical fold makes the flat back a pure horizontal shift of
+        // the next page: copy it exactly, as sharp as the page at rest
+        let straight = n.1.abs() < 0.03;
         // 1. the far part, lying flat face down
         if d < 0.0 {
             let s = src(pi_r - d);
             if pi_r - d > pi_r && self.inside(s) {
+                if self.gpu_back {
+                    return [0, 0, 0, 0];
+                }
                 // a little darker right at the fold
-                let near = (1.0 + d / (r * 1.5)).clamp(0.0, 1.0);
-                return self.sample(views, true, s, back_tone * (1.0 - 0.18 * near), false);
+                let near = (1.0 + d / (r * 1.5)).clamp(0.0, 1.0) * (1.0 - land);
+                return self.sample(views, true, s, back_tone * (1.0 - 0.18 * near), straight);
             }
         }
         if (0.0..=r).contains(&d) {
@@ -272,7 +285,7 @@ impl Curl<'_> {
         }
         if d < 0.0 && u >= 0.0 && self.inside((u, v)) {
             let near = (1.0 + d / (r * 2.0)).clamp(0.0, 1.0);
-            return self.sample(views, false, (u, v), 1.0 - 0.12 * near * near, true);
+            return self.sample(views, false, (u, v), 1.0 - 0.12 * near * near, self.gpu_band <= 0.0);
         }
         // 5. the page beneath: the leaf's shadow
         if d >= 0.0 && u <= self.w && u >= -self.w {
@@ -297,7 +310,7 @@ mod tests {
 
     #[test]
     fn flat_leaf_is_opaque_on_its_side_only() {
-        let c = Curl { w: 20.0, h: 10.0, forward: true, origin: (20.0, 5.0), finger: (20.0, 5.0), front: None, back: None, paper: [9, 9, 9, 255], dark: false, gpu_band: 0.0 };
+        let c = Curl { w: 20.0, h: 10.0, forward: true, origin: (20.0, 5.0), finger: (20.0, 5.0), front: None, back: None, paper: [9, 9, 9, 255], dark: false, gpu_band: 0.0, land: 0.0, gpu_back: false };
         let out = c.render();
         let px = |x: usize, y: usize| out[(y * 40 + x) * 4 + 3];
         assert_eq!(px(5, 5), 0); // facing page shows through
@@ -306,7 +319,7 @@ mod tests {
 
     #[test]
     fn half_turn_puts_back_face_over_facing_page() {
-        let c = Curl { w: 40.0, h: 20.0, forward: true, origin: (40.0, 10.0), finger: (-30.0, 10.0), front: None, back: None, paper: [9, 9, 9, 255], dark: false, gpu_band: 0.0 };
+        let c = Curl { w: 40.0, h: 20.0, forward: true, origin: (40.0, 10.0), finger: (-30.0, 10.0), front: None, back: None, paper: [9, 9, 9, 255], dark: false, gpu_band: 0.0, land: 0.0, gpu_back: false };
         let out = c.render();
         // well over on the left: covered by the back of the leaf
         assert_eq!(out[(10 * 80 + 20) * 4 + 3], 255);
@@ -338,7 +351,7 @@ mod preview {
         // straight pull from mid-edge, a lower-corner peel, a diagonal, nearly done
         let frames = [((w, h * 0.5), (w * 0.55, h * 0.5)), ((w, h * 0.9), (w * 0.5, h * 0.75)), ((w, h * 0.9), (w * 0.05, h * 0.55)), ((w, h * 0.85), (-w * 0.8, h * 0.8))];
         for (k, (o, f)) in frames.into_iter().enumerate() {
-            let c = Curl { w, h, forward: true, origin: o, finger: f, front: Some(&front), back: Some(&back), paper: [242, 248, 250, 255], dark: false, gpu_band: 0.0 };
+            let c = Curl { w, h, forward: true, origin: o, finger: f, front: Some(&front), back: Some(&back), paper: [242, 248, 250, 255], dark: false, gpu_band: 0.0, land: 0.0, gpu_back: false };
             let t0 = std::time::Instant::now();
             let buf = c.render();
             eprintln!("frame {k}: {:?}", t0.elapsed());

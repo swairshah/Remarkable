@@ -718,10 +718,7 @@ impl DocView {
                 1.0 - (1.0 - k).powi(3)
             };
             let mut f = (a.from.0 + (a.to.0 - a.from.0) * e, a.from.1 + (a.to.1 - a.from.1) * e);
-            if a.lift {
-                // the hand rises only a little as it crosses
-                f.1 -= l.h * 0.04 * (std::f32::consts::PI * e).sin();
-            }
+
             t.finger = crate::curl::constrain(t.origin, f, l.h);
             if k >= 1.0 {
                 let (dir, done) = (t.dir, a.complete);
@@ -1811,7 +1808,7 @@ impl Papier {
                 // (clipping a full-page quad per strip shaded hundreds).
                 const STRIP: f32 = 3.0;
                 let front_img = front.clone();
-                let (fs, bs) = (front.clone().map(crate::curl::Src::new), back.map(crate::curl::Src::new));
+                let (fs, bs) = (front.clone().map(crate::curl::Src::new), back.clone().map(crate::curl::Src::new));
                 let [pr, pg, pb] = if crate::theme::dark() { crate::theme::dark_paper(&self.settings.paper) } else { paper(&self.settings.paper) };
                 let mut curl = crate::curl::Curl {
                     w: l.w,
@@ -1824,6 +1821,12 @@ impl Papier {
                     paper: [pb, pg, pr, 255],
                     dark: crate::theme::dark(),
                     gpu_band: 0.0,
+                    // shading fades over the last fifth of the turn
+                    land: {
+                        let x = ((t.progress(l.w) - 0.8) / 0.2).clamp(0.0, 1.0);
+                        x * x * (3.0 - 2.0 * x)
+                    },
+                    gpu_back: false,
                 };
                 let geo = curl.geometry();
                 let mut strips: Vec<(usize, f32, f32, f32, f32)> = Vec::new();
@@ -1867,6 +1870,31 @@ impl Papier {
                     }
                     _ => {} // steep fold, or no image yet: the buffer draws the whole leaf
                 }
+                // A vertical fold makes the flat back a pure sideways shift of
+                // the next page: the GPU draws it crisp, clipped behind the
+                // fold, with the paper's shading laid over it.
+                let mut back_draw = None;
+                if let (Some((fold, n, r)), Some(img)) = (geo, back.as_ref()) {
+                    if n.1.abs() < 0.03 && n.0 > 0.0 {
+                        let pi_r = std::f32::consts::PI * r;
+                        let t2 = 2.0 * fold.0 + pi_r; // leaf u of the back's mirror line
+                        let (u0, u1, img_x) = if t.dir > 0 {
+                            let tt = t2 - l.w;
+                            (tt.max(-l.w), (tt + l.w).min(fold.0), spine + tt)
+                        } else {
+                            ((t2 - l.w).max(-l.w), t2.min(fold.0), spine - t2)
+                        };
+                        if u1 > u0 {
+                            let (x0, x1) = if t.dir > 0 { (spine + u0, spine + u1) } else { (spine - u1, spine - u0) };
+                            let land = curl.land;
+                            let tone = (if crate::theme::dark() { 0.86 } else { 0.94 }) * (1.0 - land) + land;
+                            // the fold-side edge, where the paper darkens
+                            let fold_x = if t.dir > 0 { spine + fold.0 } else { spine - fold.0 };
+                            back_draw = Some(BackDraw { img: img.clone(), img_x, x0, x1, dim: 1.0 - tone, fold_x, fold_w: r * 1.5, fold_a: 0.18 * (1.0 - land) });
+                            curl.gpu_back = true;
+                        }
+                    }
+                }
                 let t_curl = Instant::now();
                 let cropped = (geo.is_some()).then(|| curl.render_cropped()).flatten();
                 if std::env::var_os("PAPIER_TRACE").is_some() {
@@ -1878,7 +1906,7 @@ impl Papier {
                 });
                 let front_slot = if t.dir > 0 { spine } else { spine - l.w };
                 let has_right = left + 1 < l.n || t.dir > 0 && left + 3 < l.n;
-                Some(TurnPaint { spine, y: l.top, w: l.w, h: l.h, base_l, base_r, curl: img, has_right, front: front_img, front_slot, strips, slices, front_full })
+                Some(TurnPaint { spine, y: l.top, w: l.w, h: l.h, base_l, base_r, curl: img, has_right, front: front_img, front_slot, strips, slices, front_full, back_draw })
             }
             _ => None,
         };
@@ -2428,6 +2456,22 @@ struct TurnPaint {
     slices: Vec<Arc<RenderImage>>,
     /// The leaf lies flat: draw it whole.
     front_full: bool,
+    back_draw: Option<BackDraw>,
+}
+
+/// The flat back of the leaf, drawn by the GPU (vertical folds only).
+struct BackDraw {
+    img: Arc<RenderImage>,
+    /// Screen x of the back page's left edge, and the visible span.
+    img_x: f32,
+    x0: f32,
+    x1: f32,
+    /// Overall shading (fades to 0 as the leaf lands) and the darker band
+    /// along the fold.
+    dim: f32,
+    fold_x: f32,
+    fold_w: f32,
+    fold_a: f32,
 }
 
 impl TurnPaint {
@@ -2437,7 +2481,6 @@ impl TurnPaint {
         if self.has_right {
             sheet(window, spine, y, w, h, self.base_r.as_ref(), paper_rgb);
         }
-        gutter(window, spine, y, w, h, self.has_right);
         if self.front_full {
             sheet(window, self.front_slot, y, w, h, self.front.as_ref(), paper_rgb);
         }
@@ -2446,6 +2489,27 @@ impl TurnPaint {
             let mask = gpui::ContentMask { bounds: rect(sx, y + v, sw, sh) };
             window.with_content_mask(Some(mask), |window| {
                 let _ = window.paint_image(rect(self.front_slot, y + v, w, sh), Corners::default(), slice.clone(), 0, false);
+            });
+        }
+        // Over the leaf's flat part, as at rest (painted under it, the leaf
+        // hid the shade on its side of the spine); the curl, painted next,
+        // covers it where the leaf has lifted.
+        gutter(window, spine, y, w, h, self.has_right);
+        if let Some(b) = &self.back_draw {
+            let mask = gpui::ContentMask { bounds: rect(b.x0, y, b.x1 - b.x0, h) };
+            window.with_content_mask(Some(mask), |window| {
+                let _ = window.paint_image(rect(b.img_x, y, w, h), Corners::default(), b.img.clone(), 0, false);
+                if b.dim > 0.002 {
+                    window.paint_quad(quad(rect(b.x0, y, b.x1 - b.x0, h), px(0.0), gpui::rgba((b.dim * 255.0) as u32), px(0.0), gpui::transparent_black(), Default::default()));
+                }
+                if b.fold_a > 0.002 {
+                    // darkest at the fold, fading away from it
+                    if b.fold_x >= b.x1 - 1.0 {
+                        shade(window, b.fold_x - b.fold_w, y, b.fold_w, h, 0.0, b.fold_a);
+                    } else {
+                        shade(window, b.fold_x, y, b.fold_w, h, b.fold_a, 0.0);
+                    }
+                }
             });
         }
         if let Some((img, (cx, cy, cw, ch))) = &self.curl {
