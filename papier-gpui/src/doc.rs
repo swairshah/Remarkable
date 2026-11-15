@@ -302,6 +302,8 @@ pub struct DocView {
     /// The turning page cut into thin horizontal slices (see TurnPaint):
     /// keyed by the page image they came from.
     slices: Option<(usize, Vec<Arc<RenderImage>>, u32)>,
+    /// Pages cut into thin vertical slices for the GPU page curl, by image.
+    vslices: HashMap<usize, Vec<Arc<RenderImage>>>,
     /// The page index last acted on (loads, pi, saved position): a turn,
     /// a scroll or a jump all funnel through the comparison with this.
     reported: Option<usize>,
@@ -342,6 +344,7 @@ impl DocView {
             leaf_size: (400.0, 530.0),
             curl_img: None,
             slices: None,
+            vslices: HashMap::new(),
             undo_keys: Vec::new(),
             redo_keys: Vec::new(),
             pitch: 0.0,
@@ -365,7 +368,43 @@ impl DocView {
         let mut v: Vec<Arc<RenderImage>> = self.pages.into_values().filter_map(|m| m.raster.and_then(|r| r.image)).collect();
         v.extend(self.curl_img);
         v.extend(self.slices.into_iter().flat_map(|(_, s, _)| s));
+        v.extend(self.vslices.into_values().flatten());
         v
+    }
+
+    /// `img` cut into vertical slices `sw` pixels wide (cut once per page
+    /// image; slices of images not in `keep` are retired).
+    fn vslices_for(&mut self, img: &Arc<RenderImage>, sw: u32, keep: &[usize]) -> (Vec<Arc<RenderImage>>, Vec<Arc<RenderImage>>) {
+        let key = Arc::as_ptr(img) as usize;
+        let mut retired = Vec::new();
+        let stale: Vec<usize> = self.vslices.keys().filter(|k| !keep.contains(k) && **k != key).copied().collect();
+        for k in stale {
+            retired.extend(self.vslices.remove(&k).unwrap_or_default());
+        }
+        if let Some(v) = self.vslices.get(&key) {
+            return (v.clone(), retired);
+        }
+        let sz = img.size(0);
+        let (w, h) = (i32::from(sz.width) as u32, i32::from(sz.height) as u32);
+        let bytes = img.as_bytes(0).unwrap_or(&[]);
+        let mut out = Vec::new();
+        if bytes.len() >= (w * h * 4) as usize {
+            let mut x = 0;
+            while x < w {
+                let cols = sw.min(w - x);
+                let mut data = Vec::with_capacity((cols * h * 4) as usize);
+                for y in 0..h {
+                    let a = ((y * w + x) * 4) as usize;
+                    data.extend_from_slice(&bytes[a..a + (cols * 4) as usize]);
+                }
+                if let Some(buf) = image::RgbaImage::from_raw(cols, h, data) {
+                    out.push(Arc::new(RenderImage::new(vec![image::Frame::new(buf)])));
+                }
+                x += cols;
+            }
+        }
+        self.vslices.insert(key, out.clone());
+        (out, retired)
     }
 
     /// Slices of `img`, `bh` device rows each, cut once per page image.
@@ -1830,6 +1869,116 @@ impl Papier {
                     gpu_shading: false,
                 };
                 let geo = curl.geometry();
+                // Straight-across folds: the whole turn on the GPU from one
+                // geometry — flat front clipped at the fold, the roll as thin
+                // vertical slices placed where the cylinder puts them (front
+                // underneath, back over the top), the flat back as a shifted
+                // page, shading as gradients and dims. No CPU layer, so no
+                // seams or mismatched resolution between the parts.
+                let mut ops: Vec<Op> = Vec::new();
+                let mut gutter_after = 0;
+                if let (Some((fold, n, r)), Some(fimg), Some(bimg)) = (geo, front.as_ref(), back.as_ref()) {
+                    if n.1.abs() < 0.03 && n.0 > 0.0 {
+                        const SW: u32 = 3;
+                        let keep = [Arc::as_ptr(fimg) as usize, Arc::as_ptr(bimg) as usize];
+                        let (fsl, ra) = match self.dv() { Some(dv) => dv.vslices_for(fimg, SW, &keep), None => (Vec::new(), Vec::new()) };
+                        let (bsl, rb) = match self.dv() { Some(dv) => dv.vslices_for(bimg, SW, &keep), None => (Vec::new(), Vec::new()) };
+                        self.retired.borrow_mut().extend(ra.into_iter().chain(rb));
+                        let fw = i32::from(fimg.size(0).width) as f32;
+                        let bw = i32::from(bimg.size(0).width) as f32;
+                        let (w, y, h) = (l.w, l.top, l.h);
+                        let fwd = t.dir > 0;
+                        // leaf u (from the spine) -> screen x, and spans of two u's
+                        let sx = |u: f32| if fwd { spine + u } else { spine - u };
+                        let span = |u0: f32, u1: f32| {
+                            let (a, b) = (sx(u0), sx(u1));
+                            (a.min(b), (a - b).abs())
+                        };
+                        let pi_r = std::f32::consts::PI * r;
+                        let land = curl.land;
+                        let dark = crate::theme::dark();
+                        let back_tone = (if dark { 0.86 } else { 0.94 }) * (1.0 - land) + land;
+                        let front_slot = if fwd { spine } else { spine - w };
+                        // 1. the flat front, up to the fold, darkening toward it
+                        if fold.0 > 0.0 {
+                            let (cx, cw) = span(0.0, fold.0.min(w));
+                            ops.push(Op::Img { img: fimg.clone(), x: front_slot, y, w, h, clip: Some((cx, y, cw, h)) });
+                            let fa = 0.10 * (1.0 - land);
+                            let (gx, gw) = span((fold.0 - 2.0 * r).max(0.0), fold.0.min(w));
+                            if fa > 0.002 && gw > 0.5 {
+                                ops.push(if fwd { Op::Grad { x: gx, w: gw, a0: 0.0, a1: fa } } else { Op::Grad { x: gx, w: gw, a0: fa, a1: 0.0 } });
+                            }
+                        }
+                        gutter_after = ops.len();
+                        // 2. the leaf's shadow on the page beneath, past the roll
+                        let o = t.origin;
+                        let f = crate::curl::constrain(o, t.finger, l.h);
+                        let travel = ((o.0 - f.0).hypot(o.1 - f.1) / (2.0 * w)).clamp(0.0, 1.0);
+                        let lift = (std::f32::consts::PI * travel).sin() * (1.0 - land);
+                        let sa = (if dark { 0.40 } else { 0.20 }) * lift;
+                        let (sx0, swid) = span(fold.0 + 0.3 * r, (fold.0 + 0.3 * r + w * 0.14).min(w));
+                        if swid > 0.5 && sa > 0.002 {
+                            ops.push(if fwd { Op::Grad { x: sx0, w: swid, a0: sa, a1: 0.0 } } else { Op::Grad { x: sx0, w: swid, a0: 0.0, a1: sa } });
+                        }
+                        // the slices of one page that lie on part of the roll:
+                        // each source slice [pa, pb] (page px) sits at leaf
+                        // u ∈ [ua, ub]; arc length s = u − fold; on the roll it
+                        // shows at d = r·sin(s/r) past the fold.
+                        let roll = |ops: &mut Vec<Op>, slices: &[Arc<RenderImage>], img_w: f32, mirrored: bool, smin: f32, smax: f32, tone: &dyn Fn(f32) -> f32| {
+                            let k = img_w / w;
+                            for (i, sl) in slices.iter().enumerate() {
+                                let (pa, pb) = ((i as f32 * SW as f32) / k, ((i as f32 + 1.0) * SW as f32).min(img_w) / k);
+                                let (ua, ub) = if mirrored { (w - pb, w - pa) } else { (pa, pb) };
+                                let (s0, s1) = (ua - fold.0, ub - fold.0);
+                                if s1 <= smin || s0 >= smax {
+                                    continue;
+                                }
+                                let (c0, c1) = (s0.max(smin), s1.min(smax));
+                                let d = |s: f32| fold.0 + r * (s / r).sin();
+                                // Snap both edges to the device-pixel grid
+                                // ourselves: GPUI rounds each image alone
+                                // (origin down, size up), which overlapped and
+                                // gapped neighbouring slices. Neighbours now
+                                // share edges exactly; a slice narrower than a
+                                // pixel is dropped rather than smeared.
+                                let (a, b) = (sx(d(c0)), sx(d(c1)));
+                                let (p0, p1) = ((a.min(b) * sf).round(), (a.max(b) * sf).round());
+                                if p1 <= p0 {
+                                    continue;
+                                }
+                                let (x, wd) = ((p0 + 0.01) / sf, (p1 - p0 - 0.02) / sf);
+                                ops.push(Op::Img { img: sl.clone(), x, y, w: wd, h, clip: None });
+                                let a = 1.0 - tone((c0 + c1) / 2.0);
+                                ops.push(Op::Dim { x, y, w: wd, h, a });
+                            }
+                        };
+                        // 3. the roll's underside: the turning page, s ∈ [0, πr/2]
+                        roll(&mut ops, &fsl, fw, !fwd, 0.0, pi_r / 2.0, &|s| 0.80 + 0.20 * (s / r).cos());
+                        // 4. over the top: its back (the next page, mirrored), s ∈ [πr/2, πr]
+                        roll(&mut ops, &bsl, bw, fwd, pi_r / 2.0, pi_r, &|s| back_tone * (0.90 + 0.10 * (s / r).sin()));
+                        // 5. the far part, lying flat face down: the next page shifted
+                        let t2 = 2.0 * fold.0 + pi_r;
+                        let (u0, u1, img_x) = if fwd {
+                            let tt = t2 - w;
+                            (tt.max(-w), (tt + w).min(fold.0), spine + tt)
+                        } else {
+                            ((t2 - w).max(-w), t2.min(fold.0), spine - t2)
+                        };
+                        if u1 > u0 {
+                            let (cx, cw) = span(u0, u1);
+                            ops.push(Op::Img { img: bimg.clone(), x: img_x, y, w, h, clip: Some((cx, y, cw, h)) });
+                            if back_tone < 0.999 {
+                                ops.push(Op::Dim { x: cx, y, w: cw, h, a: 1.0 - back_tone });
+                            }
+                            let fa = 0.14 * (1.0 - land);
+                            let (gx, gw) = span((fold.0 - r * 1.5).max(u0), fold.0);
+                            if fa > 0.002 && gw > 0.5 {
+                                // darkest at the fold
+                                ops.push(if fwd { Op::Grad { x: gx, w: gw, a0: 0.0, a1: fa } } else { Op::Grad { x: gx, w: gw, a0: fa, a1: 0.0 } });
+                            }
+                        }
+                    }
+                }
                 let mut strips: Vec<(usize, f32, f32, f32, f32)> = Vec::new();
                 let mut slices = Vec::new();
                 let mut front_full = false;
@@ -1926,7 +2075,7 @@ impl Papier {
                     gpu_band: curl.gpu_band * dk,
                     ..curl
                 };
-                let cropped = (geo.is_some()).then(|| curl.render_cropped()).flatten();
+                let cropped = (geo.is_some() && ops.is_empty()).then(|| curl.render_cropped()).flatten();
                 if std::env::var_os("PAPIER_TRACE").is_some() {
                     eprintln!("  curl {:?} crop {:?} strips {} origin {:?} finger {:?} leaf {:?} geo {:?}", t_curl.elapsed(), cropped.as_ref().map(|c| (c.3, c.4)), strips.len(), t.origin, t.finger, (l.w, l.h), geo.map(|g| (g.1, g.2)));
                 }
@@ -1936,7 +2085,7 @@ impl Papier {
                 });
                 let front_slot = if t.dir > 0 { spine } else { spine - l.w };
                 let has_right = left + 1 < l.n || t.dir > 0 && left + 3 < l.n;
-                Some(TurnPaint { spine, y: l.top, w: l.w, h: l.h, base_l, base_r, curl: img, has_right, front: front_img, front_slot, strips, slices, front_full, back_draw, shading })
+                Some(TurnPaint { spine, y: l.top, w: l.w, h: l.h, base_l, base_r, curl: img, has_right, front: front_img, front_slot, strips, slices, front_full, back_draw, shading, ops, gutter_after })
             }
             _ => None,
         };
@@ -2490,6 +2639,21 @@ struct TurnPaint {
     /// GPU gradients standing in for the buffer's shading on vertical
     /// folds: (x, width, alpha at left, alpha at right), clipped to the spread.
     shading: Vec<(f32, f32, f32, f32)>,
+    /// Straight folds: the whole turn as GPU draw ops (when non-empty, the
+    /// fields above besides the resting pages are unused). The gutter shade
+    /// goes after the first `gutter_after` ops (the leaf's flat front).
+    ops: Vec<Op>,
+    gutter_after: usize,
+}
+
+/// One GPU draw for the page curl.
+enum Op {
+    /// An image at a rect, optionally clipped.
+    Img { img: Arc<RenderImage>, x: f32, y: f32, w: f32, h: f32, clip: Option<(f32, f32, f32, f32)> },
+    /// Darken a rect (black at alpha `a`).
+    Dim { x: f32, y: f32, w: f32, h: f32, a: f32 },
+    /// A horizontal gradient of black: alpha a0 at the left to a1 at the right.
+    Grad { x: f32, w: f32, a0: f32, a1: f32 },
 }
 
 /// The flat back of the leaf, drawn by the GPU (vertical folds only).
@@ -2513,6 +2677,36 @@ impl TurnPaint {
         sheet(window, spine - w, y, w, h, self.base_l.as_ref(), paper_rgb);
         if self.has_right {
             sheet(window, spine, y, w, h, self.base_r.as_ref(), paper_rgb);
+        }
+        if !self.ops.is_empty() {
+            let spread = gpui::ContentMask { bounds: rect(spine - w, y, 2.0 * w, h) };
+            window.with_content_mask(Some(spread), |window| {
+                for (i, op) in self.ops.iter().enumerate() {
+                    if i == self.gutter_after {
+                        gutter(window, spine, y, w, h, self.has_right);
+                    }
+                    match op {
+                        Op::Img { img, x, y, w, h, clip } => {
+                            let draw = |window: &mut Window| {
+                                let _ = window.paint_image(rect(*x, *y, *w, *h), Corners::default(), img.clone(), 0, false);
+                            };
+                            match clip {
+                                Some((cx, cy, cw, ch)) => window.with_content_mask(Some(gpui::ContentMask { bounds: rect(*cx, *cy, *cw, *ch) }), draw),
+                                None => draw(window),
+                            }
+                        }
+                        Op::Dim { x, y, w, h, a } if *a > 0.002 => {
+                            window.paint_quad(quad(rect(*x, *y, *w, *h), px(0.0), gpui::rgba((a.clamp(0.0, 1.0) * 255.0) as u32), px(0.0), gpui::transparent_black(), Default::default()));
+                        }
+                        Op::Grad { x, w, a0, a1 } => shade(window, *x, y, *w, h, *a0, *a1),
+                        _ => {}
+                    }
+                }
+                if self.gutter_after >= self.ops.len() {
+                    gutter(window, spine, y, w, h, self.has_right);
+                }
+            });
+            return;
         }
         if self.front_full {
             sheet(window, self.front_slot, y, w, h, self.front.as_ref(), paper_rgb);
