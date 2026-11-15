@@ -105,6 +105,31 @@ pub struct Curl<'a> {
     /// The GPU draws the flat back (only with a vertical fold, where it is a
     /// pure shift of the next page): leave those pixels transparent.
     pub gpu_back: bool,
+    /// The GPU also draws the fold's darkening and the shadow (vertical
+    /// folds): the buffer holds just the roll and a thin seam band.
+    pub gpu_shading: bool,
+}
+
+/// Give fully transparent pixels the colour of a drawn neighbour (alpha
+/// stays 0). The GPU samples this image with linear filtering and straight
+/// alpha: a transparent pixel stored as black would bleed a dark fringe
+/// into every edge of the curl.
+fn bleed(buf: &mut [u8], w: usize, h: usize) {
+    let src = buf.to_vec();
+    let opaque = |x: usize, y: usize| src[(y * w + x) * 4 + 3] > 200;
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            if src[i + 3] != 0 {
+                continue;
+            }
+            let near = [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)];
+            if let Some(&(nx, ny)) = near.iter().find(|&&(nx, ny)| nx < w && ny < h && opaque(nx, ny)) {
+                let j = (ny * w + nx) * 4;
+                buf[i..i + 3].copy_from_slice(&src[j..j + 3]);
+            }
+        }
+    }
 }
 
 /// Keep the finger where paper can actually reach: the leaf is bound at
@@ -138,6 +163,26 @@ impl Curl<'_> {
     /// width, height) within the 2w × h spread. Keeps per-frame uploads
     /// small while the leaf has only just lifted.
     pub fn render_cropped(&self) -> Option<(Vec<u8>, u32, u32, u32, u32)> {
+        // With the flat parts on the GPU, what can draw lies between two
+        // lines parallel to the fold: allocate and render just that box.
+        if let Some((fold, n, r)) = self.geometry().filter(|&(_, n, _)| self.gpu_back && self.gpu_band > 0.0 && n.0 > 0.05) {
+            let (full_w, oh) = ((2.0 * self.w).round() as usize, self.h.round() as usize);
+            let reach = if self.gpu_shading { r + 2.0 } else { r + self.w * 0.14 + 2.0 };
+            let (dlo, dhi) = (-self.gpu_band - 2.0, reach);
+            let at = |d: f32, y: f32| fold.0 + (d - (y - fold.1) * n.1) / n.0;
+            let us = [at(dlo, 0.0), at(dlo, self.h), at(dhi, 0.0), at(dhi, self.h)];
+            let xs = us.map(|u| if self.forward { u + self.w } else { self.w - u });
+            let x0 = (xs.iter().cloned().fold(f32::MAX, f32::min).floor().max(0.0) as usize).min(full_w);
+            let x1 = (xs.iter().cloned().fold(f32::MIN, f32::max).ceil().max(0.0) as usize).min(full_w);
+            if x1 <= x0 {
+                return None;
+            }
+            let ow = x1 - x0;
+            let mut out = vec![0u8; ow * oh * 4];
+            self.rows(&mut out, ow, x0, n, fold, r);
+            bleed(&mut out, ow, oh);
+            return Some((out, x0 as u32, 0, ow as u32, oh as u32));
+        }
         let (buf, ow, oh) = self.render_full();
         let (mut x0, mut y0, mut x1, mut y1) = (ow, oh, 0usize, 0usize);
         for y in 0..oh {
@@ -159,6 +204,7 @@ impl Curl<'_> {
         for y in y0..y1 {
             out.extend_from_slice(&buf[(y * ow + x0) * 4..(y * ow + x1) * 4]);
         }
+        bleed(&mut out, cw, ch);
         Some((out, x0 as u32, y0 as u32, cw as u32, ch as u32))
     }
 
@@ -189,13 +235,14 @@ impl Curl<'_> {
         let (ow, oh) = ((2.0 * w).round() as usize, h.round() as usize);
         let mut out = vec![0u8; ow * oh * 4];
         match self.geometry() {
-            Some((fold, n, r)) => self.rows(&mut out, ow, n, fold, r),
-            None => self.rows(&mut out, ow, (1.0, 0.0), (1.0e6, 0.0), 2.0),
+            Some((fold, n, r)) => self.rows(&mut out, ow, 0, n, fold, r),
+            None => self.rows(&mut out, ow, 0, (1.0, 0.0), (1.0e6, 0.0), 2.0),
         }
         (out, ow, oh)
     }
 
-    fn rows(&self, out: &mut [u8], ow: usize, n: (f32, f32), fold: (f32, f32), r: f32) {
+    /// Fill `out` (`ow` columns of the spread, starting at column `x_off`).
+    fn rows(&self, out: &mut [u8], ow: usize, x_off: usize, n: (f32, f32), fold: (f32, f32), r: f32) {
         let views = (self.front.and_then(Src::view), self.back.and_then(Src::view));
         // how far the leaf stands off the paper: 0 at rest, 1 mid-turn
         let o = self.origin;
@@ -210,8 +257,23 @@ impl Curl<'_> {
                 scope.spawn(move || {
                     for (j, row) in part.chunks_mut(ow * 4).enumerate() {
                         let y = (k * chunk + j) as f32 + 0.5;
-                        for i in 0..ow {
-                            let x = i as f32 + 0.5;
+                        // With the flat front and back on the GPU, only the band
+                        // before the fold, the roll and the shadow past it can
+                        // draw: d ∈ [-band, r + shadow]. d is linear along the
+                        // row, so compute just those columns.
+                        let (mut i0, mut i1) = (0usize, ow);
+                        if self.gpu_back && self.gpu_band > 0.0 && n.0 > 0.05 {
+                            let reach = if self.gpu_shading { r + 2.0 } else { r + self.w * 0.14 + 2.0 };
+                            let (dlo, dhi) = (-self.gpu_band - 2.0, reach);
+                            // d = (u - fold.u)·n.u + (y - fold.v)·n.v  =>  u = fold.u + (d - (y - fold.v)·n.v) / n.u
+                            let at = |d: f32| fold.0 + (d - (y - fold.1) * n.1) / n.0;
+                            let (ulo, uhi) = (at(dlo), at(dhi));
+                            let (xa, xb) = if self.forward { (ulo + self.w, uhi + self.w) } else { (self.w - uhi, self.w - ulo) };
+                            i0 = ((xa.floor() - x_off as f32).max(0.0) as usize).min(ow);
+                            i1 = ((xb.ceil() - x_off as f32).max(0.0) as usize).min(ow).max(i0);
+                        }
+                        for i in i0..i1 {
+                            let x = (i + x_off) as f32 + 0.5;
                             // spread x -> leaf frame u (left half of the output is u < 0 for forward)
                             let u = if self.forward { x - self.w } else { self.w - x };
                             let px = self.pixel(u, y, n, fold, r, views, lift);
@@ -292,11 +354,14 @@ impl Curl<'_> {
             return [0, 0, 0, 0];
         }
         if d < 0.0 && u >= 0.0 && self.inside((u, v)) {
-            let near = (1.0 + d / (r * 2.0)).clamp(0.0, 1.0);
+            let near = if self.gpu_shading { 0.0 } else { (1.0 + d / (r * 2.0)).clamp(0.0, 1.0) };
             return self.sample(views, false, (u, v), 1.0 - 0.12 * near * near, self.gpu_band <= 0.0);
         }
         // 5. the page beneath: the leaf's shadow
         if d >= 0.0 && u <= self.w && u >= -self.w {
+            if self.gpu_shading {
+                return [0, 0, 0, 0];
+            }
             let k = 1.0 - ((d - r * 0.3) / (self.w * 0.14)).clamp(0.0, 1.0);
             let a = (if self.dark { 0.40 } else { 0.20 }) * k * k * lift;
             return [0, 0, 0, (a * 255.0) as u8];
@@ -318,7 +383,7 @@ mod tests {
 
     #[test]
     fn flat_leaf_is_opaque_on_its_side_only() {
-        let c = Curl { w: 20.0, h: 10.0, forward: true, origin: (20.0, 5.0), finger: (20.0, 5.0), front: None, back: None, paper: [9, 9, 9, 255], dark: false, gpu_band: 0.0, land: 0.0, gpu_back: false };
+        let c = Curl { w: 20.0, h: 10.0, forward: true, origin: (20.0, 5.0), finger: (20.0, 5.0), front: None, back: None, paper: [9, 9, 9, 255], dark: false, gpu_band: 0.0, land: 0.0, gpu_back: false, gpu_shading: false };
         let out = c.render();
         let px = |x: usize, y: usize| out[(y * 40 + x) * 4 + 3];
         assert_eq!(px(5, 5), 0); // facing page shows through
@@ -327,7 +392,7 @@ mod tests {
 
     #[test]
     fn half_turn_puts_back_face_over_facing_page() {
-        let c = Curl { w: 40.0, h: 20.0, forward: true, origin: (40.0, 10.0), finger: (-30.0, 10.0), front: None, back: None, paper: [9, 9, 9, 255], dark: false, gpu_band: 0.0, land: 0.0, gpu_back: false };
+        let c = Curl { w: 40.0, h: 20.0, forward: true, origin: (40.0, 10.0), finger: (-30.0, 10.0), front: None, back: None, paper: [9, 9, 9, 255], dark: false, gpu_band: 0.0, land: 0.0, gpu_back: false, gpu_shading: false };
         let out = c.render();
         // well over on the left: covered by the back of the leaf
         assert_eq!(out[(10 * 80 + 20) * 4 + 3], 255);
@@ -359,12 +424,16 @@ mod preview {
         // straight pull from mid-edge, a lower-corner peel, a diagonal, nearly done
         let frames = [((w, h * 0.5), (w * 0.55, h * 0.5)), ((w, h * 0.9), (w * 0.5, h * 0.75)), ((w, h * 0.9), (w * 0.05, h * 0.55)), ((w, h * 0.85), (-w * 0.8, h * 0.8))];
         for (k, (o, f)) in frames.into_iter().enumerate() {
-            let c = Curl { w, h, forward: true, origin: o, finger: f, front: Some(&front), back: Some(&back), paper: [242, 248, 250, 255], dark: false, gpu_band: 0.0, land: 0.0, gpu_back: false };
+            let c = Curl { w, h, forward: true, origin: o, finger: f, front: Some(&front), back: Some(&back), paper: [242, 248, 250, 255], dark: false, gpu_band: 0.0, land: 0.0, gpu_back: false, gpu_shading: false };
             let t0 = std::time::Instant::now();
             let buf = c.render();
             eprintln!("frame {k}: {:?}", t0.elapsed());
             let s = 1290.0 / w;
             let big = Curl { w: 1290.0, h: 1720.0, origin: (o.0 * s, o.1 * s), finger: (f.0 * s, f.1 * s), ..c };
+            let fast = Curl { origin: (big.origin.0, big.h * 0.62), finger: (big.finger.0, big.h * 0.62), gpu_back: true, gpu_shading: true, gpu_band: 4.0, ..big };
+            let tf = std::time::Instant::now();
+            let fc = fast.render_cropped();
+            eprintln!("  fast path (vertical fold, GPU flats): {:?} box {:?}", tf.elapsed(), fc.map(|c| (c.3, c.4)));
             let t2 = std::time::Instant::now();
             let _ = big.render_full();
             eprintln!("  render_full alone: {:?}", t2.elapsed());

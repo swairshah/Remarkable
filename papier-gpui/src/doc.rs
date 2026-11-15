@@ -1827,6 +1827,7 @@ impl Papier {
                         x * x * (3.0 - 2.0 * x)
                     },
                     gpu_back: false,
+                    gpu_shading: false,
                 };
                 let geo = curl.geometry();
                 let mut strips: Vec<(usize, f32, f32, f32, f32)> = Vec::new();
@@ -1874,6 +1875,7 @@ impl Papier {
                 // the next page: the GPU draws it crisp, clipped behind the
                 // fold, with the paper's shading laid over it.
                 let mut back_draw = None;
+                let mut shading: Vec<(f32, f32, f32, f32)> = Vec::new();
                 if let (Some((fold, n, r)), Some(img)) = (geo, back.as_ref()) {
                     if n.1.abs() < 0.03 && n.0 > 0.0 {
                         let pi_r = std::f32::consts::PI * r;
@@ -1892,21 +1894,49 @@ impl Papier {
                             let fold_x = if t.dir > 0 { spine + fold.0 } else { spine - fold.0 };
                             back_draw = Some(BackDraw { img: img.clone(), img_x, x0, x1, dim: 1.0 - tone, fold_x, fold_w: r * 1.5, fold_a: 0.18 * (1.0 - land) });
                             curl.gpu_back = true;
+                            // the fold's darkening and the leaf's shadow are
+                            // plain horizontal gradients here: GPU overlays
+                            curl.gpu_shading = true;
+                            curl.gpu_band = 3.0;
+                            let o = t.origin;
+                            let f = crate::curl::constrain(o, t.finger, l.h);
+                            let travel = ((o.0 - f.0).hypot(o.1 - f.1) / (2.0 * l.w)).clamp(0.0, 1.0);
+                            let lift = (std::f32::consts::PI * travel).sin() * (1.0 - land);
+                            let sa = (if crate::theme::dark() { 0.40 } else { 0.20 }) * lift;
+                            let fa = 0.12 * (1.0 - land);
+                            let sw = l.w * 0.14;
+                            shading = if t.dir > 0 {
+                                // front darkens toward the fold; shadow falls right of the roll
+                                vec![(fold_x - 2.0 * r, 2.0 * r, 0.0, fa), (fold_x + 0.3 * r, sw, sa, 0.0)]
+                            } else {
+                                vec![(fold_x, 2.0 * r, fa, 0.0), (fold_x - 0.3 * r - sw, sw, 0.0, sa)]
+                            };
                         }
                     }
                 }
                 let t_curl = Instant::now();
+                // render at the screen's own resolution (the flat parts are
+                // the GPU's now, so only the roll and band are computed here)
+                let dk = front.as_ref().or(back.as_ref()).map_or(sf, |i| i32::from(i.size(0).height) as f32 / l.h);
+                let curl = crate::curl::Curl {
+                    w: l.w * dk,
+                    h: l.h * dk,
+                    origin: (curl.origin.0 * dk, curl.origin.1 * dk),
+                    finger: (curl.finger.0 * dk, curl.finger.1 * dk),
+                    gpu_band: curl.gpu_band * dk,
+                    ..curl
+                };
                 let cropped = (geo.is_some()).then(|| curl.render_cropped()).flatten();
                 if std::env::var_os("PAPIER_TRACE").is_some() {
-                    eprintln!("  curl {:?} crop {:?} strips {}", t_curl.elapsed(), cropped.as_ref().map(|c| (c.3, c.4)), strips.len());
+                    eprintln!("  curl {:?} crop {:?} strips {} origin {:?} finger {:?} leaf {:?} geo {:?}", t_curl.elapsed(), cropped.as_ref().map(|c| (c.3, c.4)), strips.len(), t.origin, t.finger, (l.w, l.h), geo.map(|g| (g.1, g.2)));
                 }
                 let img = cropped.and_then(|(buf, x, y, cw, ch)| {
                     let frame = image::RgbaImage::from_raw(cw, ch, buf)?;
-                    Some((Arc::new(RenderImage::new(vec![image::Frame::new(frame)])), (x as f32, y as f32, cw as f32, ch as f32)))
+                    Some((Arc::new(RenderImage::new(vec![image::Frame::new(frame)])), (x as f32 / dk, y as f32 / dk, cw as f32 / dk, ch as f32 / dk)))
                 });
                 let front_slot = if t.dir > 0 { spine } else { spine - l.w };
                 let has_right = left + 1 < l.n || t.dir > 0 && left + 3 < l.n;
-                Some(TurnPaint { spine, y: l.top, w: l.w, h: l.h, base_l, base_r, curl: img, has_right, front: front_img, front_slot, strips, slices, front_full, back_draw })
+                Some(TurnPaint { spine, y: l.top, w: l.w, h: l.h, base_l, base_r, curl: img, has_right, front: front_img, front_slot, strips, slices, front_full, back_draw, shading })
             }
             _ => None,
         };
@@ -2457,6 +2487,9 @@ struct TurnPaint {
     /// The leaf lies flat: draw it whole.
     front_full: bool,
     back_draw: Option<BackDraw>,
+    /// GPU gradients standing in for the buffer's shading on vertical
+    /// folds: (x, width, alpha at left, alpha at right), clipped to the spread.
+    shading: Vec<(f32, f32, f32, f32)>,
 }
 
 /// The flat back of the leaf, drawn by the GPU (vertical folds only).
@@ -2512,6 +2545,12 @@ impl TurnPaint {
                 }
             });
         }
+        let spread = gpui::ContentMask { bounds: rect(spine - w, y, 2.0 * w, h) };
+        window.with_content_mask(Some(spread), |window| {
+            for &(sx, sw, a0, a1) in &self.shading {
+                shade(window, sx, y, sw, h, a0, a1);
+            }
+        });
         if let Some((img, (cx, cy, cw, ch))) = &self.curl {
             let _ = window.paint_image(rect(spine - w + cx, y + cy, *cw, *ch), Corners::default(), img.clone(), 0, false);
         }
