@@ -9,8 +9,9 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, Bounds, Context, Corners, MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder, RenderImage, ScrollWheelEvent,
-    SharedString, Task, TextRun, Timer, Window, canvas, div, point, prelude::*, px, quad, size, svg,
+    AnyElement, Bounds, Context, Corners, MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder,
+    RenderImage, ScrollWheelEvent, SharedString, Task, TextRun, Timer, Window, canvas, div, point,
+    prelude::*, px, quad, size, svg,
 };
 
 use crate::{
@@ -118,10 +119,26 @@ impl PageModel {
 /// What the raster shows: committed marks, minus pi patches still drawing
 /// themselves in (those are painted live until their animation ends).
 fn marks<'a>(base: &'a InkPage, skip: &HashSet<u64>) -> Vec<Mark<'a>> {
-    let mut v: Vec<Mark> = base.highlights.iter().map(|s| Mark { stroke: s, rgb: 0xb4b4b4, wash: true }).collect();
-    v.extend(base.strokes.iter().map(|s| Mark { stroke: s, rgb: ink::ink_rgb(s.gray), wash: false }));
+    let mut v: Vec<Mark> = base
+        .highlights
+        .iter()
+        .map(|s| Mark {
+            stroke: s,
+            rgb: 0xb4b4b4,
+            wash: true,
+        })
+        .collect();
+    v.extend(base.strokes.iter().map(|s| Mark {
+        stroke: s,
+        rgb: ink::ink_rgb(s.gray),
+        wash: false,
+    }));
     for p in base.patches.iter().filter(|p| !skip.contains(&p.id)) {
-        v.extend(p.strokes.iter().map(|s| Mark { stroke: s, rgb: PI_BLUE, wash: false }));
+        v.extend(p.strokes.iter().map(|s| Mark {
+            stroke: s,
+            rgb: PI_BLUE,
+            wash: false,
+        }));
     }
     v
 }
@@ -214,7 +231,13 @@ pub struct Layout {
 impl Layout {
     pub fn page_x(&self, i: usize) -> f32 {
         match self.spread {
-            Some((_, spine)) => if i % 2 == 0 { spine - self.w } else { spine },
+            Some((_, spine)) => {
+                if i % 2 == 0 {
+                    spine - self.w
+                } else {
+                    spine
+                }
+            }
             None => self.x,
         }
     }
@@ -231,7 +254,11 @@ impl Layout {
         if let Some((left, _)) = self.spread {
             return (left..(left + 2).min(self.n)).find_map(|i| {
                 let (px_, py_) = ((x - self.page_x(i)) / self.s, (y - self.top) / self.s);
-                (px_ >= 0.0 && py_ >= -4.0 && px_ <= self.w / self.s && py_ <= self.h / self.s + 4.0).then_some((i, px_, py_))
+                (px_ >= 0.0
+                    && py_ >= -4.0
+                    && px_ <= self.w / self.s
+                    && py_ <= self.h / self.s + 4.0)
+                    .then_some((i, px_, py_))
             });
         }
         let i = ((y - self.top) / (self.h + GAP)).floor();
@@ -240,7 +267,8 @@ impl Layout {
         }
         let i = i as usize;
         let (px_, py_) = ((x - self.x) / self.s, (y - self.page_y(i)) / self.s);
-        (px_ >= -4.0 && py_ >= -4.0 && px_ <= self.w / self.s + 4.0 && py_ <= self.h / self.s + 4.0).then_some((i, px_, py_))
+        (px_ >= -4.0 && py_ >= -4.0 && px_ <= self.w / self.s + 4.0 && py_ <= self.h / self.s + 4.0)
+            .then_some((i, px_, py_))
     }
 
     /// Pages touching the viewport.
@@ -258,7 +286,9 @@ impl Layout {
         if let Some((left, _)) = self.spread {
             return left;
         }
-        let i = ((self.vh * 0.4 - self.top) / (self.h + GAP)).floor().max(0.0) as usize;
+        let i = ((self.vh * 0.4 - self.top) / (self.h + GAP))
+            .floor()
+            .max(0.0) as usize;
         i.min(self.n.saturating_sub(1))
     }
 }
@@ -314,18 +344,38 @@ pub struct DocView {
 
 impl DocView {
     pub fn new(doc: Doc, settings: &Settings) -> DocView {
-        let seq = if doc.seq.is_empty() { vec![SeqEntry::Note(1)] } else { doc.seq.clone() };
-        let index = (settings.get(&format!("pos-{}", doc.id)).and_then(|v| v.as_u64()).unwrap_or(0) as usize).min(seq.len() - 1);
-        let mode = settings.get(&format!("pimode-{}", doc.id)).and_then(|v| v.as_str()).unwrap_or("quiet").to_owned();
+        let seq = if doc.seq.is_empty() {
+            vec![SeqEntry::Note(1)]
+        } else {
+            doc.seq.clone()
+        };
+        let index = (settings
+            .get(&format!("pos-{}", doc.id))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize)
+            .min(seq.len() - 1);
+        let mode = settings
+            .get(&format!("pimode-{}", doc.id))
+            .and_then(|v| v.as_str())
+            .unwrap_or("quiet")
+            .to_owned();
         DocView {
             index,
             seq,
             doc,
             pages: HashMap::new(),
             tool: Tool::Pen,
-            width: Width::from_key(settings.get("width").and_then(|v| v.as_str()).unwrap_or("medium")),
+            width: Width::from_key(
+                settings
+                    .get("width")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("medium"),
+            ),
             finger_draws: false,
-            toolbar_open: settings.get("toolbar").and_then(|v| v.as_bool()).unwrap_or(true),
+            toolbar_open: settings
+                .get("toolbar")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
             zoom: settings.get("zoom").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
             scroll: (0.0, 0.0),
             glide: None,
@@ -333,11 +383,22 @@ impl DocView {
             pinching_at: None,
             live: None,
             indicator_until: None,
-            pi: Pi { busy: false, mode, font: "serif".into(), since: 0, epoch: 0.0, _task: None },
+            pi: Pi {
+                busy: false,
+                mode,
+                font: "serif".into(),
+                since: 0,
+                epoch: 0.0,
+                _task: None,
+            },
             hl_popup: None,
             pending_jump: Some(index),
             reported: None,
-            mode: if settings.get("view_mode").and_then(|v| v.as_str()) == Some("spread") { ViewMode::Spread } else { ViewMode::Scroll },
+            mode: if settings.get("view_mode").and_then(|v| v.as_str()) == Some("spread") {
+                ViewMode::Spread
+            } else {
+                ViewMode::Scroll
+            },
             turn: None,
             turn_dx: 0.0,
             turn_start_y: 0.0,
@@ -359,13 +420,21 @@ impl DocView {
         if !fresh.seq.is_empty() && fresh.seq != self.seq {
             let current = self.seq[self.index];
             self.seq = fresh.seq.clone();
-            self.index = self.seq.iter().position(|e| *e == current).unwrap_or(self.index.min(self.seq.len() - 1));
+            self.index = self
+                .seq
+                .iter()
+                .position(|e| *e == current)
+                .unwrap_or(self.index.min(self.seq.len() - 1));
         }
         self.doc = fresh;
     }
 
     pub fn into_images(self) -> Vec<Arc<RenderImage>> {
-        let mut v: Vec<Arc<RenderImage>> = self.pages.into_values().filter_map(|m| m.raster.and_then(|r| r.image)).collect();
+        let mut v: Vec<Arc<RenderImage>> = self
+            .pages
+            .into_values()
+            .filter_map(|m| m.raster.and_then(|r| r.image))
+            .collect();
         v.extend(self.curl_img);
         v.extend(self.slices.into_iter().flat_map(|(_, s, _)| s));
         v.extend(self.vslices.into_values().flatten());
@@ -374,10 +443,20 @@ impl DocView {
 
     /// `img` cut into vertical slices `sw` pixels wide (cut once per page
     /// image; slices of images not in `keep` are retired).
-    fn vslices_for(&mut self, img: &Arc<RenderImage>, sw: u32, keep: &[usize]) -> (Vec<Arc<RenderImage>>, Vec<Arc<RenderImage>>) {
+    fn vslices_for(
+        &mut self,
+        img: &Arc<RenderImage>,
+        sw: u32,
+        keep: &[usize],
+    ) -> (Vec<Arc<RenderImage>>, Vec<Arc<RenderImage>>) {
         let key = Arc::as_ptr(img) as usize;
         let mut retired = Vec::new();
-        let stale: Vec<usize> = self.vslices.keys().filter(|k| !keep.contains(k) && **k != key).copied().collect();
+        let stale: Vec<usize> = self
+            .vslices
+            .keys()
+            .filter(|k| !keep.contains(k) && **k != key)
+            .copied()
+            .collect();
         for k in stale {
             retired.extend(self.vslices.remove(&k).unwrap_or_default());
         }
@@ -409,7 +488,11 @@ impl DocView {
 
     /// Slices of `img`, `bh` device rows each, cut once per page image.
     /// Returns them and any slices they replace (to retire).
-    fn slices_for(&mut self, img: &Arc<RenderImage>, bh: u32) -> (Vec<Arc<RenderImage>>, Vec<Arc<RenderImage>>) {
+    fn slices_for(
+        &mut self,
+        img: &Arc<RenderImage>,
+        bh: u32,
+    ) -> (Vec<Arc<RenderImage>>, Vec<Arc<RenderImage>>) {
         let key = Arc::as_ptr(img) as usize;
         if let Some((k, s, b)) = &self.slices {
             if *k == key && *b == bh {
@@ -430,7 +513,11 @@ impl DocView {
             }
             y += rows;
         }
-        let old = self.slices.replace((key, out.clone(), bh)).map(|(_, s, _)| s).unwrap_or_default();
+        let old = self
+            .slices
+            .replace((key, out.clone(), bh))
+            .map(|(_, s, _)| s)
+            .unwrap_or_default();
         (out, old)
     }
 
@@ -450,15 +537,43 @@ impl DocView {
         let n = self.seq.len();
         let content_w = w + 2.0 * MARGIN;
         let content_h = n as f32 * (h + GAP) + GAP;
-        let x = if content_w <= aw { (aw - w) / 2.0 } else { MARGIN - self.scroll.0 };
+        let x = if content_w <= aw {
+            (aw - w) / 2.0
+        } else {
+            MARGIN - self.scroll.0
+        };
         if self.mode == ViewMode::Spread {
             // two pages side by side, fitted, meeting at the spine
             let s = ((aw - 2.0 * MARGIN) / (2.0 * pw)).min((vp.1 - 2.0 * MARGIN) / ph);
             let (w, h) = (pw * s, ph * s);
             let left = self.index - self.index % 2;
-            return Layout { x: aw / 2.0 - w, top: (vp.1 - h) / 2.0, w, h, s, n, aw, vh: vp.1, content_w: aw, content_h: vp.1, spread: Some((left, aw / 2.0)) };
+            return Layout {
+                x: aw / 2.0 - w,
+                top: (vp.1 - h) / 2.0,
+                w,
+                h,
+                s,
+                n,
+                aw,
+                vh: vp.1,
+                content_w: aw,
+                content_h: vp.1,
+                spread: Some((left, aw / 2.0)),
+            };
         }
-        Layout { x, top: GAP - self.scroll.1, w, h, s, n, aw, vh: vp.1, content_w, content_h, spread: None }
+        Layout {
+            x,
+            top: GAP - self.scroll.1,
+            w,
+            h,
+            s,
+            n,
+            aw,
+            vh: vp.1,
+            content_w,
+            content_h,
+            spread: None,
+        }
     }
 
     fn max_scroll(&self, vp: (f32, f32)) -> (f32, f32) {
@@ -483,7 +598,11 @@ impl DocView {
         let before = self.layout(vp);
         // content point under the anchor stays put
         let cy = anchor.1 - before.top + GAP;
-        let cx = if before.content_w > before.aw { anchor.0 + self.scroll.0 } else { anchor.0 - before.x + MARGIN };
+        let cx = if before.content_w > before.aw {
+            anchor.0 + self.scroll.0
+        } else {
+            anchor.0 - before.x + MARGIN
+        };
         self.zoom = z;
         self.scroll.1 = cy * ratio - GAP - anchor.1 + GAP;
         let after = self.layout(vp);
@@ -498,7 +617,11 @@ impl DocView {
     pub fn toggle_fit(&mut self, vp: (f32, f32)) {
         let fit = self.fit_page_zoom(vp);
         let page = self.index;
-        self.zoom = if (self.zoom - fit).abs() < 0.01 { 1.0 } else { fit };
+        self.zoom = if (self.zoom - fit).abs() < 0.01 {
+            1.0
+        } else {
+            fit
+        };
         self.jump_to(page, vp);
     }
 
@@ -543,7 +666,12 @@ impl DocView {
             return;
         }
         let ms = (160.0 + (to.1 - self.scroll.1).abs() * 0.12).min(320.0);
-        self.glide = Some(Glide { from: self.scroll, to, t0: Instant::now(), ms });
+        self.glide = Some(Glide {
+            from: self.scroll,
+            to,
+            t0: Instant::now(),
+            ms,
+        });
     }
 
     pub fn glide_to_page(&mut self, i: usize, vp: (f32, f32)) {
@@ -603,7 +731,14 @@ impl DocView {
             // a second tap mid-turn finishes the one in flight
             Some(t) if t.dir == dir => {
                 let to = (-t.origin.0, t.origin.1);
-                t.anim = Some(TurnAnim { from: t.finger, to, t0: Instant::now(), ms: 200.0, complete: true, lift: false });
+                t.anim = Some(TurnAnim {
+                    from: t.finger,
+                    to,
+                    t0: Instant::now(),
+                    ms: 200.0,
+                    complete: true,
+                    lift: false,
+                });
             }
             Some(_) => {}
             None if can => {
@@ -614,7 +749,14 @@ impl DocView {
                     dir,
                     origin,
                     finger: (w - 1.0, origin.1),
-                    anim: Some(TurnAnim { from: (w - 1.0, origin.1), to: (-w, origin.1), t0: Instant::now(), ms: 480.0, complete: true, lift: true }),
+                    anim: Some(TurnAnim {
+                        from: (w - 1.0, origin.1),
+                        to: (-w, origin.1),
+                        t0: Instant::now(),
+                        ms: 480.0,
+                        complete: true,
+                        lift: true,
+                    }),
                 });
             }
             None => {}
@@ -641,13 +783,26 @@ impl DocView {
             }
             // the leaf's outer edge, at the height you touched
             let v = (self.turn_start_y - l.top).clamp(0.0, l.h);
-            self.turn = Some(Turn { dir, origin: (l.w, v), finger: (l.w, v), anim: None });
+            self.turn = Some(Turn {
+                dir,
+                origin: (l.w, v),
+                finger: (l.w, v),
+                anim: None,
+            });
         } else {
             self.turn_dx += dx;
         }
         let t = self.turn.as_mut().unwrap();
-        let du = if t.dir > 0 { self.turn_dx } else { -self.turn_dx };
-        t.finger = crate::curl::constrain(t.origin, (t.origin.0 + du, t.origin.1 + (at.1 - self.turn_start_y)), l.h);
+        let du = if t.dir > 0 {
+            self.turn_dx
+        } else {
+            -self.turn_dx
+        };
+        t.finger = crate::curl::constrain(
+            t.origin,
+            (t.origin.0 + du, t.origin.1 + (at.1 - self.turn_start_y)),
+            l.h,
+        );
     }
 
     /// Spread mode: the hand lets go — finish the turn or let it fall back.
@@ -661,10 +816,21 @@ impl DocView {
         let along = -(t.dir as f32) * vx; // >0: flicked the way it's turning
         let p = t.progress(w);
         let complete = (p > 0.25 && along > -300.0) || along > 500.0;
-        let to = if complete { (-t.origin.0, t.origin.1) } else { t.origin };
+        let to = if complete {
+            (-t.origin.0, t.origin.1)
+        } else {
+            t.origin
+        };
         let dist = (to.0 - t.finger.0).hypot(to.1 - t.finger.1);
         let ms = 150.0 + 380.0 * (dist / (2.0 * w)).min(1.0);
-        t.anim = Some(TurnAnim { from: t.finger, to, t0: Instant::now(), ms, complete, lift: false });
+        t.anim = Some(TurnAnim {
+            from: t.finger,
+            to,
+            t0: Instant::now(),
+            ms,
+            complete,
+            lift: false,
+        });
     }
 
     // ------------------------------------------------------------ gestures
@@ -692,7 +858,10 @@ impl DocView {
         }
         let v = (-finger_vel.0, -finger_vel.1);
         if v.0.hypot(v.1) > 100.0 {
-            self.fling = Some(((v.0.clamp(-6000.0, 6000.0), v.1.clamp(-9000.0, 9000.0)), Instant::now()));
+            self.fling = Some((
+                (v.0.clamp(-6000.0, 6000.0), v.1.clamp(-9000.0, 9000.0)),
+                Instant::now(),
+            ));
         }
     }
 
@@ -747,7 +916,9 @@ impl DocView {
             }
             let l = self.layout(vp);
             self.leaf_size = (l.w, l.h);
-            let Some(t) = self.turn.as_mut() else { return false };
+            let Some(t) = self.turn.as_mut() else {
+                return false;
+            };
             let Some(a) = t.anim else { return false };
             let k = (a.t0.elapsed().as_secs_f32() * 1000.0 / a.ms).min(1.0);
             let e = if a.lift {
@@ -756,7 +927,10 @@ impl DocView {
             } else {
                 1.0 - (1.0 - k).powi(3)
             };
-            let mut f = (a.from.0 + (a.to.0 - a.from.0) * e, a.from.1 + (a.to.1 - a.from.1) * e);
+            let mut f = (
+                a.from.0 + (a.to.0 - a.from.0) * e,
+                a.from.1 + (a.to.1 - a.from.1) * e,
+            );
 
             t.finger = crate::curl::constrain(t.origin, f, l.h);
             if k >= 1.0 {
@@ -789,7 +963,10 @@ impl DocView {
         if let Some(g) = &self.glide {
             let t = (g.t0.elapsed().as_secs_f32() * 1000.0 / g.ms).min(1.0);
             let e = 1.0 - (1.0 - t).powi(3);
-            self.scroll = (g.from.0 + (g.to.0 - g.from.0) * e, g.from.1 + (g.to.1 - g.from.1) * e);
+            self.scroll = (
+                g.from.0 + (g.to.0 - g.from.0) * e,
+                g.from.1 + (g.to.1 - g.from.1) * e,
+            );
             if t >= 1.0 {
                 self.glide = None;
             } else {
@@ -805,7 +982,9 @@ impl DocView {
             self.clamp(vp);
             let decay = (-2.4 * dt).exp();
             let v = (v.0 * decay, v.1 * decay);
-            let stuck = (self.scroll.0 - before.0).abs() < 0.01 && (self.scroll.1 - before.1).abs() < 0.01 && dt > 0.0;
+            let stuck = (self.scroll.0 - before.0).abs() < 0.01
+                && (self.scroll.1 - before.1).abs() < 0.01
+                && dt > 0.0;
             if v.0.hypot(v.1) < 12.0 || stuck {
                 self.fling = None;
             } else {
@@ -820,13 +999,28 @@ impl DocView {
     /// Long-press on the page: offer to remove a highlight under the finger.
     pub fn hold(&mut self, at: (f32, f32), vp: (f32, f32)) -> bool {
         let l = self.layout(vp);
-        let Some((i, px_, py_)) = l.hit(at.0, at.1) else { return false };
+        let Some((i, px_, py_)) = l.hit(at.0, at.1) else {
+            return false;
+        };
         let key = self.seq[i].ink_key();
-        let Some(m) = self.pages.get(&key) else { return false };
-        let hit = m.base.highlights.iter().find(|s| s.points.iter().any(|p| (p.x - px_).hypot(p.y - py_) <= p.r + 14.0));
+        let Some(m) = self.pages.get(&key) else {
+            return false;
+        };
+        let hit = m.base.highlights.iter().find(|s| {
+            s.points
+                .iter()
+                .any(|p| (p.x - px_).hypot(p.y - py_) <= p.r + 14.0)
+        });
         if let Some(s) = hit {
             let b = s.bounds();
-            self.hl_popup = Some((key, s.id, (l.page_x(i) + b[2] * l.s + 22.0, l.page_y(i) + b[1] * l.s - 4.0)));
+            self.hl_popup = Some((
+                key,
+                s.id,
+                (
+                    l.page_x(i) + b[2] * l.s + 22.0,
+                    l.page_y(i) + b[1] * l.s - 4.0,
+                ),
+            ));
             return true;
         }
         false
@@ -835,12 +1029,20 @@ impl DocView {
     /// Timers; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         let mut dirty = false;
-        if self.pinching_at.is_some_and(|t| t.elapsed() > Duration::from_millis(160)) {
+        if self
+            .pinching_at
+            .is_some_and(|t| t.elapsed() > Duration::from_millis(160))
+        {
             self.pinching_at = None;
             dirty = true;
         }
         for m in self.pages.values_mut() {
-            let done: Vec<u64> = m.animating.iter().filter(|(_, t)| t.elapsed().as_secs_f32() > DRAW_IN).map(|(id, _)| *id).collect();
+            let done: Vec<u64> = m
+                .animating
+                .iter()
+                .filter(|(_, t)| t.elapsed().as_secs_f32() > DRAW_IN)
+                .map(|(id, _)| *id)
+                .collect();
             for id in done {
                 m.animating.remove(&id);
                 m.full_dirty = true;
@@ -860,25 +1062,44 @@ impl DocView {
 
     // ---------------------------------------------------------------- ink
 
-    pub fn ink_begin(&mut self, at: (f32, f32), pressure: f32, eraser: bool, vp: (f32, f32), window: &mut Window) {
+    pub fn ink_begin(
+        &mut self,
+        at: (f32, f32),
+        pressure: f32,
+        eraser: bool,
+        vp: (f32, f32),
+        window: &mut Window,
+    ) {
         self.hl_popup = None;
         if self.turn.is_some() {
             return;
         }
         self.stop();
         let l = self.layout(vp);
-        let Some((page, x, y)) = l.hit(at.0, at.1) else { return };
+        let Some((page, x, y)) = l.hit(at.0, at.1) else {
+            return;
+        };
         let key = self.seq[page].ink_key();
         let tool = if eraser { Tool::Eraser } else { self.tool };
         let width = self.width;
-        let Some(m) = self.pages.get_mut(&key).filter(|m| m.ready) else { return };
+        let Some(m) = self.pages.get_mut(&key).filter(|m| m.ready) else {
+            return;
+        };
         let before = m.snap();
         let live = match tool {
             Tool::Pen => Some(Live::new(x, y, pressure, width)),
             Tool::Highlighter => Some(Live::new(x, y, 0.5, Width::Medium)),
             Tool::Eraser => None,
         };
-        self.live = Some(LiveInk { key, page, tool, live, last: (x, y), changed: false, before });
+        self.live = Some(LiveInk {
+            key,
+            page,
+            tool,
+            live,
+            last: (x, y),
+            changed: false,
+            before,
+        });
         if tool == Tool::Eraser {
             self.erase_to(x, y, window);
         }
@@ -888,7 +1109,10 @@ impl DocView {
         let l = self.layout(vp);
         let Some(li) = self.live.as_mut() else { return };
         // the stroke stays on the page it started on
-        let (x, y) = ((at.0 - l.page_x(li.page)) / l.s, (at.1 - l.page_y(li.page)) / l.s);
+        let (x, y) = (
+            (at.0 - l.page_x(li.page)) / l.s,
+            (at.1 - l.page_y(li.page)) / l.s,
+        );
         match li.tool {
             Tool::Pen => li.live.as_mut().unwrap().push(x, y, pressure, l.s),
             Tool::Highlighter => li.live.as_mut().unwrap().push(x, y, 0.5, l.s),
@@ -902,12 +1126,31 @@ impl DocView {
         let (x0, y0) = li.last;
         li.last = (x, y);
         let key = li.key.clone();
-        let Some(m) = self.pages.get_mut(&key) else { return };
-        let steps = (((x - x0).hypot(y - y0)) / (ERASER_R * 0.5)).ceil().max(1.0) as usize;
+        let Some(m) = self.pages.get_mut(&key) else {
+            return;
+        };
+        let steps = (((x - x0).hypot(y - y0)) / (ERASER_R * 0.5))
+            .ceil()
+            .max(1.0) as usize;
         let offsets = |text: &str, size_: f32| -> Vec<f32> {
-            let run = TextRun { len: text.len(), font: gpui::font(SERIF), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
-            let line = window.text_system().shape_line(SharedString::from(text.to_owned()), px(size_), &[run], None);
-            let mut v: Vec<f32> = text.char_indices().map(|(i, _)| f32::from(line.x_for_index(i))).collect();
+            let run = TextRun {
+                len: text.len(),
+                font: gpui::font(SERIF),
+                color: gpui::black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(
+                SharedString::from(text.to_owned()),
+                px(size_),
+                &[run],
+                None,
+            );
+            let mut v: Vec<f32> = text
+                .char_indices()
+                .map(|(i, _)| f32::from(line.x_for_index(i)))
+                .collect();
             v.push(f32::from(line.width));
             v
         };
@@ -955,12 +1198,20 @@ impl DocView {
                 if wash {
                     stroke.gray = HL_GRAY;
                     // near printed text: one clean band per line, word to word
-                    let snapped = m.raster.as_ref().and_then(|r| r.print()).and_then(|p| crate::snap::snap(p.as_ref(), &stroke.points));
+                    let snapped = m
+                        .raster
+                        .as_ref()
+                        .and_then(|r| r.print())
+                        .and_then(|p| crate::snap::snap(p.as_ref(), &stroke.points));
                     match snapped {
                         Some(lines) => {
                             for (k, points) in lines.into_iter().enumerate() {
                                 let id = if k == 0 { stroke.id } else { m.next_id() };
-                                strokes.push(crate::model::InkStroke { id, gray: HL_GRAY, points });
+                                strokes.push(crate::model::InkStroke {
+                                    id,
+                                    gray: HL_GRAY,
+                                    points,
+                                });
                             }
                         }
                         None => {
@@ -975,7 +1226,11 @@ impl DocView {
                 }
                 for stroke in strokes {
                     if let Some(r) = m.raster.as_mut() {
-                        r.add_mark(Mark { stroke: &stroke, rgb: if wash { 0xb4b4b4 } else { ink::ink_rgb(0) }, wash });
+                        r.add_mark(Mark {
+                            stroke: &stroke,
+                            rgb: if wash { 0xb4b4b4 } else { ink::ink_rgb(0) },
+                            wash,
+                        });
                     }
                     if wash {
                         m.base.highlights.push(stroke);
@@ -1020,15 +1275,31 @@ impl DocView {
     /// Undo (or redo) the last edit, on whichever page it was made.
     fn undo_redo(&mut self, redo: bool) -> Option<String> {
         loop {
-            let key = if redo { self.redo_keys.pop() } else { self.undo_keys.pop() }?;
+            let key = if redo {
+                self.redo_keys.pop()
+            } else {
+                self.undo_keys.pop()
+            }?;
             // a page dropped from memory took its snapshots with it: skip
-            let Some(m) = self.pages.get_mut(&key) else { continue };
+            let Some(m) = self.pages.get_mut(&key) else {
+                continue;
+            };
             let cur = m.snap();
-            let Some(snap) = (if redo { m.history.redo(cur) } else { m.history.undo(cur) }) else { continue };
+            let Some(snap) = (if redo {
+                m.history.redo(cur)
+            } else {
+                m.history.undo(cur)
+            }) else {
+                continue;
+            };
             (m.base.strokes, m.base.highlights) = snap;
             m.full_dirty = true;
             m.edit_gen += 1;
-            if redo { self.undo_keys.push(key.clone()) } else { self.redo_keys.push(key.clone()) }
+            if redo {
+                self.undo_keys.push(key.clone())
+            } else {
+                self.redo_keys.push(key.clone())
+            }
             return Some(key);
         }
     }
@@ -1059,10 +1330,14 @@ impl Papier {
     fn ensure_pages(&mut self, cx: &mut Context<Self>) {
         let Some(dv) = self.dv() else { return };
         let i = dv.index;
-        let wanted: Vec<(String, SeqEntry)> = (i.saturating_sub(2)..=(i + 3).min(dv.seq.len() - 1)).map(|j| (dv.seq[j].ink_key(), dv.seq[j])).collect();
+        let wanted: Vec<(String, SeqEntry)> = (i.saturating_sub(2)..=(i + 3).min(dv.seq.len() - 1))
+            .map(|j| (dv.seq[j].ink_key(), dv.seq[j]))
+            .collect();
         let keep: HashSet<String> = wanted.iter().map(|(k, _)| k.clone()).collect();
         let mut retired = Vec::new();
-        let far: HashSet<String> = (i.saturating_sub(4)..=(i + 5).min(dv.seq.len() - 1)).map(|j| dv.seq[j].ink_key()).collect();
+        let far: HashSet<String> = (i.saturating_sub(4)..=(i + 5).min(dv.seq.len() - 1))
+            .map(|j| dv.seq[j].ink_key())
+            .collect();
         for (k, m) in dv.pages.iter_mut() {
             if !keep.contains(k) && !far.contains(k) {
                 if let Some(img) = m.raster.take().and_then(|r| r.image) {
@@ -1070,8 +1345,12 @@ impl Papier {
                 }
             }
         }
-        dv.pages.retain(|k, m| far.contains(k) || m.sync == Sync::Dirty || m.sync == Sync::Saving);
-        let missing: Vec<(String, SeqEntry)> = wanted.into_iter().filter(|(k, _)| !dv.pages.contains_key(k)).collect();
+        dv.pages
+            .retain(|k, m| far.contains(k) || m.sync == Sync::Dirty || m.sync == Sync::Saving);
+        let missing: Vec<(String, SeqEntry)> = wanted
+            .into_iter()
+            .filter(|(k, _)| !dv.pages.contains_key(k))
+            .collect();
         for (k, e) in &missing {
             dv.pages.insert(k.clone(), PageModel::new(*e));
         }
@@ -1091,12 +1370,21 @@ impl Papier {
         //    seen — so a page shows instantly, network or not
         if !reload {
             let (d, k) = (doc_id.clone(), key.clone());
-            let local = bg(cx, move || store::pending_ink(&d, &k, &version).or_else(|| store::load_offline_ink(&root, &d, &k)));
+            let local = bg(cx, move || {
+                store::pending_ink(&d, &k, &version)
+                    .or_else(|| store::load_offline_ink(&root, &d, &k))
+            });
             let (d, k) = (doc_id.clone(), key.clone());
             cx.spawn(async move |this, cx| {
                 let Some(page) = local.await else { return };
                 let _ = this.update(cx, |this, cx| {
-                    let Some(m) = this.dv().filter(|dv| dv.doc.id == d).and_then(|dv| dv.pages.get_mut(&k)) else { return };
+                    let Some(m) = this
+                        .dv()
+                        .filter(|dv| dv.doc.id == d)
+                        .and_then(|dv| dv.pages.get_mut(&k))
+                    else {
+                        return;
+                    };
                     if !m.ready {
                         m.base = page;
                         m.full_dirty = true;
@@ -1121,7 +1409,9 @@ impl Papier {
             }
             let remote = match remote {
                 Ok(r) => Ok(r),
-                Err(e) => store::load_offline_ink(&client.root, &d, &k).map(Some).ok_or(e),
+                Err(e) => store::load_offline_ink(&client.root, &d, &k)
+                    .map(Some)
+                    .ok_or(e),
             };
             match store::pending_ink(&d, &k, &version) {
                 Some(mut local) => {
@@ -1137,12 +1427,18 @@ impl Papier {
         cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
-                let Some(dv) = this.dv().filter(|d| d.doc.id == doc_id) else { return };
+                let Some(dv) = this.dv().filter(|d| d.doc.id == doc_id) else {
+                    return;
+                };
                 let busy_here = dv.live.as_ref().is_some_and(|l| l.key == key);
-                let Some(m) = dv.pages.get_mut(&key) else { return };
+                let Some(m) = dv.pages.get_mut(&key) else {
+                    return;
+                };
                 // shown from cache already, or being edited: only take the
                 // server's copy over a page nobody has touched
-                if (reload || m.ready) && (busy_here || !matches!(m.sync, Sync::Clean | Sync::Saved)) {
+                if (reload || m.ready)
+                    && (busy_here || !matches!(m.sync, Sync::Clean | Sync::Saved))
+                {
                     return; // the user is mid-edit here: their copy wins, it syncs next
                 }
                 match result {
@@ -1213,7 +1509,12 @@ impl Papier {
     /// nobody is editing here reload from the merged truth.
     pub fn reload_clean_pages(&mut self, cx: &mut Context<Self>) {
         let Some(dv) = self.dv() else { return };
-        let keys: Vec<String> = dv.pages.iter().filter(|(_, m)| matches!(m.sync, Sync::Clean | Sync::Saved)).map(|(k, _)| k.clone()).collect();
+        let keys: Vec<String> = dv
+            .pages
+            .iter()
+            .filter(|(_, m)| matches!(m.sync, Sync::Clean | Sync::Saved))
+            .map(|(k, _)| k.clone())
+            .collect();
         for k in keys {
             self.load_page(k, true, cx);
         }
@@ -1225,12 +1526,17 @@ impl Papier {
     pub fn page_edited(&mut self, key: &str, cx: &mut Context<Self>) {
         let Some(dv) = self.dv() else { return };
         let doc_id = dv.doc.id.clone();
-        let Some(m) = dv.pages.get_mut(key) else { return };
+        let Some(m) = dv.pages.get_mut(key) else {
+            return;
+        };
         m.sync = Sync::Dirty;
         m.save_gen += 1;
         let generation = m.save_gen;
-        let patches: Vec<(u64, Option<crate::model::InkPatch>)> =
-            m.patch_dirty.drain().map(|id| (id, m.base.patches.iter().find(|p| p.id == id).cloned())).collect();
+        let patches: Vec<(u64, Option<crate::model::InkPatch>)> = m
+            .patch_dirty
+            .drain()
+            .map(|id| (id, m.base.patches.iter().find(|p| p.id == id).cloned()))
+            .collect();
         let next_stroke = m.base.next_stroke;
         if !patches.is_empty() {
             let client = self.client.clone();
@@ -1250,7 +1556,11 @@ impl Papier {
         cx.spawn(async move |this, cx| {
             Timer::after(SAVE_PAUSE).await;
             let _ = this.update(cx, |this, cx| {
-                let current = this.dv().filter(|d| d.doc.id == doc_id).and_then(|d| d.pages.get(&key)).map(|m| m.save_gen);
+                let current = this
+                    .dv()
+                    .filter(|d| d.doc.id == doc_id)
+                    .and_then(|d| d.pages.get(&key))
+                    .map(|m| m.save_gen);
                 if current == Some(generation) {
                     this.flush_page(&key, cx);
                 }
@@ -1262,9 +1572,16 @@ impl Papier {
     fn flush_page(&mut self, key: &str, cx: &mut Context<Self>) {
         let Some(dv) = self.dv() else { return };
         let (doc_id, version) = (dv.doc.id.clone(), dv.doc.version.clone());
-        let page_no = dv.seq.iter().position(|e| e.ink_key() == key).map(|i| i + 1).unwrap_or(1);
+        let page_no = dv
+            .seq
+            .iter()
+            .position(|e| e.ink_key() == key)
+            .map(|i| i + 1)
+            .unwrap_or(1);
         let auto = dv.pi.mode == "auto";
-        let Some(m) = dv.pages.get_mut(key) else { return };
+        let Some(m) = dv.pages.get_mut(key) else {
+            return;
+        };
         if m.sync != Sync::Dirty {
             return;
         }
@@ -1276,25 +1593,37 @@ impl Papier {
         // Persist locally inside the background job itself, so a save that
         // outlives the document view (closing, quitting) still lands.
         let readonly = std::env::var_os("PAPIER_READONLY").is_some();
-        let work = net(cx, move || match if readonly { Ok(()) } else { client.post_ink(&d, &k, &page) } {
-            Ok(()) if readonly => Ok(()),
-            Ok(()) => {
-                store::remember_pending(&d, &k, &page, &version, false);
-                if auto {
-                    let _ = client.pi(&format!("pause?{}&page={page_no}", pi_query(&d)), true);
-                }
+        let work = net(cx, move || {
+            match if readonly {
                 Ok(())
-            }
-            Err(e) => {
-                store::remember_pending(&d, &k, &page, &version, true);
-                Err(e.to_string())
+            } else {
+                client.post_ink(&d, &k, &page)
+            } {
+                Ok(()) if readonly => Ok(()),
+                Ok(()) => {
+                    store::remember_pending(&d, &k, &page, &version, false);
+                    if auto {
+                        let _ = client.pi(&format!("pause?{}&page={page_no}", pi_query(&d)), true);
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    store::remember_pending(&d, &k, &page, &version, true);
+                    Err(e.to_string())
+                }
             }
         });
         let key = key.to_owned();
         cx.spawn(async move |this, cx| {
             let r = work.await;
             let _ = this.update(cx, |this, cx| {
-                let Some(m) = this.dv().filter(|d| d.doc.id == doc_id).and_then(|d| d.pages.get_mut(&key)) else { return };
+                let Some(m) = this
+                    .dv()
+                    .filter(|d| d.doc.id == doc_id)
+                    .and_then(|d| d.pages.get_mut(&key))
+                else {
+                    return;
+                };
                 if m.save_gen == generation {
                     m.sync = match r {
                         Ok(()) => Sync::Saved,
@@ -1309,7 +1638,12 @@ impl Papier {
 
     pub fn flush_all(&mut self, cx: &mut Context<Self>) {
         let Some(dv) = self.dv() else { return };
-        let keys: Vec<String> = dv.pages.iter().filter(|(_, m)| m.sync == Sync::Dirty).map(|(k, _)| k.clone()).collect();
+        let keys: Vec<String> = dv
+            .pages
+            .iter()
+            .filter(|(_, m)| m.sync == Sync::Dirty)
+            .map(|(k, _)| k.clone())
+            .collect();
         for k in keys {
             self.flush_page(&k, cx);
         }
@@ -1322,8 +1656,14 @@ impl Papier {
         dv.hl_popup = None;
         let (id, index) = (dv.doc.id.clone(), dv.index);
         let current = dv.key();
-        let dirty: Vec<String> = dv.pages.iter().filter(|(k, m)| m.sync == Sync::Dirty && **k != current).map(|(k, _)| k.clone()).collect();
-        self.settings.set(&format!("pos-{id}"), serde_json::json!(index));
+        let dirty: Vec<String> = dv
+            .pages
+            .iter()
+            .filter(|(k, m)| m.sync == Sync::Dirty && **k != current)
+            .map(|(k, _)| k.clone())
+            .collect();
+        self.settings
+            .set(&format!("pos-{id}"), serde_json::json!(index));
         for k in dirty {
             self.flush_page(&k, cx);
         }
@@ -1356,14 +1696,36 @@ impl Papier {
     /// A fresh note page after this one, announced to the cloud.
     fn add_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dv) = self.dv() else { return };
-        let next = dv.seq.iter().filter_map(|e| if let SeqEntry::Note(n) = e { Some(*n) } else { None }).max().unwrap_or(0) + 1;
+        let next = dv
+            .seq
+            .iter()
+            .filter_map(|e| {
+                if let SeqEntry::Note(n) = e {
+                    Some(*n)
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
         dv.seq.insert(dv.index + 1, SeqEntry::Note(next));
-        let state = DocState { next_note: next + 1, pos: dv.index + 1, seq: dv.seq.clone() };
+        let state = DocState {
+            next_note: next + 1,
+            pos: dv.index + 1,
+            seq: dv.seq.clone(),
+        };
         let id = dv.doc.id.clone();
         let i = dv.index + 1;
         let client = self.client.clone();
         let readonly = std::env::var_os("PAPIER_READONLY").is_some();
-        let work = net(cx, move || if readonly { Ok(()) } else { client.post_state(&id, &state) });
+        let work = net(cx, move || {
+            if readonly {
+                Ok(())
+            } else {
+                client.post_state(&id, &state)
+            }
+        });
         cx.spawn(async move |this, cx| {
             if let Err(e) = work.await {
                 let _ = this.update(cx, |this, cx| {
@@ -1378,14 +1740,20 @@ impl Papier {
     }
 
     fn undo(&mut self, redo: bool, cx: &mut Context<Self>) {
-        let Some(key) = self.dv().and_then(|dv| dv.undo_redo(redo)) else { return };
+        let Some(key) = self.dv().and_then(|dv| dv.undo_redo(redo)) else {
+            return;
+        };
         self.page_edited(&key, cx);
     }
 
     fn remove_highlight(&mut self, cx: &mut Context<Self>) {
         let Some(dv) = self.dv() else { return };
-        let Some((key, id, _)) = dv.hl_popup.take() else { return };
-        let Some(m) = dv.pages.get_mut(&key) else { return };
+        let Some((key, id, _)) = dv.hl_popup.take() else {
+            return;
+        };
+        let Some(m) = dv.pages.get_mut(&key) else {
+            return;
+        };
         let before = m.snap();
         let n = m.base.highlights.len();
         m.base.highlights.retain(|s| s.id != id);
@@ -1418,10 +1786,21 @@ impl Papier {
     fn toggle_view(&mut self) {
         let vp = self.viewport;
         let Some(dv) = self.dv() else { return };
-        let next = if dv.mode == ViewMode::Scroll { ViewMode::Spread } else { ViewMode::Scroll };
+        let next = if dv.mode == ViewMode::Scroll {
+            ViewMode::Spread
+        } else {
+            ViewMode::Scroll
+        };
         dv.set_mode(next, vp);
         self.transition_view();
-        self.settings.set("view_mode", serde_json::json!(if next == ViewMode::Spread { "spread" } else { "scroll" }));
+        self.settings.set(
+            "view_mode",
+            serde_json::json!(if next == ViewMode::Spread {
+                "spread"
+            } else {
+                "scroll"
+            }),
+        );
     }
 
     fn toggle_toolbar(&mut self) {
@@ -1437,7 +1816,9 @@ impl Papier {
     // ------------------------------------------------------------------ pi
 
     fn pi_call(&mut self, path: &str, cx: &mut Context<Self>) {
-        let Some(id) = self.dv().map(|d| d.doc.id.clone()) else { return };
+        let Some(id) = self.dv().map(|d| d.doc.id.clone()) else {
+            return;
+        };
         let client = self.client.clone();
         let path = path.to_owned();
         let work = net(cx, move || client.pi(&path, true).ok());
@@ -1467,19 +1848,25 @@ impl Papier {
             loop {
                 let Ok(Some((client, since, busy))) = this.update(cx, |this, _| {
                     let client = this.client.clone();
-                    this.dv().filter(|d| d.doc.id == id).map(|d| (client, d.pi.since, d.pi.busy))
+                    this.dv()
+                        .filter(|d| d.doc.id == id)
+                        .map(|d| (client, d.pi.since, d.pi.busy))
                 }) else {
                     break;
                 };
                 let path = format!("events?{}&since={since}", pi_query(&id));
-                let st = crate::app::net_on(cx.background_executor(), move || client.pi(&path, false).ok()).await;
+                let st = crate::app::net_on(cx.background_executor(), move || {
+                    client.pi(&path, false).ok()
+                })
+                .await;
                 if let Some(st) = st {
                     let id = id.clone();
-                    if this.update(cx, |this, cx| {
-                        this.pi_apply(&id, st, cx);
-                        cx.notify();
-                    })
-                    .is_err()
+                    if this
+                        .update(cx, |this, cx| {
+                            this.pi_apply(&id, st, cx);
+                            cx.notify();
+                        })
+                        .is_err()
                     {
                         break;
                     }
@@ -1493,7 +1880,9 @@ impl Papier {
     }
 
     fn pi_apply(&mut self, id: &str, st: PiState, cx: &mut Context<Self>) {
-        let Some(dv) = self.dv().filter(|d| d.doc.id == id) else { return };
+        let Some(dv) = self.dv().filter(|d| d.doc.id == id) else {
+            return;
+        };
         if let Some(e) = st.epoch {
             if e != dv.pi.epoch {
                 // the service restarted: its event ids started over
@@ -1530,7 +1919,10 @@ impl Papier {
         }
         refresh.sort_unstable();
         refresh.dedup();
-        let keys: Vec<String> = refresh.into_iter().filter_map(|i| dv.seq.get(i).map(|e| e.ink_key())).collect();
+        let keys: Vec<String> = refresh
+            .into_iter()
+            .filter_map(|i| dv.seq.get(i).map(|e| e.ink_key()))
+            .collect();
         for n in notices {
             self.toast(n);
         }
@@ -1564,7 +1956,13 @@ impl Papier {
         cx.spawn(async move |this, cx| {
             let Some(remote) = work.await else { return };
             let _ = this.update(cx, |this, cx| {
-                let Some(m) = this.dv().filter(|d| d.doc.id == doc_id).and_then(|d| d.pages.get_mut(&key)) else { return };
+                let Some(m) = this
+                    .dv()
+                    .filter(|d| d.doc.id == doc_id)
+                    .and_then(|d| d.pages.get_mut(&key))
+                else {
+                    return;
+                };
                 let known: HashSet<u64> = m.base.patches.iter().map(|p| p.id).collect();
                 if remote.patches == m.base.patches {
                     return;
@@ -1587,12 +1985,21 @@ impl Papier {
 
     fn pi_toggle_mode(&mut self, cx: &mut Context<Self>) {
         let Some(dv) = self.dv() else { return };
-        let next = if dv.pi.mode == "auto" { "quiet" } else { "auto" };
+        let next = if dv.pi.mode == "auto" {
+            "quiet"
+        } else {
+            "auto"
+        };
         dv.pi.mode = next.into();
         let id = dv.doc.id.clone();
-        self.settings.set(&format!("pimode-{id}"), serde_json::json!(next));
+        self.settings
+            .set(&format!("pimode-{id}"), serde_json::json!(next));
         self.pi_call(&format!("mode?{}&mode={next}", pi_query(&id)), cx);
-        self.toast(if next == "auto" { "Pi is on — it answers when you pause" } else { "Pi is quiet" });
+        self.toast(if next == "auto" {
+            "Pi is on — it answers when you pause"
+        } else {
+            "Pi is quiet"
+        });
     }
 
     fn pi_nudge(&mut self, cx: &mut Context<Self>) {
@@ -1610,7 +2017,8 @@ impl Papier {
     fn pi_cycle_font(&mut self, cx: &mut Context<Self>) {
         let Some(dv) = self.dv() else { return };
         let order = ["serif", "script", "sans", "garamond"];
-        let next = order[(order.iter().position(|f| *f == dv.pi.font).unwrap_or(0) + 1) % order.len()];
+        let next =
+            order[(order.iter().position(|f| *f == dv.pi.font).unwrap_or(0) + 1) % order.len()];
         dv.pi.font = next.into();
         let id = dv.doc.id.clone();
         self.pi_call(&format!("font?{}&font={next}", pi_query(&id)), cx);
@@ -1618,7 +2026,14 @@ impl Papier {
 
     // ------------------------------------------------------------- keyboard
 
-    pub fn doc_key(&mut self, key: &str, ctrl: bool, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn doc_key(
+        &mut self,
+        key: &str,
+        ctrl: bool,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let vp = self.viewport;
         match (ctrl, key) {
             (true, "z") if shift => self.undo(true, cx),
@@ -1661,7 +2076,11 @@ impl Papier {
             }
             (false, "t") => self.toggle_toolbar(),
             (false, "v") => self.toggle_view(),
-            (false, "g") => self.dialog = Some(Dialog::GoTo { digits: String::new() }),
+            (false, "g") => {
+                self.dialog = Some(Dialog::GoTo {
+                    digits: String::new(),
+                })
+            }
             (false, "n") => self.add_page(window, cx),
             (false, ".") => self.pi_nudge(cx),
             (false, "m") => self.pi_toggle_mode(cx),
@@ -1672,7 +2091,13 @@ impl Papier {
                 }
             }
             (_, "=" | "+") | (false, "-") => {
-                let z = self.dv().map(|d| if key == "-" { d.zoom / 1.2 } else { d.zoom * 1.2 });
+                let z = self.dv().map(|d| {
+                    if key == "-" {
+                        d.zoom / 1.2
+                    } else {
+                        d.zoom * 1.2
+                    }
+                });
                 self.set_doc_zoom(z);
             }
             _ => {}
@@ -1703,7 +2128,13 @@ impl Papier {
     /// stays on screen; a pen stroke or eraser rub patches the raster in
     /// place, which is cheap. A build that finishes after the page changed
     /// again is discarded and redone.
-    fn page_image(&mut self, index: usize, l: &Layout, sf: f32, cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
+    fn page_image(
+        &mut self,
+        index: usize,
+        l: &Layout,
+        sf: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<RenderImage>> {
         let paper = paper(&self.settings.paper);
         let dark = crate::theme::dark().then(|| crate::theme::dark_paper(&self.settings.paper));
         let pinching = self.dv()?.pinching_at.is_some();
@@ -1713,12 +2144,20 @@ impl Papier {
         let k = (l.h * sf).min(MAX_RASTER) / l.h;
         let (w, h) = ((l.w * k).round() as u32, (l.h * k).round() as u32);
         let (key, print_url, fallback, pdf) = {
-            let Screen::Doc(dv) = &self.screen else { return None };
+            let Screen::Doc(dv) = &self.screen else {
+                return None;
+            };
             let e = *dv.seq.get(index)?;
             let (url, fallback, pdf) = match e {
                 SeqEntry::Pdf(p) => (
                     Some(self.client.page_url(&dv.doc, p)),
-                    dv.doc.has_source.then(|| (self.client.preview_url(&dv.doc, p), dv.doc.meta.crop.clone(), dv.doc.meta.margins.clone())),
+                    dv.doc.has_source.then(|| {
+                        (
+                            self.client.preview_url(&dv.doc, p),
+                            dv.doc.meta.crop.clone(),
+                            dv.doc.meta.margins.clone(),
+                        )
+                    }),
                     dv.doc.has_source.then(|| (dv.doc.clone(), p)),
                 ),
                 SeqEntry::Note(_) => (None, None, None),
@@ -1727,15 +2166,20 @@ impl Papier {
         };
         // the source PDF at screen resolution when the book has one; the
         // tablet's raster (or the server's preview) until it lands
-        let sharp = pdf.and_then(|(doc, p)| self.pdf_print(&doc, p, w, h, !pinching && !turning, cx));
+        let sharp =
+            pdf.and_then(|(doc, p)| self.pdf_print(&doc, p, w, h, !pinching && !turning, cx));
         let print = sharp.or_else(|| print_url.and_then(|u| self.print(&u, fallback, cx)));
         let page_scale = w as f32 / self.dv()?.doc.page_w();
         let doc_id = self.dv()?.doc.id.clone();
         let mut retired = Vec::new();
         let dv = self.dv()?;
         let m = dv.pages.get_mut(&key).filter(|m| m.ready)?;
-        let stale = m.raster.as_ref().is_none_or(|r| !r.same_setup(w, h, paper, &print, dark));
-        if (stale || m.full_dirty) && !m.building && !((pinching || turning) && m.raster.is_some()) {
+        let stale = m
+            .raster
+            .as_ref()
+            .is_none_or(|r| !r.same_setup(w, h, paper, &print, dark));
+        if (stale || m.full_dirty) && !m.building && !((pinching || turning) && m.raster.is_some())
+        {
             m.building = true;
             let generation = m.edit_gen;
             let base = m.base.clone();
@@ -1750,7 +2194,13 @@ impl Papier {
             cx.spawn(async move |this, cx| {
                 let raster = job.await;
                 let _ = this.update(cx, |this, cx| {
-                    let Some(m) = this.dv().filter(|d| d.doc.id == doc_id).and_then(|d| d.pages.get_mut(&key)) else { return };
+                    let Some(m) = this
+                        .dv()
+                        .filter(|d| d.doc.id == doc_id)
+                        .and_then(|d| d.pages.get_mut(&key))
+                    else {
+                        return;
+                    };
                     m.building = false;
                     if m.edit_gen != generation {
                         cx.notify(); // edited meanwhile: the next frame rebuilds
@@ -1769,7 +2219,10 @@ impl Papier {
         } else if !stale && !m.full_dirty {
             if let (Some(r), Some(b)) = (m.raster.as_mut(), m.dirty_rect.take()) {
                 let pad = ERASER_R;
-                r.render_page_rect([b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad], marks(&m.base, &HashSet::new()).into_iter());
+                r.render_page_rect(
+                    [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad],
+                    marks(&m.base, &HashSet::new()).into_iter(),
+                );
             }
         }
         if let Some(r) = m.raster.as_mut() {
@@ -1785,9 +2238,12 @@ impl Papier {
     pub fn render_doc(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t_frame = Instant::now();
         let el = self.render_doc_inner(window, cx);
-        if std::env::var_os("PAPIER_TRACE").is_some() && self.dv().is_some_and(|d| d.turn.is_some()) {
+        if std::env::var_os("PAPIER_TRACE").is_some() && self.dv().is_some_and(|d| d.turn.is_some())
+        {
             thread_local!(static LAST: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) });
-            let gap = LAST.with(|l| l.replace(Some(Instant::now()))).map(|t| t.elapsed());
+            let gap = LAST
+                .with(|l| l.replace(Some(Instant::now())))
+                .map(|t| t.elapsed());
             eprintln!("turn frame: build {:?} gap {:?}", t_frame.elapsed(), gap);
         }
         el
@@ -1796,7 +2252,9 @@ impl Papier {
     fn render_doc_inner(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let vp = self.viewport;
         let sf = window.scale_factor();
-        let Some(dv) = self.dv() else { return div().into_any_element() };
+        let Some(dv) = self.dv() else {
+            return div().into_any_element();
+        };
         if dv.animate(vp) || dv.animating_ink() {
             window.request_animation_frame();
         }
@@ -1808,7 +2266,9 @@ impl Papier {
             dv.reported = Some(dv.index);
             self.index_changed(cx);
         }
-        let Some(dv) = self.dv() else { return div().into_any_element() };
+        let Some(dv) = self.dv() else {
+            return div().into_any_element();
+        };
         let visible = l.visible();
         // spread mode warms the neighbouring spreads so a turn never waits
         let ahead = if l.spread.is_some() {
@@ -1833,10 +2293,17 @@ impl Papier {
         // the turning leaf: what lies under it, and the curl itself
         let turn_paint = match (turn, l.spread) {
             (Some(t), Some((left, spine))) => {
-                let page = |i: i64| (i >= 0 && (i as usize) < l.n).then(|| all.get(&(i as usize)).cloned()).flatten();
+                let page = |i: i64| {
+                    (i >= 0 && (i as usize) < l.n)
+                        .then(|| all.get(&(i as usize)).cloned())
+                        .flatten()
+                };
                 let l0 = left as i64;
-                let (base_l, base_r, front, back) =
-                    if t.dir > 0 { (page(l0), page(l0 + 3), page(l0 + 1), page(l0 + 2)) } else { (page(l0 - 2), page(l0 + 1), page(l0), page(l0 - 1)) };
+                let (base_l, base_r, front, back) = if t.dir > 0 {
+                    (page(l0), page(l0 + 3), page(l0 + 1), page(l0 + 2))
+                } else {
+                    (page(l0 - 2), page(l0 + 1), page(l0), page(l0 - 1))
+                };
                 // The GPU draws both resting pages and the leaf's flat front
                 // (crisp, as the page is when still), clipped to thin strips
                 // along the fold; the CPU buffer holds only what warps — the
@@ -1847,8 +2314,15 @@ impl Papier {
                 // (clipping a full-page quad per strip shaded hundreds).
                 const STRIP: f32 = 3.0;
                 let front_img = front.clone();
-                let (fs, bs) = (front.clone().map(crate::curl::Src::new), back.clone().map(crate::curl::Src::new));
-                let [pr, pg, pb] = if crate::theme::dark() { crate::theme::dark_paper(&self.settings.paper) } else { paper(&self.settings.paper) };
+                let (fs, bs) = (
+                    front.clone().map(crate::curl::Src::new),
+                    back.clone().map(crate::curl::Src::new),
+                );
+                let [pr, pg, pb] = if crate::theme::dark() {
+                    crate::theme::dark_paper(&self.settings.paper)
+                } else {
+                    paper(&self.settings.paper)
+                };
                 let mut curl = crate::curl::Curl {
                     w: l.w,
                     h: l.h,
@@ -1877,12 +2351,20 @@ impl Papier {
                 // seams or mismatched resolution between the parts.
                 let mut ops: Vec<Op> = Vec::new();
                 let mut gutter_after = 0;
-                if let (Some((fold, n, r)), Some(fimg), Some(bimg)) = (geo, front.as_ref(), back.as_ref()) {
+                if let (Some((fold, n, r)), Some(fimg), Some(bimg)) =
+                    (geo, front.as_ref(), back.as_ref())
+                {
                     if n.1.abs() < 0.03 && n.0 > 0.0 {
                         const SW: u32 = 3;
                         let keep = [Arc::as_ptr(fimg) as usize, Arc::as_ptr(bimg) as usize];
-                        let (fsl, ra) = match self.dv() { Some(dv) => dv.vslices_for(fimg, SW, &keep), None => (Vec::new(), Vec::new()) };
-                        let (bsl, rb) = match self.dv() { Some(dv) => dv.vslices_for(bimg, SW, &keep), None => (Vec::new(), Vec::new()) };
+                        let (fsl, ra) = match self.dv() {
+                            Some(dv) => dv.vslices_for(fimg, SW, &keep),
+                            None => (Vec::new(), Vec::new()),
+                        };
+                        let (bsl, rb) = match self.dv() {
+                            Some(dv) => dv.vslices_for(bimg, SW, &keep),
+                            None => (Vec::new(), Vec::new()),
+                        };
                         self.retired.borrow_mut().extend(ra.into_iter().chain(rb));
                         let fw = i32::from(fimg.size(0).width) as f32;
                         let bw = i32::from(bimg.size(0).width) as f32;
@@ -1902,11 +2384,32 @@ impl Papier {
                         // 1. the flat front, up to the fold, darkening toward it
                         if fold.0 > 0.0 {
                             let (cx, cw) = span(0.0, fold.0.min(w));
-                            ops.push(Op::Img { img: fimg.clone(), x: front_slot, y, w, h, clip: Some((cx, y, cw, h)) });
+                            ops.push(Op::Img {
+                                img: fimg.clone(),
+                                x: front_slot,
+                                y,
+                                w,
+                                h,
+                                clip: Some((cx, y, cw, h)),
+                            });
                             let fa = 0.10 * (1.0 - land);
                             let (gx, gw) = span((fold.0 - 2.0 * r).max(0.0), fold.0.min(w));
                             if fa > 0.002 && gw > 0.5 {
-                                ops.push(if fwd { Op::Grad { x: gx, w: gw, a0: 0.0, a1: fa } } else { Op::Grad { x: gx, w: gw, a0: fa, a1: 0.0 } });
+                                ops.push(if fwd {
+                                    Op::Grad {
+                                        x: gx,
+                                        w: gw,
+                                        a0: 0.0,
+                                        a1: fa,
+                                    }
+                                } else {
+                                    Op::Grad {
+                                        x: gx,
+                                        w: gw,
+                                        a0: fa,
+                                        a1: 0.0,
+                                    }
+                                });
                             }
                         }
                         gutter_after = ops.len();
@@ -1916,18 +2419,42 @@ impl Papier {
                         let travel = ((o.0 - f.0).hypot(o.1 - f.1) / (2.0 * w)).clamp(0.0, 1.0);
                         let lift = (std::f32::consts::PI * travel).sin() * (1.0 - land);
                         let sa = (if dark { 0.40 } else { 0.20 }) * lift;
-                        let (sx0, swid) = span(fold.0 + 0.3 * r, (fold.0 + 0.3 * r + w * 0.14).min(w));
+                        let (sx0, swid) =
+                            span(fold.0 + 0.3 * r, (fold.0 + 0.3 * r + w * 0.14).min(w));
                         if swid > 0.5 && sa > 0.002 {
-                            ops.push(if fwd { Op::Grad { x: sx0, w: swid, a0: sa, a1: 0.0 } } else { Op::Grad { x: sx0, w: swid, a0: 0.0, a1: sa } });
+                            ops.push(if fwd {
+                                Op::Grad {
+                                    x: sx0,
+                                    w: swid,
+                                    a0: sa,
+                                    a1: 0.0,
+                                }
+                            } else {
+                                Op::Grad {
+                                    x: sx0,
+                                    w: swid,
+                                    a0: 0.0,
+                                    a1: sa,
+                                }
+                            });
                         }
                         // the slices of one page that lie on part of the roll:
                         // each source slice [pa, pb] (page px) sits at leaf
                         // u ∈ [ua, ub]; arc length s = u − fold; on the roll it
                         // shows at d = r·sin(s/r) past the fold.
-                        let roll = |ops: &mut Vec<Op>, slices: &[Arc<RenderImage>], img_w: f32, mirrored: bool, smin: f32, smax: f32, tone: &dyn Fn(f32) -> f32| {
+                        let roll = |ops: &mut Vec<Op>,
+                                    slices: &[Arc<RenderImage>],
+                                    img_w: f32,
+                                    mirrored: bool,
+                                    smin: f32,
+                                    smax: f32,
+                                    tone: &dyn Fn(f32) -> f32| {
                             let k = img_w / w;
                             for (i, sl) in slices.iter().enumerate() {
-                                let (pa, pb) = ((i as f32 * SW as f32) / k, ((i as f32 + 1.0) * SW as f32).min(img_w) / k);
+                                let (pa, pb) = (
+                                    (i as f32 * SW as f32) / k,
+                                    ((i as f32 + 1.0) * SW as f32).min(img_w) / k,
+                                );
                                 let (ua, ub) = if mirrored { (w - pb, w - pa) } else { (pa, pb) };
                                 let (s0, s1) = (ua - fold.0, ub - fold.0);
                                 if s1 <= smin || s0 >= smax {
@@ -1947,15 +2474,26 @@ impl Papier {
                                     continue;
                                 }
                                 let (x, wd) = ((p0 + 0.01) / sf, (p1 - p0 - 0.02) / sf);
-                                ops.push(Op::Img { img: sl.clone(), x, y, w: wd, h, clip: None });
+                                ops.push(Op::Img {
+                                    img: sl.clone(),
+                                    x,
+                                    y,
+                                    w: wd,
+                                    h,
+                                    clip: None,
+                                });
                                 let a = 1.0 - tone((c0 + c1) / 2.0);
                                 ops.push(Op::Dim { x, y, w: wd, h, a });
                             }
                         };
                         // 3. the roll's underside: the turning page, s ∈ [0, πr/2]
-                        roll(&mut ops, &fsl, fw, !fwd, 0.0, pi_r / 2.0, &|s| 0.80 + 0.20 * (s / r).cos());
+                        roll(&mut ops, &fsl, fw, !fwd, 0.0, pi_r / 2.0, &|s| {
+                            0.80 + 0.20 * (s / r).cos()
+                        });
                         // 4. over the top: its back (the next page, mirrored), s ∈ [πr/2, πr]
-                        roll(&mut ops, &bsl, bw, fwd, pi_r / 2.0, pi_r, &|s| back_tone * (0.90 + 0.10 * (s / r).sin()));
+                        roll(&mut ops, &bsl, bw, fwd, pi_r / 2.0, pi_r, &|s| {
+                            back_tone * (0.90 + 0.10 * (s / r).sin())
+                        });
                         // 5. the far part, lying flat face down: the next page shifted
                         let t2 = 2.0 * fold.0 + pi_r;
                         let (u0, u1, img_x) = if fwd {
@@ -1966,15 +2504,42 @@ impl Papier {
                         };
                         if u1 > u0 {
                             let (cx, cw) = span(u0, u1);
-                            ops.push(Op::Img { img: bimg.clone(), x: img_x, y, w, h, clip: Some((cx, y, cw, h)) });
+                            ops.push(Op::Img {
+                                img: bimg.clone(),
+                                x: img_x,
+                                y,
+                                w,
+                                h,
+                                clip: Some((cx, y, cw, h)),
+                            });
                             if back_tone < 0.999 {
-                                ops.push(Op::Dim { x: cx, y, w: cw, h, a: 1.0 - back_tone });
+                                ops.push(Op::Dim {
+                                    x: cx,
+                                    y,
+                                    w: cw,
+                                    h,
+                                    a: 1.0 - back_tone,
+                                });
                             }
                             let fa = 0.14 * (1.0 - land);
                             let (gx, gw) = span((fold.0 - r * 1.5).max(u0), fold.0);
                             if fa > 0.002 && gw > 0.5 {
                                 // darkest at the fold
-                                ops.push(if fwd { Op::Grad { x: gx, w: gw, a0: 0.0, a1: fa } } else { Op::Grad { x: gx, w: gw, a0: fa, a1: 0.0 } });
+                                ops.push(if fwd {
+                                    Op::Grad {
+                                        x: gx,
+                                        w: gw,
+                                        a0: 0.0,
+                                        a1: fa,
+                                    }
+                                } else {
+                                    Op::Grad {
+                                        x: gx,
+                                        w: gw,
+                                        a0: fa,
+                                        a1: 0.0,
+                                    }
+                                });
                             }
                         }
                     }
@@ -2036,12 +2601,31 @@ impl Papier {
                             ((t2 - l.w).max(-l.w), t2.min(fold.0), spine - t2)
                         };
                         if u1 > u0 {
-                            let (x0, x1) = if t.dir > 0 { (spine + u0, spine + u1) } else { (spine - u1, spine - u0) };
+                            let (x0, x1) = if t.dir > 0 {
+                                (spine + u0, spine + u1)
+                            } else {
+                                (spine - u1, spine - u0)
+                            };
                             let land = curl.land;
-                            let tone = (if crate::theme::dark() { 0.86 } else { 0.94 }) * (1.0 - land) + land;
+                            let tone = (if crate::theme::dark() { 0.86 } else { 0.94 })
+                                * (1.0 - land)
+                                + land;
                             // the fold-side edge, where the paper darkens
-                            let fold_x = if t.dir > 0 { spine + fold.0 } else { spine - fold.0 };
-                            back_draw = Some(BackDraw { img: img.clone(), img_x, x0, x1, dim: 1.0 - tone, fold_x, fold_w: r * 1.5, fold_a: 0.18 * (1.0 - land) });
+                            let fold_x = if t.dir > 0 {
+                                spine + fold.0
+                            } else {
+                                spine - fold.0
+                            };
+                            back_draw = Some(BackDraw {
+                                img: img.clone(),
+                                img_x,
+                                x0,
+                                x1,
+                                dim: 1.0 - tone,
+                                fold_x,
+                                fold_w: r * 1.5,
+                                fold_a: 0.18 * (1.0 - land),
+                            });
                             curl.gpu_back = true;
                             // the fold's darkening and the leaf's shadow are
                             // plain horizontal gradients here: GPU overlays
@@ -2049,16 +2633,23 @@ impl Papier {
                             curl.gpu_band = 3.0;
                             let o = t.origin;
                             let f = crate::curl::constrain(o, t.finger, l.h);
-                            let travel = ((o.0 - f.0).hypot(o.1 - f.1) / (2.0 * l.w)).clamp(0.0, 1.0);
+                            let travel =
+                                ((o.0 - f.0).hypot(o.1 - f.1) / (2.0 * l.w)).clamp(0.0, 1.0);
                             let lift = (std::f32::consts::PI * travel).sin() * (1.0 - land);
                             let sa = (if crate::theme::dark() { 0.40 } else { 0.20 }) * lift;
                             let fa = 0.12 * (1.0 - land);
                             let sw = l.w * 0.14;
                             shading = if t.dir > 0 {
                                 // front darkens toward the fold; shadow falls right of the roll
-                                vec![(fold_x - 2.0 * r, 2.0 * r, 0.0, fa), (fold_x + 0.3 * r, sw, sa, 0.0)]
+                                vec![
+                                    (fold_x - 2.0 * r, 2.0 * r, 0.0, fa),
+                                    (fold_x + 0.3 * r, sw, sa, 0.0),
+                                ]
                             } else {
-                                vec![(fold_x, 2.0 * r, fa, 0.0), (fold_x - 0.3 * r - sw, sw, 0.0, sa)]
+                                vec![
+                                    (fold_x, 2.0 * r, fa, 0.0),
+                                    (fold_x - 0.3 * r - sw, sw, 0.0, sa),
+                                ]
                             };
                         }
                     }
@@ -2066,7 +2657,10 @@ impl Papier {
                 let t_curl = Instant::now();
                 // render at the screen's own resolution (the flat parts are
                 // the GPU's now, so only the roll and band are computed here)
-                let dk = front.as_ref().or(back.as_ref()).map_or(sf, |i| i32::from(i.size(0).height) as f32 / l.h);
+                let dk = front
+                    .as_ref()
+                    .or(back.as_ref())
+                    .map_or(sf, |i| i32::from(i.size(0).height) as f32 / l.h);
                 let curl = crate::curl::Curl {
                     w: l.w * dk,
                     h: l.h * dk,
@@ -2075,22 +2669,56 @@ impl Papier {
                     gpu_band: curl.gpu_band * dk,
                     ..curl
                 };
-                let cropped = (geo.is_some() && ops.is_empty()).then(|| curl.render_cropped()).flatten();
+                let cropped = (geo.is_some() && ops.is_empty())
+                    .then(|| curl.render_cropped())
+                    .flatten();
                 if std::env::var_os("PAPIER_TRACE").is_some() {
-                    eprintln!("  curl {:?} crop {:?} strips {} origin {:?} finger {:?} leaf {:?} geo {:?}", t_curl.elapsed(), cropped.as_ref().map(|c| (c.3, c.4)), strips.len(), t.origin, t.finger, (l.w, l.h), geo.map(|g| (g.1, g.2)));
+                    eprintln!(
+                        "  curl {:?} crop {:?} strips {} origin {:?} finger {:?} leaf {:?} geo {:?}",
+                        t_curl.elapsed(),
+                        cropped.as_ref().map(|c| (c.3, c.4)),
+                        strips.len(),
+                        t.origin,
+                        t.finger,
+                        (l.w, l.h),
+                        geo.map(|g| (g.1, g.2))
+                    );
                 }
                 let img = cropped.and_then(|(buf, x, y, cw, ch)| {
                     let frame = image::RgbaImage::from_raw(cw, ch, buf)?;
-                    Some((Arc::new(RenderImage::new(vec![image::Frame::new(frame)])), (x as f32 / dk, y as f32 / dk, cw as f32 / dk, ch as f32 / dk)))
+                    Some((
+                        Arc::new(RenderImage::new(vec![image::Frame::new(frame)])),
+                        (x as f32 / dk, y as f32 / dk, cw as f32 / dk, ch as f32 / dk),
+                    ))
                 });
                 let front_slot = if t.dir > 0 { spine } else { spine - l.w };
                 let has_right = left + 1 < l.n || t.dir > 0 && left + 3 < l.n;
-                Some(TurnPaint { spine, y: l.top, w: l.w, h: l.h, base_l, base_r, curl: img, has_right, front: front_img, front_slot, strips, slices, front_full, back_draw, shading, ops, gutter_after })
+                Some(TurnPaint {
+                    spine,
+                    y: l.top,
+                    w: l.w,
+                    h: l.h,
+                    base_l,
+                    base_r,
+                    curl: img,
+                    has_right,
+                    front: front_img,
+                    front_slot,
+                    strips,
+                    slices,
+                    front_full,
+                    back_draw,
+                    shading,
+                    ops,
+                    gutter_after,
+                })
             }
             _ => None,
         };
         if let Some(dv) = self.dv() {
-            let fresh = turn_paint.as_ref().and_then(|tp| tp.curl.as_ref().map(|(img, _)| img.clone()));
+            let fresh = turn_paint
+                .as_ref()
+                .and_then(|tp| tp.curl.as_ref().map(|(img, _)| img.clone()));
             if let Some(old) = std::mem::replace(&mut dv.curl_img, fresh) {
                 self.retired.borrow_mut().push(old);
             }
@@ -2098,9 +2726,18 @@ impl Papier {
         let spread = l.spread;
 
         let pen = (self.pen.hover, self.pen.eraser);
-        let Some(dv) = self.dv() else { return div().into_any_element() };
-        let sync = dv.pages.get(&dv.key()).map(|m| m.sync.clone()).unwrap_or(Sync::Loading);
-        let loading: Vec<usize> = visible.clone().filter(|i| !dv.pages.get(&dv.seq[*i].ink_key()).is_some_and(|m| m.ready)).collect();
+        let Some(dv) = self.dv() else {
+            return div().into_any_element();
+        };
+        let sync = dv
+            .pages
+            .get(&dv.key())
+            .map(|m| m.sync.clone())
+            .unwrap_or(Sync::Loading);
+        let loading: Vec<usize> = visible
+            .clone()
+            .filter(|i| !dv.pages.get(&dv.seq[*i].ink_key()).is_some_and(|m| m.ready))
+            .collect();
 
         // live stroke, as a screen-space polygon on its page
         // live stroke(s), as screen-space polygons on their page; a
@@ -2109,14 +2746,29 @@ impl Papier {
             let lv = li.live.as_ref()?;
             let (pxx, py) = (l.page_x(li.page), l.page_y(li.page));
             let to_screen = |pts: &[crate::model::InkPoint]| -> Vec<(f32, f32)> {
-                ink::outline(pts, 0.5 / l.s).into_iter().map(|(x, y)| (pxx + x * l.s, py + y * l.s)).collect()
+                ink::outline(pts, 0.5 / l.s)
+                    .into_iter()
+                    .map(|(x, y)| (pxx + x * l.s, py + y * l.s))
+                    .collect()
             };
             if li.tool == Tool::Highlighter {
-                let print = dv.pages.get(&li.key).and_then(|m| m.raster.as_ref()).and_then(|r| r.print());
+                let print = dv
+                    .pages
+                    .get(&li.key)
+                    .and_then(|m| m.raster.as_ref())
+                    .and_then(|r| r.print());
                 if let Some(lines) = print.and_then(|p| crate::snap::snap(p.as_ref(), &lv.points)) {
-                    return Some((lines.iter().map(|ln| to_screen(ln)).collect(), 0x9a9a9a, 0.45));
+                    return Some((
+                        lines.iter().map(|ln| to_screen(ln)).collect(),
+                        0x9a9a9a,
+                        0.45,
+                    ));
                 }
-                let pts: Vec<_> = lv.points.iter().map(|p| crate::model::InkPoint { r: HL_R, ..*p }).collect();
+                let pts: Vec<_> = lv
+                    .points
+                    .iter()
+                    .map(|p| crate::model::InkPoint { r: HL_R, ..*p })
+                    .collect();
                 return Some((vec![to_screen(&pts)], 0x9a9a9a, 0.45));
             }
             Some((vec![to_screen(&lv.points)], ink::ink_rgb(0), 1.0))
@@ -2126,14 +2778,25 @@ impl Papier {
         let mut texts: Vec<(String, f32, f32, f32, f32)> = Vec::new();
         let mut drawing_in: Vec<Vec<(f32, f32)>> = Vec::new();
         for i in visible.clone() {
-            let Some(m) = dv.pages.get(&dv.seq[i].ink_key()) else { continue };
+            let Some(m) = dv.pages.get(&dv.seq[i].ink_key()) else {
+                continue;
+            };
             let (pxx, py) = (l.page_x(i), l.page_y(i));
             for p in &m.base.patches {
-                let progress = m.animating.get(&p.id).map(|t| (t.elapsed().as_secs_f32() / DRAW_IN).min(1.0));
+                let progress = m
+                    .animating
+                    .get(&p.id)
+                    .map(|t| (t.elapsed().as_secs_f32() / DRAW_IN).min(1.0));
                 let alpha = progress.map_or(1.0, |pr| ((pr - 0.15) / 0.5).clamp(0.0, 1.0));
                 if alpha > 0.0 {
                     for t in &p.texts {
-                        texts.push((t.text.clone(), pxx + t.x * l.s, py + t.y * l.s, t.size * l.s, alpha));
+                        texts.push((
+                            t.text.clone(),
+                            pxx + t.x * l.s,
+                            py + t.y * l.s,
+                            t.size * l.s,
+                            alpha,
+                        ));
                     }
                 }
                 if let Some(pr) = progress {
@@ -2143,9 +2806,14 @@ impl Papier {
                         if frac <= 0.0 {
                             continue;
                         }
-                        let n = ((s.points.len() as f32 * frac).ceil() as usize).clamp(1, s.points.len());
+                        let n = ((s.points.len() as f32 * frac).ceil() as usize)
+                            .clamp(1, s.points.len());
                         let poly = ink::outline(&s.points[..n], 0.5 / l.s);
-                        drawing_in.push(poly.into_iter().map(|(x, y)| (pxx + x * l.s, py + y * l.s)).collect());
+                        drawing_in.push(
+                            poly.into_iter()
+                                .map(|(x, y)| (pxx + x * l.s, py + y * l.s))
+                                .collect(),
+                        );
                     }
                 }
             }
@@ -2154,7 +2822,9 @@ impl Papier {
             (Some(h), true) => Some((h, ERASER_R * l.s)),
             _ => None,
         };
-        let hover_dot = pen.0.filter(|_| eraser_ring.is_none() && dv.tool != Tool::Eraser);
+        let hover_dot = pen
+            .0
+            .filter(|_| eraser_ring.is_none() && dv.tool != Tool::Eraser);
         let paper_rgb = paper_u32(&self.settings.paper);
         let page = canvas(
             |_, _, _| {},
@@ -2176,13 +2846,26 @@ impl Papier {
                 for (text, x, y, sz, a) in &texts {
                     let font = gpui::font(SERIF);
                     let color = ca(PI_BLUE, *a);
-                    let run = TextRun { len: text.len(), font: font.clone(), color: color.into(), background_color: None, underline: None, strikethrough: None };
+                    let run = TextRun {
+                        len: text.len(),
+                        font: font.clone(),
+                        color: color.into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
                     let ts = window.text_system();
                     let id = ts.resolve_font(&font);
                     let ascent = f32::from(ts.ascent(id, px(*sz)));
                     let descent = f32::from(ts.descent(id, px(*sz))).abs();
-                    let line = ts.shape_line(SharedString::from(text.clone()), px(*sz), &[run], None);
-                    let _ = line.paint(point(px(*x), px(*y - ascent)), px(ascent + descent), window, cx);
+                    let line =
+                        ts.shape_line(SharedString::from(text.clone()), px(*sz), &[run], None);
+                    let _ = line.paint(
+                        point(px(*x), px(*y - ascent)),
+                        px(ascent + descent),
+                        window,
+                        cx,
+                    );
                 }
                 if let Some((polys, rgb, a)) = &live_poly {
                     for poly in polys {
@@ -2202,7 +2885,9 @@ impl Papier {
 
         let dv = self.dv().unwrap();
         let indicator = dv.indicator_until.is_some().then(|| match l.spread {
-            Some((left, _)) if left + 1 < dv.seq.len() => format!("{}–{} / {}", left + 1, left + 2, dv.seq.len()),
+            Some((left, _)) if left + 1 < dv.seq.len() => {
+                format!("{}–{} / {}", left + 1, left + 2, dv.seq.len())
+            }
             _ => format!("{} / {}", dv.index + 1, dv.seq.len()),
         });
         let popup = dv.hl_popup.as_ref().map(|(_, _, p)| *p);
@@ -2261,7 +2946,9 @@ impl Papier {
                 if let Some(dv) = this.dv() {
                     match e.delta {
                         // touchpads and our finger emulation: exact pixels
-                        gpui::ScrollDelta::Pixels(d) if !ctrl => dv.wheel((-f32::from(d.x), -f32::from(d.y)), at, vp),
+                        gpui::ScrollDelta::Pixels(d) if !ctrl => {
+                            dv.wheel((-f32::from(d.x), -f32::from(d.y)), at, vp)
+                        }
                         // a mouse wheel's notches glide
                         gpui::ScrollDelta::Lines(d) if !ctrl => dv.glide_by(-d.y * 90.0, vp),
                         _ => {
@@ -2277,11 +2964,16 @@ impl Papier {
 
         // book pages the server has no image for at all (no raster, no source PDF)
         let missing: Vec<usize> = {
-            let Screen::Doc(dv) = &self.screen else { unreachable!() };
+            let Screen::Doc(dv) = &self.screen else {
+                unreachable!()
+            };
             visible
                 .clone()
                 .filter(|i| match dv.seq[*i] {
-                    SeqEntry::Pdf(p) => matches!(self.prints.get(&self.client.page_url(&dv.doc, p)), Some(crate::app::Load::Failed)),
+                    SeqEntry::Pdf(p) => matches!(
+                        self.prints.get(&self.client.page_url(&dv.doc, p)),
+                        Some(crate::app::Load::Failed)
+                    ),
                     SeqEntry::Note(_) => false,
                 })
                 .collect()
@@ -2346,12 +3038,25 @@ impl Papier {
                         this.remove_highlight(cx);
                         cx.notify();
                     }))
-                    .child(svg().path(icon("close")).size(px(20.0)).text_color(c(BLACK))),
+                    .child(
+                        svg()
+                            .path(icon("close"))
+                            .size(px(20.0))
+                            .text_color(c(BLACK)),
+                    ),
             );
         }
         if busy {
             // pi's working dot, just left of the strip's top
-            root = root.child(div().absolute().top(px(14.0)).right(px(strip_w + 14.0)).size(px(9.0)).rounded_full().bg(c(BLACK)));
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(14.0))
+                    .right(px(strip_w + 14.0))
+                    .size(px(9.0))
+                    .rounded_full()
+                    .bg(c(BLACK)),
+            );
         }
         root = root.child(self.toolbar(cx));
         if self.peek_until.is_some() {
@@ -2364,14 +3069,14 @@ impl Papier {
     /// glyphs, the armed tool inverted; collapses to its round toggle.
     fn toolbar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let vh = self.viewport.1;
-        let Some(dv) = self.dv() else { return div().into_any_element() };
+        let Some(dv) = self.dv() else {
+            return div().into_any_element();
+        };
         let open = dv.toolbar_open;
         let toggle = div()
             .id("tb-toggle")
             .size(px(40.0))
             .rounded_full()
-            .border_2()
-            .border_color(c(BLACK))
             .bg(c(WHITE))
             .flex()
             .items_center()
@@ -2381,9 +3086,19 @@ impl Papier {
                 this.toggle_toolbar();
                 cx.notify();
             }))
-            .child(svg().path(icon(if open { "close" } else { "menu" })).size(px(18.0)).text_color(c(BLACK)));
+            .child(
+                svg()
+                    .path(icon(if open { "close" } else { "menu" }))
+                    .size(px(18.0))
+                    .text_color(c(BLACK)),
+            );
         if !open {
-            return div().absolute().top(px(10.0)).right(px(10.0)).child(toggle).into_any_element();
+            return div()
+                .absolute()
+                .top(px(10.0))
+                .right(px(10.0))
+                .child(toggle)
+                .into_any_element();
         }
         let (can_undo, can_redo) = dv.can_undo();
         let tool = dv.tool;
@@ -2408,22 +3123,49 @@ impl Papier {
                 .justify_center()
                 .rounded(px(4.0))
                 .when(active, |d| d.bg(c(BLACK)).text_color(c(WHITE)))
-                .when(!active, |d| d.text_color(c(if enabled { BLACK } else { LIGHT })).hover(|s| s.bg(c(WASH))))
+                .when(!active, |d| {
+                    d.text_color(c(if enabled { BLACK } else { LIGHT }))
+                        .hover(|s| s.bg(c(WASH)))
+                })
                 .child(glyph)
         };
         let ic = |name: &str, active: bool, enabled: bool| -> AnyElement {
-            svg().path(icon(name)).size(px(21.0)).text_color(c(if active { WHITE } else if enabled { BLACK } else { LIGHT })).into_any_element()
+            svg()
+                .path(icon(name))
+                .size(px(21.0))
+                .text_color(c(if active {
+                    WHITE
+                } else if enabled {
+                    BLACK
+                } else {
+                    LIGHT
+                }))
+                .into_any_element()
         };
         let rule = || div().w(px(26.0)).h(px(1.0)).my(px(5.0)).bg(c(LIGHT));
         let width_dots = |active: bool| {
-            div().flex().gap(px(2.0)).mt(px(2.0)).children(Width::ALL.iter().map(|w| {
-                div().size(px(3.0)).rounded_full().bg(c(if *w == width { if active { WHITE } else { BLACK } } else { GRAY }))
-            }))
+            div()
+                .flex()
+                .gap(px(2.0))
+                .mt(px(2.0))
+                .children(Width::ALL.iter().map(|w| {
+                    div().size(px(3.0)).rounded_full().bg(c(if *w == width {
+                        if active { WHITE } else { BLACK }
+                    } else {
+                        GRAY
+                    }))
+                }))
         };
 
         let pen = b(
             "tb-pen",
-            div().flex().flex_col().items_center().child(ic("pen", tool == Tool::Pen, true)).child(width_dots(tool == Tool::Pen)).into_any_element(),
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(ic("pen", tool == Tool::Pen, true))
+                .child(width_dots(tool == Tool::Pen))
+                .into_any_element(),
             tool == Tool::Pen,
             true,
         )
@@ -2431,34 +3173,58 @@ impl Papier {
             this.set_tool(Tool::Pen);
             cx.notify();
         }));
-        let eraser = b("tb-eraser", ic("eraser", tool == Tool::Eraser, true), tool == Tool::Eraser, true).on_click(cx.listener(|this, _, _, cx| {
+        let eraser = b(
+            "tb-eraser",
+            ic("eraser", tool == Tool::Eraser, true),
+            tool == Tool::Eraser,
+            true,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
             this.set_tool(Tool::Eraser);
             cx.notify();
         }));
-        let hl = b("tb-hl", ic("highlighter", tool == Tool::Highlighter, true), tool == Tool::Highlighter, true).on_click(cx.listener(|this, _, _, cx| {
+        let hl = b(
+            "tb-hl",
+            ic("highlighter", tool == Tool::Highlighter, true),
+            tool == Tool::Highlighter,
+            true,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
             this.set_tool(Tool::Highlighter);
             cx.notify();
         }));
-        let fing = b("tb-finger", ic("finger", finger, true), finger, true).on_click(cx.listener(|this, _, _, cx| {
-            if let Some(dv) = this.dv() {
-                dv.finger_draws = !dv.finger_draws;
-                let on = dv.finger_draws;
-                this.toast(if on { "Finger draws — swipe the margin, or use two fingers, to move" } else { "Finger turns pages" });
-            }
-            cx.notify();
-        }));
-        let undo = b("tb-undo", ic("undo", false, can_undo), false, can_undo).on_click(cx.listener(|this, _, _, cx| {
-            this.undo(false, cx);
-            cx.notify();
-        }));
-        let redo = b("tb-redo", ic("redo", false, can_redo), false, can_redo).on_click(cx.listener(|this, _, _, cx| {
-            this.undo(true, cx);
-            cx.notify();
-        }));
-        let pi_mode = b("tb-pi", pi_glyph(pi_auto).into_any_element(), pi_auto, true).on_click(cx.listener(|this, _, _, cx| {
-            this.pi_toggle_mode(cx);
-            cx.notify();
-        }));
+        let fing = b("tb-finger", ic("finger", finger, true), finger, true).on_click(cx.listener(
+            |this, _, _, cx| {
+                if let Some(dv) = this.dv() {
+                    dv.finger_draws = !dv.finger_draws;
+                    let on = dv.finger_draws;
+                    this.toast(if on {
+                        "Finger draws — swipe the margin, or use two fingers, to move"
+                    } else {
+                        "Finger turns pages"
+                    });
+                }
+                cx.notify();
+            },
+        ));
+        let undo = b("tb-undo", ic("undo", false, can_undo), false, can_undo).on_click(
+            cx.listener(|this, _, _, cx| {
+                this.undo(false, cx);
+                cx.notify();
+            }),
+        );
+        let redo = b("tb-redo", ic("redo", false, can_redo), false, can_redo).on_click(
+            cx.listener(|this, _, _, cx| {
+                this.undo(true, cx);
+                cx.notify();
+            }),
+        );
+        let pi_mode = b("tb-pi", pi_glyph(pi_auto).into_any_element(), pi_auto, true).on_click(
+            cx.listener(|this, _, _, cx| {
+                this.pi_toggle_mode(cx);
+                cx.notify();
+            }),
+        );
         let nudge = b(
             "tb-nudge",
             div()
@@ -2466,7 +3232,13 @@ impl Papier {
                 .flex_col()
                 .items_center()
                 .child(svg().path(icon("up")).size(px(15.0)).text_color(c(BLACK)))
-                .child(div().font_family(MONO).text_size(px(7.5)).line_height(px(8.0)).child("NUDGE"))
+                .child(
+                    div()
+                        .font_family(MONO)
+                        .text_size(px(7.5))
+                        .line_height(px(8.0))
+                        .child("NUDGE"),
+                )
                 .into_any_element(),
             false,
             true,
@@ -2478,7 +3250,11 @@ impl Papier {
         let font_label: String = font.chars().take(2).collect::<String>();
         let font_btn = b(
             "tb-font",
-            div().text_size(px(16.0)).font_weight(gpui::FontWeight::SEMIBOLD).child(capitalize(&font_label)).into_any_element(),
+            div()
+                .text_size(px(16.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(capitalize(&font_label))
+                .into_any_element(),
             false,
             true,
         )
@@ -2486,27 +3262,49 @@ impl Papier {
             this.pi_cycle_font(cx);
             cx.notify();
         }));
-        let prev = b("tb-prev", ic("up", false, !first), false, !first).on_click(cx.listener(|this, _, window, cx| {
-            this.turn(-1, window, cx);
-            cx.notify();
-        }));
-        let goto = b("tb-goto", ic("hash", false, true), false, true).on_click(cx.listener(|this, _, _, cx| {
-            this.dialog = Some(Dialog::GoTo { digits: String::new() });
-            cx.notify();
-        }));
-        let next = b("tb-next", ic("down", false, !last), false, !last).on_click(cx.listener(|this, _, window, cx| {
-            this.turn(1, window, cx);
-            cx.notify();
-        }));
-        let add = b("tb-add", ic("add-page", false, true), false, true).on_click(cx.listener(|this, _, window, cx| {
-            this.add_page(window, cx);
-            cx.notify();
-        }));
-        let view = b("tb-view", ic(if spread { "scroll" } else { "spread" }, false, true), false, true).on_click(cx.listener(|this, _, _, cx| {
+        let prev = b("tb-prev", ic("up", false, !first), false, !first).on_click(cx.listener(
+            |this, _, window, cx| {
+                this.turn(-1, window, cx);
+                cx.notify();
+            },
+        ));
+        let goto = b("tb-goto", ic("hash", false, true), false, true).on_click(cx.listener(
+            |this, _, _, cx| {
+                this.dialog = Some(Dialog::GoTo {
+                    digits: String::new(),
+                });
+                cx.notify();
+            },
+        ));
+        let next = b("tb-next", ic("down", false, !last), false, !last).on_click(cx.listener(
+            |this, _, window, cx| {
+                this.turn(1, window, cx);
+                cx.notify();
+            },
+        ));
+        let add = b("tb-add", ic("add-page", false, true), false, true).on_click(cx.listener(
+            |this, _, window, cx| {
+                this.add_page(window, cx);
+                cx.notify();
+            },
+        ));
+        let view = b(
+            "tb-view",
+            ic(if spread { "scroll" } else { "spread" }, false, true),
+            false,
+            true,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
             this.toggle_view();
             cx.notify();
         }));
-        let fit = b("tb-fit", ic("fit", zoomed && !spread, !spread), zoomed && !spread, !spread).on_click(cx.listener(|this, _, _, cx| {
+        let fit = b(
+            "tb-fit",
+            ic("fit", zoomed && !spread, !spread),
+            zoomed && !spread,
+            !spread,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
             let vp = this.viewport;
             if let Some(dv) = this.dv() {
                 dv.toggle_fit(vp);
@@ -2515,7 +3313,8 @@ impl Papier {
             }
             cx.notify();
         }));
-        let home = b("tb-home", ic("home", false, true), false, true).on_click(cx.listener(|this, _, _, cx| this.go_home(cx)));
+        let home = b("tb-home", ic("home", false, true), false, true)
+            .on_click(cx.listener(|this, _, _, cx| this.go_home(cx)));
 
         div()
             .absolute()
@@ -2560,32 +3359,70 @@ impl Papier {
 
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
-    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+    c.next()
+        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+        .unwrap_or_default()
 }
 
 /// The tablet's pixel Pi: a blocky P with an i tucked into its lower-right.
 fn pi_glyph(active: bool) -> impl IntoElement {
-    const ROWS: [[bool; 4]; 5] =
-        [[true, true, true, false], [true, false, true, false], [true, true, false, true], [true, false, false, true], [true, false, false, true]];
+    const ROWS: [[bool; 4]; 5] = [
+        [true, true, true, false],
+        [true, false, true, false],
+        [true, true, false, true],
+        [true, false, false, true],
+        [true, false, false, true],
+    ];
     let cell = 4.0;
     let color = c(if active { WHITE } else { BLACK });
-    div().flex().flex_col().children(ROWS.iter().map(move |row| {
-        div().flex().children(row.iter().map(move |on| div().size(px(cell)).when(*on, |d| d.bg(color))))
-    }))
+    div()
+        .flex()
+        .flex_col()
+        .children(ROWS.iter().map(move |row| {
+            div().flex().children(
+                row.iter()
+                    .map(move |on| div().size(px(cell)).when(*on, |d| d.bg(color))),
+            )
+        }))
 }
 
 fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<gpui::Pixels> {
-    Bounds { origin: point(px(x), px(y)), size: size(px(w.max(0.0)), px(h)) }
+    Bounds {
+        origin: point(px(x), px(y)),
+        size: size(px(w.max(0.0)), px(h)),
+    }
 }
 
 /// One sheet of paper: edge, paper, its page image (stretched to `w` when
 /// the leaf is foreshortened).
-fn sheet(window: &mut Window, x: f32, y: f32, w: f32, h: f32, img: Option<&Arc<RenderImage>>, paper_rgb: u32) {
+fn sheet(
+    window: &mut Window,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    img: Option<&Arc<RenderImage>>,
+    paper_rgb: u32,
+) {
     if w < 0.5 {
         return;
     }
-    window.paint_quad(quad(rect(x - 1.0, y - 1.0, w + 2.0, h + 2.0), px(0.0), c(PAGE_EDGE), px(0.0), c(PAGE_EDGE), Default::default()));
-    window.paint_quad(quad(rect(x, y, w, h), px(0.0), c(paper_rgb), px(0.0), c(paper_rgb), Default::default()));
+    window.paint_quad(quad(
+        rect(x - 1.0, y - 1.0, w + 2.0, h + 2.0),
+        px(0.0),
+        c(PAGE_EDGE),
+        px(0.0),
+        c(PAGE_EDGE),
+        Default::default(),
+    ));
+    window.paint_quad(quad(
+        rect(x, y, w, h),
+        px(0.0),
+        c(paper_rgb),
+        px(0.0),
+        c(paper_rgb),
+        Default::default(),
+    ));
     if let Some(img) = img {
         let _ = window.paint_image(rect(x, y, w, h), Corners::default(), img.clone(), 0, false);
     }
@@ -2598,10 +3435,23 @@ fn shade(window: &mut Window, x: f32, y: f32, w: f32, h: f32, a0: f32, a1: f32) 
     }
     let bg = gpui::linear_gradient(
         90.0,
-        gpui::linear_color_stop(gpui::Hsla::from(gpui::rgba((a0.clamp(0.0, 1.0) * 255.0) as u32)), 0.0),
-        gpui::linear_color_stop(gpui::Hsla::from(gpui::rgba((a1.clamp(0.0, 1.0) * 255.0) as u32)), 1.0),
+        gpui::linear_color_stop(
+            gpui::Hsla::from(gpui::rgba((a0.clamp(0.0, 1.0) * 255.0) as u32)),
+            0.0,
+        ),
+        gpui::linear_color_stop(
+            gpui::Hsla::from(gpui::rgba((a1.clamp(0.0, 1.0) * 255.0) as u32)),
+            1.0,
+        ),
     );
-    window.paint_quad(quad(rect(x, y, w, h), px(0.0), bg, px(0.0), gpui::transparent_black(), Default::default()));
+    window.paint_quad(quad(
+        rect(x, y, w, h),
+        px(0.0),
+        bg,
+        px(0.0),
+        gpui::transparent_black(),
+        Default::default(),
+    ));
 }
 
 /// The book's gutter: paper curving into the spine on both pages.
@@ -2649,9 +3499,22 @@ struct TurnPaint {
 /// One GPU draw for the page curl.
 enum Op {
     /// An image at a rect, optionally clipped.
-    Img { img: Arc<RenderImage>, x: f32, y: f32, w: f32, h: f32, clip: Option<(f32, f32, f32, f32)> },
+    Img {
+        img: Arc<RenderImage>,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        clip: Option<(f32, f32, f32, f32)>,
+    },
     /// Darken a rect (black at alpha `a`).
-    Dim { x: f32, y: f32, w: f32, h: f32, a: f32 },
+    Dim {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        a: f32,
+    },
     /// A horizontal gradient of black: alpha a0 at the left to a1 at the right.
     Grad { x: f32, w: f32, a0: f32, a1: f32 },
 }
@@ -2679,24 +3542,51 @@ impl TurnPaint {
             sheet(window, spine, y, w, h, self.base_r.as_ref(), paper_rgb);
         }
         if !self.ops.is_empty() {
-            let spread = gpui::ContentMask { bounds: rect(spine - w, y, 2.0 * w, h) };
+            let spread = gpui::ContentMask {
+                bounds: rect(spine - w, y, 2.0 * w, h),
+            };
             window.with_content_mask(Some(spread), |window| {
                 for (i, op) in self.ops.iter().enumerate() {
                     if i == self.gutter_after {
                         gutter(window, spine, y, w, h, self.has_right);
                     }
                     match op {
-                        Op::Img { img, x, y, w, h, clip } => {
+                        Op::Img {
+                            img,
+                            x,
+                            y,
+                            w,
+                            h,
+                            clip,
+                        } => {
                             let draw = |window: &mut Window| {
-                                let _ = window.paint_image(rect(*x, *y, *w, *h), Corners::default(), img.clone(), 0, false);
+                                let _ = window.paint_image(
+                                    rect(*x, *y, *w, *h),
+                                    Corners::default(),
+                                    img.clone(),
+                                    0,
+                                    false,
+                                );
                             };
                             match clip {
-                                Some((cx, cy, cw, ch)) => window.with_content_mask(Some(gpui::ContentMask { bounds: rect(*cx, *cy, *cw, *ch) }), draw),
+                                Some((cx, cy, cw, ch)) => window.with_content_mask(
+                                    Some(gpui::ContentMask {
+                                        bounds: rect(*cx, *cy, *cw, *ch),
+                                    }),
+                                    draw,
+                                ),
                                 None => draw(window),
                             }
                         }
                         Op::Dim { x, y, w, h, a } if *a > 0.002 => {
-                            window.paint_quad(quad(rect(*x, *y, *w, *h), px(0.0), gpui::rgba((a.clamp(0.0, 1.0) * 255.0) as u32), px(0.0), gpui::transparent_black(), Default::default()));
+                            window.paint_quad(quad(
+                                rect(*x, *y, *w, *h),
+                                px(0.0),
+                                gpui::rgba((a.clamp(0.0, 1.0) * 255.0) as u32),
+                                px(0.0),
+                                gpui::transparent_black(),
+                                Default::default(),
+                            ));
                         }
                         Op::Grad { x, w, a0, a1 } => shade(window, *x, y, *w, h, *a0, *a1),
                         _ => {}
@@ -2709,13 +3599,31 @@ impl TurnPaint {
             return;
         }
         if self.front_full {
-            sheet(window, self.front_slot, y, w, h, self.front.as_ref(), paper_rgb);
+            sheet(
+                window,
+                self.front_slot,
+                y,
+                w,
+                h,
+                self.front.as_ref(),
+                paper_rgb,
+            );
         }
         for &(i, sx, v, sw, sh) in &self.strips {
-            let Some(slice) = self.slices.get(i) else { continue };
-            let mask = gpui::ContentMask { bounds: rect(sx, y + v, sw, sh) };
+            let Some(slice) = self.slices.get(i) else {
+                continue;
+            };
+            let mask = gpui::ContentMask {
+                bounds: rect(sx, y + v, sw, sh),
+            };
             window.with_content_mask(Some(mask), |window| {
-                let _ = window.paint_image(rect(self.front_slot, y + v, w, sh), Corners::default(), slice.clone(), 0, false);
+                let _ = window.paint_image(
+                    rect(self.front_slot, y + v, w, sh),
+                    Corners::default(),
+                    slice.clone(),
+                    0,
+                    false,
+                );
             });
         }
         // Over the leaf's flat part, as at rest (painted under it, the leaf
@@ -2723,11 +3631,26 @@ impl TurnPaint {
         // covers it where the leaf has lifted.
         gutter(window, spine, y, w, h, self.has_right);
         if let Some(b) = &self.back_draw {
-            let mask = gpui::ContentMask { bounds: rect(b.x0, y, b.x1 - b.x0, h) };
+            let mask = gpui::ContentMask {
+                bounds: rect(b.x0, y, b.x1 - b.x0, h),
+            };
             window.with_content_mask(Some(mask), |window| {
-                let _ = window.paint_image(rect(b.img_x, y, w, h), Corners::default(), b.img.clone(), 0, false);
+                let _ = window.paint_image(
+                    rect(b.img_x, y, w, h),
+                    Corners::default(),
+                    b.img.clone(),
+                    0,
+                    false,
+                );
                 if b.dim > 0.002 {
-                    window.paint_quad(quad(rect(b.x0, y, b.x1 - b.x0, h), px(0.0), gpui::rgba((b.dim * 255.0) as u32), px(0.0), gpui::transparent_black(), Default::default()));
+                    window.paint_quad(quad(
+                        rect(b.x0, y, b.x1 - b.x0, h),
+                        px(0.0),
+                        gpui::rgba((b.dim * 255.0) as u32),
+                        px(0.0),
+                        gpui::transparent_black(),
+                        Default::default(),
+                    ));
                 }
                 if b.fold_a > 0.002 {
                     // darkest at the fold, fading away from it
@@ -2739,14 +3662,22 @@ impl TurnPaint {
                 }
             });
         }
-        let spread = gpui::ContentMask { bounds: rect(spine - w, y, 2.0 * w, h) };
+        let spread = gpui::ContentMask {
+            bounds: rect(spine - w, y, 2.0 * w, h),
+        };
         window.with_content_mask(Some(spread), |window| {
             for &(sx, sw, a0, a1) in &self.shading {
                 shade(window, sx, y, sw, h, a0, a1);
             }
         });
         if let Some((img, (cx, cy, cw, ch))) = &self.curl {
-            let _ = window.paint_image(rect(spine - w + cx, y + cy, *cw, *ch), Corners::default(), img.clone(), 0, false);
+            let _ = window.paint_image(
+                rect(spine - w + cx, y + cy, *cw, *ch),
+                Corners::default(),
+                img.clone(),
+                0,
+                false,
+            );
         }
     }
 }
@@ -2757,7 +3688,9 @@ fn fill(window: &mut Window, poly: &[(f32, f32)], rgb: u32, alpha: f32) {
     }
     // non-zero, like the raster: where a stroke crosses itself the
     // overlap stays ink (even-odd would punch a hole in it)
-    let mut pb = PathBuilder::fill().with_style(gpui::PathStyle::Fill(gpui::FillOptions::default().with_fill_rule(gpui::FillRule::NonZero)));
+    let mut pb = PathBuilder::fill().with_style(gpui::PathStyle::Fill(
+        gpui::FillOptions::default().with_fill_rule(gpui::FillRule::NonZero),
+    ));
     pb.move_to(point(px(poly[0].0), px(poly[0].1)));
     for &(x, y) in &poly[1..] {
         pb.line_to(point(px(x), px(y)));
@@ -2780,4 +3713,3 @@ fn ring(window: &mut Window, x: f32, y: f32, r: f32, rgb: u32) {
         window.paint_path(path, c(rgb));
     }
 }
-
